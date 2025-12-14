@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-GenoMAX2 API Server v2.0
-========================
-Added: Intakes CRUD, OS support, Goals/Modules with IDs
+GenoMAX2 API Server v2.2.0
+==========================
+Added: API Key authentication for /intakes* endpoints
 """
 
 import os
 import uuid
 import re
 from datetime import datetime
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List, Optional
@@ -18,10 +18,13 @@ from sqlalchemy import text
 
 from genomax_engine import GenoMAXEngine, UserProfile, Gender
 
+# API Key from environment
+ADMIN_API_KEY = os.getenv("ADMIN_API_KEY")
+
 app = FastAPI(
     title="GenoMAX2 API",
     description="Gender-Optimized Biological Operating System - Recommendation Engine",
-    version="2.1.0"
+    version="2.2.0"
 )
 
 app.add_middleware(
@@ -33,6 +36,36 @@ app.add_middleware(
 )
 
 engine = GenoMAXEngine()
+
+
+# ============================================================================
+# API KEY AUTHENTICATION
+# ============================================================================
+
+async def verify_admin_api_key(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
+    """
+    Verify API key for admin endpoints.
+    If ADMIN_API_KEY is not set in environment, allow all requests (dev mode).
+    If set, require matching X-API-Key header.
+    """
+    # If no API key configured, allow all (dev mode)
+    if not ADMIN_API_KEY:
+        return True
+    
+    # API key is configured - require it
+    if not x_api_key:
+        raise HTTPException(
+            status_code=401,
+            detail="Missing X-API-Key header. Admin endpoints require authentication."
+        )
+    
+    if x_api_key != ADMIN_API_KEY:
+        raise HTTPException(
+            status_code=401,
+            detail="Invalid API key"
+        )
+    
+    return True
 
 
 # ============================================================================
@@ -128,14 +161,14 @@ async def startup_event():
 
 
 # ============================================================================
-# BASIC ENDPOINTS
+# BASIC ENDPOINTS (No auth required)
 # ============================================================================
 
 @app.get("/")
 async def root():
     return {
         "service": "GenoMAX2 Recommendation Engine",
-        "version": "2.0.0",
+        "version": "2.2.0",
         "status": "operational"
     }
 
@@ -143,21 +176,21 @@ async def root():
 async def health_check():
     return {
         "status": "healthy",
-        "version": "2.0.0",
+        "version": "2.2.0",
         "timestamp": datetime.utcnow().isoformat() + "Z"
     }
 
 @app.get("/version")
 async def get_version():
     return {
-        "version": "2.1.0",
+        "version": "2.2.0",
         "api": "GenoMAX2",
-        "features": ["intakes", "os_support", "goals_ids", "modules_ids", "batch_interactions"]
+        "features": ["intakes", "os_support", "goals_ids", "modules_ids", "batch_interactions", "admin_auth"]
     }
 
 
 # ============================================================================
-# GOALS & MODULES (with IDs + legacy support)
+# GOALS & MODULES (No auth required)
 # ============================================================================
 
 @app.get("/goals")
@@ -208,12 +241,12 @@ async def get_modules():
 
 
 # ============================================================================
-# INTAKES CRUD
+# INTAKES CRUD (Admin auth required)
 # ============================================================================
 
-@app.post("/intakes")
+@app.post("/intakes", dependencies=[Depends(verify_admin_api_key)])
 async def create_intake(request: IntakeCreateRequest):
-    """Create a new intake"""
+    """Create a new intake (requires X-API-Key header)"""
     import json
     
     intake_id = f"int_{uuid.uuid4().hex[:12]}"
@@ -238,9 +271,9 @@ async def create_intake(request: IntakeCreateRequest):
         "created_at": created_at.isoformat() + "Z"
     }
 
-@app.get("/intakes")
+@app.get("/intakes", dependencies=[Depends(verify_admin_api_key)])
 async def list_intakes(status: Optional[IntakeStatusEnum] = None, limit: int = 50, offset: int = 0):
-    """List intakes for queue view"""
+    """List intakes for queue view (requires X-API-Key header)"""
     import json
     
     with engine.engine.connect() as conn:
@@ -296,9 +329,9 @@ async def list_intakes(status: Optional[IntakeStatusEnum] = None, limit: int = 5
             "total": total
         }
 
-@app.get("/intakes/{intake_id}")
+@app.get("/intakes/{intake_id}", dependencies=[Depends(verify_admin_api_key)])
 async def get_intake(intake_id: str):
-    """Get full intake details"""
+    """Get full intake details (requires X-API-Key header)"""
     import json
     
     with engine.engine.connect() as conn:
@@ -326,9 +359,9 @@ async def get_intake(intake_id: str):
             "status": row[5]
         }
 
-@app.patch("/intakes/{intake_id}/status")
+@app.patch("/intakes/{intake_id}/status", dependencies=[Depends(verify_admin_api_key)])
 async def update_intake_status(intake_id: str, request: IntakeUpdateStatusRequest):
-    """Update intake status"""
+    """Update intake status (requires X-API-Key header)"""
     with engine.engine.connect() as conn:
         # Check exists
         check = conn.execute(text("SELECT id FROM intakes WHERE id = :id"), {'id': intake_id})
@@ -344,7 +377,7 @@ async def update_intake_status(intake_id: str, request: IntakeUpdateStatusReques
 
 
 # ============================================================================
-# RECOMMEND (with OS support)
+# RECOMMEND (No auth required)
 # ============================================================================
 
 @app.post("/recommend")
@@ -389,7 +422,7 @@ async def get_recommendations(request: RecommendationRequest):
 
 
 # ============================================================================
-# INTERACTIONS
+# INTERACTIONS (No auth required)
 # ============================================================================
 
 @app.post("/check-interactions")
@@ -487,7 +520,7 @@ async def check_drug_interactions_batch(request: DrugCheckBatchRequest):
 
 
 # ============================================================================
-# INGREDIENTS
+# INGREDIENTS (No auth required)
 # ============================================================================
 
 @app.get("/ingredient/{ingredient_name}")
@@ -572,7 +605,7 @@ async def get_ingredient_details(ingredient_name: str):
 
 
 # ============================================================================
-# PRODUCTS
+# PRODUCTS (No auth required)
 # ============================================================================
 
 @app.get("/products")
@@ -612,12 +645,11 @@ async def get_all_products():
 if __name__ == "__main__":
     import uvicorn
     print("\n" + "=" * 50)
-    print("GenoMAX2 API Server v2.0")
+    print("GenoMAX2 API Server v2.2.0")
     print("=" * 50)
-    print("\nNew Features:")
-    print("  - Intakes CRUD (/intakes)")
-    print("  - OS support in /recommend")
-    print("  - Goals & Modules with IDs")
+    print("\nNew in v2.2.0:")
+    print("  - API Key auth for /intakes* endpoints")
+    print(f"\nADMIN_API_KEY: {'SET' if ADMIN_API_KEY else 'NOT SET (dev mode - no auth)'}")
     print("\nStarting server at http://localhost:8000")
     print("Swagger UI at http://localhost:8000/docs")
     print("\nPress Ctrl+C to stop\n")

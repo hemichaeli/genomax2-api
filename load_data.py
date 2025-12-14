@@ -10,7 +10,7 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 
 # Your local PostgreSQL connection
-DB_URL = 'postgresql://postgres:1!Qaz2wsx@localhost:5432/genomax2'
+DB_URL = os.getenv('DATABASE_URL', 'postgresql://postgres:1!Qaz2wsx@localhost:5432/genomax2')
 engine = create_engine(DB_URL)
 
 # Get the directory where this script is located
