@@ -21,7 +21,7 @@ from genomax_engine import GenoMAXEngine, UserProfile, Gender
 app = FastAPI(
     title="GenoMAX2 API",
     description="Gender-Optimized Biological Operating System - Recommendation Engine",
-    version="2.0.0"
+    version="2.1.0"
 )
 
 app.add_middleware(
@@ -69,6 +69,10 @@ class RecommendationRequest(BaseModel):
 class DrugCheckRequest(BaseModel):
     ingredient_name: str
     medications: List[str]
+
+class DrugCheckBatchRequest(BaseModel):
+    ingredients: List[str] = Field(..., min_items=1)
+    medications: List[str] = Field(default=[])
 
 class IntakeCreateRequest(BaseModel):
     os: OSEnum
@@ -146,9 +150,9 @@ async def health_check():
 @app.get("/version")
 async def get_version():
     return {
-        "version": "2.0.0",
+        "version": "2.1.0",
         "api": "GenoMAX2",
-        "features": ["intakes", "os_support", "goals_ids", "modules_ids"]
+        "features": ["intakes", "os_support", "goals_ids", "modules_ids", "batch_interactions"]
     }
 
 
@@ -414,6 +418,70 @@ async def check_drug_interactions(request: DrugCheckRequest):
         }
     except HTTPException:
         raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/check-interactions-batch")
+async def check_drug_interactions_batch(request: DrugCheckBatchRequest):
+    """Check drug interactions for multiple ingredients at once"""
+    try:
+        results = []
+        
+        for ingredient_name in request.ingredients:
+            # Look up ingredient
+            with engine.engine.connect() as conn:
+                result = conn.execute(text(
+                    "SELECT id FROM ingredients WHERE LOWER(name) = LOWER(:name)"
+                ), {'name': ingredient_name})
+                row = result.fetchone()
+            
+            if not row:
+                # Ingredient not found - mark as safe with note
+                results.append({
+                    "ingredient": ingredient_name,
+                    "medications_checked": request.medications,
+                    "interactions_found": 0,
+                    "interactions": [],
+                    "safe": True,
+                    "note": "Ingredient not found in database"
+                })
+                continue
+            
+            ingredient_id = row[0]
+            
+            # If no medications, all are safe
+            if not request.medications:
+                results.append({
+                    "ingredient": ingredient_name,
+                    "medications_checked": [],
+                    "interactions_found": 0,
+                    "interactions": [],
+                    "safe": True
+                })
+                continue
+            
+            # Check interactions using existing logic
+            warnings = engine._check_drug_interactions(ingredient_id, request.medications)
+            results.append({
+                "ingredient": ingredient_name,
+                "medications_checked": request.medications,
+                "interactions_found": len(warnings),
+                "interactions": warnings,
+                "safe": len(warnings) == 0
+            })
+        
+        # Calculate totals
+        total_checked = len(results)
+        total_safe = sum(1 for r in results if r["safe"])
+        total_warnings = total_checked - total_safe
+        
+        return {
+            "results": results,
+            "total_checked": total_checked,
+            "total_safe": total_safe,
+            "total_warnings": total_warnings
+        }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
