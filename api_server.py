@@ -38,7 +38,7 @@ from sqlalchemy.sql import func
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:password@localhost:5432/genomax2")
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
-API_VERSION = "3.0.1"
+API_VERSION = "3.0.2"
 ALGORITHM_VERSION = "2.0"
 
 # Fix for Railway PostgreSQL URL
@@ -320,16 +320,25 @@ class ScoringEngine:
         if not ingredient_goals or not user_goals:
             return 0.0, []
         
-        # Normalize user goals
-        user_goals_lower = [g.lower().replace("_", " ").replace("-", " ") for g in user_goals]
+        # Normalize user goals - remove special chars for comparison
+        def normalize(s):
+            return s.lower().replace("_", " ").replace("-", " ").replace("&", "").replace("  ", " ").strip()
+        
+        user_goals_normalized = [normalize(g) for g in user_goals]
         
         matched = []
         for ig in ingredient_goals:
-            goal_name_lower = ig['goal_name'].lower()
-            goal_slug = ig.get('goal_slug', '').lower().replace("-", " ")
+            goal_name_norm = normalize(ig['goal_name'])
+            goal_slug_norm = normalize(ig.get('goal_slug', '') or '')
             
-            for ug in user_goals_lower:
-                if ug in goal_name_lower or goal_name_lower in ug or ug == goal_slug:
+            for ug in user_goals_normalized:
+                # Check various match conditions
+                if (ug == goal_name_norm or 
+                    ug == goal_slug_norm or
+                    ug in goal_name_norm or 
+                    goal_name_norm in ug or
+                    ug in goal_slug_norm or
+                    goal_slug_norm in ug):
                     matched.append(ig)
                     break
         
