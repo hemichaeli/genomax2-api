@@ -38,7 +38,7 @@ from sqlalchemy.sql import func
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:password@localhost:5432/genomax2")
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
-API_VERSION = "3.0.2"
+API_VERSION = "3.1.0"
 ALGORITHM_VERSION = "2.0"
 
 # Fix for Railway PostgreSQL URL
@@ -218,6 +218,75 @@ class IntakeListResponse(BaseModel):
     total: int
     limit: int
     offset: int
+
+# --- Suppliers & Products ---
+class SupplierCreate(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    code: str = Field(..., min_length=1, max_length=20)  # "supliful", "fullscript"
+    api_endpoint: Optional[str] = None
+    api_key_env: Optional[str] = None  # Environment variable name for API key
+    website_url: Optional[str] = None
+    notes: Optional[str] = None
+
+class SupplierResponse(BaseModel):
+    id: int
+    name: str
+    code: str
+    api_endpoint: Optional[str] = None
+    website_url: Optional[str] = None
+    is_active: bool
+    product_count: Optional[int] = 0
+    created_at: datetime
+
+class ProductCreate(BaseModel):
+    supplier_id: int
+    ingredient_id: int
+    sku: str = Field(..., min_length=1, max_length=50)
+    name: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = None
+    dose_per_unit: Optional[str] = None  # "400mg", "1000 IU"
+    units_per_package: Optional[int] = None  # 60, 90, 120
+    form: Optional[str] = None  # "capsule", "tablet", "powder", "liquid"
+    price: Optional[float] = None
+    currency: str = "USD"
+    url: Optional[str] = None
+    image_url: Optional[str] = None
+    in_stock: bool = True
+    is_preferred: bool = False  # Primary product for this ingredient
+
+class ProductResponse(BaseModel):
+    id: int
+    supplier_id: int
+    supplier_name: Optional[str] = None
+    supplier_code: Optional[str] = None
+    ingredient_id: int
+    ingredient_name: Optional[str] = None
+    sku: str
+    name: str
+    description: Optional[str] = None
+    dose_per_unit: Optional[str] = None
+    units_per_package: Optional[int] = None
+    form: Optional[str] = None
+    price: Optional[float] = None
+    currency: str = "USD"
+    url: Optional[str] = None
+    image_url: Optional[str] = None
+    in_stock: bool
+    is_preferred: bool
+    created_at: datetime
+
+class ProductUpdate(BaseModel):
+    name: Optional[str] = None
+    description: Optional[str] = None
+    dose_per_unit: Optional[str] = None
+    units_per_package: Optional[int] = None
+    form: Optional[str] = None
+    price: Optional[float] = None
+    currency: Optional[str] = None
+    url: Optional[str] = None
+    image_url: Optional[str] = None
+    in_stock: Optional[bool] = None
+    is_preferred: Optional[bool] = None
 
 # =============================================================================
 # SCORING CONSTANTS
@@ -891,6 +960,16 @@ async def get_version(db: Session = Depends(get_db)):
     except:
         modules_count = 0
     
+    try:
+        suppliers_count = db.execute(text("SELECT COUNT(*) FROM suppliers WHERE is_active = TRUE")).fetchone()[0]
+    except:
+        suppliers_count = 0
+    
+    try:
+        products_count = db.execute(text("SELECT COUNT(*) FROM products")).fetchone()[0]
+    except:
+        products_count = 0
+    
     return {
         "version": API_VERSION,
         "api": "GenoMAX2",
@@ -903,12 +982,16 @@ async def get_version(db: Session = Depends(get_db)):
             "confidence_levels",
             "explainability",
             "batch_interactions",
-            "admin_auth"
+            "admin_auth",
+            "suppliers",
+            "products_sku"
         ],
         "data": {
             "ingredients": ing_count,
             "goals": goals_count,
-            "os_modules": modules_count
+            "os_modules": modules_count,
+            "suppliers": suppliers_count,
+            "products": products_count
         }
     }
 
@@ -1753,6 +1836,426 @@ async def check_interactions_batch(
 
 
 # =============================================================================
+# SUPPLIERS ENDPOINTS
+# =============================================================================
+
+@app.get("/suppliers")
+async def list_suppliers(
+    include_inactive: bool = False,
+    db: Session = Depends(get_db)
+):
+    """List all suppliers."""
+    
+    where_clause = "" if include_inactive else "WHERE is_active = TRUE"
+    
+    result = db.execute(text(f"""
+        SELECT s.id, s.name, s.code, s.api_endpoint, s.website_url, s.is_active, s.created_at,
+               (SELECT COUNT(*) FROM products p WHERE p.supplier_id = s.id) as product_count
+        FROM suppliers s
+        {where_clause}
+        ORDER BY s.name
+    """)).fetchall()
+    
+    return {
+        "suppliers": [
+            {
+                "id": row[0],
+                "name": row[1],
+                "code": row[2],
+                "api_endpoint": row[3],
+                "website_url": row[4],
+                "is_active": row[5],
+                "created_at": row[6].isoformat() if row[6] else None,
+                "product_count": row[7]
+            }
+            for row in result
+        ]
+    }
+
+
+@app.post("/suppliers", status_code=201, dependencies=[Depends(verify_admin_api_key)])
+async def create_supplier(supplier: SupplierCreate, db: Session = Depends(get_db)):
+    """Create a new supplier."""
+    
+    now = datetime.utcnow()
+    
+    try:
+        result = db.execute(text("""
+            INSERT INTO suppliers (name, code, api_endpoint, api_key_env, website_url, notes, created_at, updated_at)
+            VALUES (:name, :code, :api_endpoint, :api_key_env, :website_url, :notes, :now, :now)
+            RETURNING id
+        """), {
+            "name": supplier.name,
+            "code": supplier.code.lower(),
+            "api_endpoint": supplier.api_endpoint,
+            "api_key_env": supplier.api_key_env,
+            "website_url": supplier.website_url,
+            "notes": supplier.notes,
+            "now": now
+        })
+        supplier_id = result.fetchone()[0]
+        db.commit()
+        
+        return {
+            "id": supplier_id,
+            "name": supplier.name,
+            "code": supplier.code.lower(),
+            "message": "Supplier created successfully"
+        }
+    except Exception as e:
+        db.rollback()
+        if "unique" in str(e).lower():
+            raise HTTPException(status_code=409, detail=f"Supplier with code '{supplier.code}' already exists")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/suppliers/{supplier_id}")
+async def get_supplier(supplier_id: int, db: Session = Depends(get_db)):
+    """Get supplier details with products."""
+    
+    result = db.execute(text("""
+        SELECT id, name, code, api_endpoint, website_url, notes, is_active, created_at
+        FROM suppliers WHERE id = :id
+    """), {"id": supplier_id}).fetchone()
+    
+    if not result:
+        raise HTTPException(status_code=404, detail=f"Supplier with id {supplier_id} not found")
+    
+    # Get products for this supplier
+    products = db.execute(text("""
+        SELECT p.id, p.sku, p.name, p.ingredient_id, i.name as ingredient_name,
+               p.dose_per_unit, p.price, p.currency, p.in_stock, p.is_preferred
+        FROM products p
+        JOIN ingredients i ON p.ingredient_id = i.id
+        WHERE p.supplier_id = :supplier_id
+        ORDER BY i.name
+    """), {"supplier_id": supplier_id}).fetchall()
+    
+    return {
+        "id": result[0],
+        "name": result[1],
+        "code": result[2],
+        "api_endpoint": result[3],
+        "website_url": result[4],
+        "notes": result[5],
+        "is_active": result[6],
+        "created_at": result[7].isoformat() if result[7] else None,
+        "products": [
+            {
+                "id": p[0],
+                "sku": p[1],
+                "name": p[2],
+                "ingredient_id": p[3],
+                "ingredient_name": p[4],
+                "dose_per_unit": p[5],
+                "price": float(p[6]) if p[6] else None,
+                "currency": p[7],
+                "in_stock": p[8],
+                "is_preferred": p[9]
+            }
+            for p in products
+        ]
+    }
+
+
+@app.patch("/suppliers/{supplier_id}", dependencies=[Depends(verify_admin_api_key)])
+async def update_supplier(
+    supplier_id: int,
+    is_active: Optional[bool] = None,
+    db: Session = Depends(get_db)
+):
+    """Update supplier (activate/deactivate)."""
+    
+    if is_active is not None:
+        db.execute(text("""
+            UPDATE suppliers SET is_active = :is_active, updated_at = :now
+            WHERE id = :id
+        """), {"id": supplier_id, "is_active": is_active, "now": datetime.utcnow()})
+        db.commit()
+    
+    return {"message": "Supplier updated", "id": supplier_id, "is_active": is_active}
+
+
+# =============================================================================
+# PRODUCTS ENDPOINTS
+# =============================================================================
+
+@app.get("/products")
+async def list_products(
+    supplier_id: Optional[int] = None,
+    ingredient_id: Optional[int] = None,
+    in_stock_only: bool = False,
+    preferred_only: bool = False,
+    limit: int = Query(100, ge=1, le=500),
+    db: Session = Depends(get_db)
+):
+    """List products with optional filters."""
+    
+    where_clauses = []
+    params = {"limit": limit}
+    
+    if supplier_id:
+        where_clauses.append("p.supplier_id = :supplier_id")
+        params["supplier_id"] = supplier_id
+    
+    if ingredient_id:
+        where_clauses.append("p.ingredient_id = :ingredient_id")
+        params["ingredient_id"] = ingredient_id
+    
+    if in_stock_only:
+        where_clauses.append("p.in_stock = TRUE")
+    
+    if preferred_only:
+        where_clauses.append("p.is_preferred = TRUE")
+    
+    where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
+    
+    result = db.execute(text(f"""
+        SELECT p.id, p.supplier_id, s.name as supplier_name, s.code as supplier_code,
+               p.ingredient_id, i.name as ingredient_name,
+               p.sku, p.name, p.description, p.dose_per_unit, p.units_per_package,
+               p.form, p.price, p.currency, p.url, p.image_url,
+               p.in_stock, p.is_preferred, p.created_at
+        FROM products p
+        JOIN suppliers s ON p.supplier_id = s.id
+        JOIN ingredients i ON p.ingredient_id = i.id
+        WHERE {where_sql}
+        ORDER BY i.name, p.is_preferred DESC
+        LIMIT :limit
+    """), params).fetchall()
+    
+    return {
+        "products": [
+            {
+                "id": row[0],
+                "supplier_id": row[1],
+                "supplier_name": row[2],
+                "supplier_code": row[3],
+                "ingredient_id": row[4],
+                "ingredient_name": row[5],
+                "sku": row[6],
+                "name": row[7],
+                "description": row[8],
+                "dose_per_unit": row[9],
+                "units_per_package": row[10],
+                "form": row[11],
+                "price": float(row[12]) if row[12] else None,
+                "currency": row[13],
+                "url": row[14],
+                "image_url": row[15],
+                "in_stock": row[16],
+                "is_preferred": row[17],
+                "created_at": row[18].isoformat() if row[18] else None
+            }
+            for row in result
+        ],
+        "total": len(result)
+    }
+
+
+@app.post("/products", status_code=201, dependencies=[Depends(verify_admin_api_key)])
+async def create_product(product: ProductCreate, db: Session = Depends(get_db)):
+    """Create a new product (SKU)."""
+    
+    # Verify supplier exists
+    supplier = db.execute(text("SELECT id, name FROM suppliers WHERE id = :id"), 
+                          {"id": product.supplier_id}).fetchone()
+    if not supplier:
+        raise HTTPException(status_code=404, detail=f"Supplier with id {product.supplier_id} not found")
+    
+    # Verify ingredient exists
+    ingredient = db.execute(text("SELECT id, name FROM ingredients WHERE id = :id"),
+                           {"id": product.ingredient_id}).fetchone()
+    if not ingredient:
+        raise HTTPException(status_code=404, detail=f"Ingredient with id {product.ingredient_id} not found")
+    
+    now = datetime.utcnow()
+    
+    try:
+        result = db.execute(text("""
+            INSERT INTO products (
+                supplier_id, ingredient_id, sku, name, description,
+                dose_per_unit, units_per_package, form, price, currency,
+                url, image_url, in_stock, is_preferred, created_at, updated_at
+            ) VALUES (
+                :supplier_id, :ingredient_id, :sku, :name, :description,
+                :dose_per_unit, :units_per_package, :form, :price, :currency,
+                :url, :image_url, :in_stock, :is_preferred, :now, :now
+            )
+            RETURNING id
+        """), {
+            "supplier_id": product.supplier_id,
+            "ingredient_id": product.ingredient_id,
+            "sku": product.sku,
+            "name": product.name,
+            "description": product.description,
+            "dose_per_unit": product.dose_per_unit,
+            "units_per_package": product.units_per_package,
+            "form": product.form,
+            "price": product.price,
+            "currency": product.currency,
+            "url": product.url,
+            "image_url": product.image_url,
+            "in_stock": product.in_stock,
+            "is_preferred": product.is_preferred,
+            "now": now
+        })
+        product_id = result.fetchone()[0]
+        db.commit()
+        
+        return {
+            "id": product_id,
+            "sku": product.sku,
+            "name": product.name,
+            "ingredient_name": ingredient[1],
+            "supplier_name": supplier[1],
+            "message": "Product created successfully"
+        }
+    except Exception as e:
+        db.rollback()
+        if "unique" in str(e).lower():
+            raise HTTPException(status_code=409, detail=f"Product with SKU '{product.sku}' already exists for this supplier")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/products/{product_id}")
+async def get_product(product_id: int, db: Session = Depends(get_db)):
+    """Get product details."""
+    
+    result = db.execute(text("""
+        SELECT p.id, p.supplier_id, s.name as supplier_name, s.code as supplier_code,
+               p.ingredient_id, i.name as ingredient_name,
+               p.sku, p.name, p.description, p.dose_per_unit, p.units_per_package,
+               p.form, p.price, p.currency, p.url, p.image_url,
+               p.in_stock, p.is_preferred, p.created_at
+        FROM products p
+        JOIN suppliers s ON p.supplier_id = s.id
+        JOIN ingredients i ON p.ingredient_id = i.id
+        WHERE p.id = :id
+    """), {"id": product_id}).fetchone()
+    
+    if not result:
+        raise HTTPException(status_code=404, detail=f"Product with id {product_id} not found")
+    
+    return {
+        "id": result[0],
+        "supplier_id": result[1],
+        "supplier_name": result[2],
+        "supplier_code": result[3],
+        "ingredient_id": result[4],
+        "ingredient_name": result[5],
+        "sku": result[6],
+        "name": result[7],
+        "description": result[8],
+        "dose_per_unit": result[9],
+        "units_per_package": result[10],
+        "form": result[11],
+        "price": float(result[12]) if result[12] else None,
+        "currency": result[13],
+        "url": result[14],
+        "image_url": result[15],
+        "in_stock": result[16],
+        "is_preferred": result[17],
+        "created_at": result[18].isoformat() if result[18] else None
+    }
+
+
+@app.patch("/products/{product_id}", dependencies=[Depends(verify_admin_api_key)])
+async def update_product(product_id: int, update: ProductUpdate, db: Session = Depends(get_db)):
+    """Update a product."""
+    
+    # Build dynamic update
+    updates = []
+    params = {"id": product_id, "now": datetime.utcnow()}
+    
+    update_dict = update.dict(exclude_unset=True)
+    for key, value in update_dict.items():
+        updates.append(f"{key} = :{key}")
+        params[key] = value
+    
+    if not updates:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    
+    updates.append("updated_at = :now")
+    update_sql = ", ".join(updates)
+    
+    result = db.execute(text(f"UPDATE products SET {update_sql} WHERE id = :id RETURNING id"), params)
+    
+    if not result.fetchone():
+        raise HTTPException(status_code=404, detail=f"Product with id {product_id} not found")
+    
+    db.commit()
+    
+    return {"message": "Product updated", "id": product_id}
+
+
+@app.delete("/products/{product_id}", dependencies=[Depends(verify_admin_api_key)])
+async def delete_product(product_id: int, db: Session = Depends(get_db)):
+    """Delete a product."""
+    
+    result = db.execute(text("DELETE FROM products WHERE id = :id RETURNING id"), {"id": product_id})
+    
+    if not result.fetchone():
+        raise HTTPException(status_code=404, detail=f"Product with id {product_id} not found")
+    
+    db.commit()
+    
+    return {"message": "Product deleted", "id": product_id}
+
+
+@app.get("/ingredients/{ingredient_id}/products")
+async def get_ingredient_products(
+    ingredient_id: int,
+    in_stock_only: bool = True,
+    db: Session = Depends(get_db)
+):
+    """Get all products for a specific ingredient."""
+    
+    # Verify ingredient exists
+    ingredient = db.execute(text("SELECT id, name FROM ingredients WHERE id = :id"),
+                           {"id": ingredient_id}).fetchone()
+    if not ingredient:
+        raise HTTPException(status_code=404, detail=f"Ingredient with id {ingredient_id} not found")
+    
+    where_clause = "AND p.in_stock = TRUE" if in_stock_only else ""
+    
+    result = db.execute(text(f"""
+        SELECT p.id, p.supplier_id, s.name as supplier_name, s.code as supplier_code,
+               p.sku, p.name, p.dose_per_unit, p.units_per_package, p.form,
+               p.price, p.currency, p.url, p.in_stock, p.is_preferred
+        FROM products p
+        JOIN suppliers s ON p.supplier_id = s.id
+        WHERE p.ingredient_id = :ingredient_id {where_clause}
+        ORDER BY p.is_preferred DESC, p.price ASC
+    """), {"ingredient_id": ingredient_id}).fetchall()
+    
+    return {
+        "ingredient_id": ingredient_id,
+        "ingredient_name": ingredient[1],
+        "products": [
+            {
+                "id": row[0],
+                "supplier_id": row[1],
+                "supplier_name": row[2],
+                "supplier_code": row[3],
+                "sku": row[4],
+                "name": row[5],
+                "dose_per_unit": row[6],
+                "units_per_package": row[7],
+                "form": row[8],
+                "price": float(row[9]) if row[9] else None,
+                "currency": row[10],
+                "url": row[11],
+                "in_stock": row[12],
+                "is_preferred": row[13]
+            }
+            for row in result
+        ],
+        "total": len(result)
+    }
+
+
+# =============================================================================
 # DATABASE SCHEMA CREATION
 # =============================================================================
 
@@ -1832,6 +2335,46 @@ async def startup():
                 summary JSON NOT NULL,
                 full_output JSON,
                 created_at TIMESTAMP DEFAULT NOW()
+            )
+        """))
+        
+        # Suppliers table
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS suppliers (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(100) NOT NULL,
+                code VARCHAR(20) NOT NULL UNIQUE,
+                api_endpoint VARCHAR(255),
+                api_key_env VARCHAR(50),
+                website_url VARCHAR(255),
+                notes TEXT,
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        """))
+        
+        # Products table (SKUs)
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS products (
+                id SERIAL PRIMARY KEY,
+                supplier_id INTEGER REFERENCES suppliers(id),
+                ingredient_id INTEGER REFERENCES ingredients(id),
+                sku VARCHAR(50) NOT NULL,
+                name VARCHAR(200) NOT NULL,
+                description TEXT,
+                dose_per_unit VARCHAR(50),
+                units_per_package INTEGER,
+                form VARCHAR(30),
+                price DECIMAL(10,2),
+                currency VARCHAR(3) DEFAULT 'USD',
+                url VARCHAR(500),
+                image_url VARCHAR(500),
+                in_stock BOOLEAN DEFAULT TRUE,
+                is_preferred BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW(),
+                UNIQUE(supplier_id, sku)
             )
         """))
         
