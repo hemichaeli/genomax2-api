@@ -38,7 +38,7 @@ from sqlalchemy.sql import func
 
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:password@localhost:5432/genomax2")
 ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
-API_VERSION = "3.0.0"
+API_VERSION = "3.0.1"
 ALGORITHM_VERSION = "2.0"
 
 # Fix for Railway PostgreSQL URL
@@ -294,7 +294,7 @@ class ScoringEngine:
     def get_ingredient_goals(self, ingredient_id: int) -> List[dict]:
         """Get goal mappings for an ingredient."""
         result = self.db.execute(text("""
-            SELECT ig.goal_id, g.name, ig.relevance_score, ig.relevance_source
+            SELECT ig.goal_id, g.name, g.slug, ig.relevance_score, ig.relevance_source
             FROM ingredient_goals ig
             JOIN goals g ON ig.goal_id = g.id
             WHERE ig.ingredient_id = :ing_id
@@ -304,8 +304,9 @@ class ScoringEngine:
             {
                 "goal_id": row[0],
                 "goal_name": row[1],
-                "relevance_score": float(row[2]),
-                "relevance_source": row[3]
+                "goal_slug": row[2],
+                "relevance_score": float(row[3]),
+                "relevance_source": row[4]
             }
             for row in result.fetchall()
         ]
