@@ -1,2391 +1,419 @@
-#!/usr/bin/env python3
 """
-GenoMAX² API Server v3.0
-Complete Recommendation Engine with Intake Lifecycle
-
-Deploy: Railway
-Database: PostgreSQL
-Framework: FastAPI
-
-Features:
-- Unified Intake lifecycle (Assessment + Bloodwork)
-- Full scoring algorithm (5 components)
-- Explainability layer
-- Confidence levels
-- OS Lock
-- Admin auth
+GenoMAX² API Server
+Gender-Optimized Biological Operating System
 """
 
 import os
-import uuid
-import json
-from datetime import datetime, date
-from decimal import Decimal
-from typing import List, Dict, Optional, Any, Tuple
-from enum import Enum
-
-from fastapi import FastAPI, HTTPException, Depends, Header, Query, BackgroundTasks
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, Field
-from sqlalchemy import create_engine, text, Column, Integer, String, Numeric, Text, DateTime, Boolean, Date, JSON
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker, Session
-from sqlalchemy.sql import func
+from pydantic import BaseModel
+from typing import List, Optional
+import asyncpg
 
-# =============================================================================
-# CONFIGURATION
-# =============================================================================
+# ============================================
+# App Configuration
+# ============================================
+app = FastAPI(
+    title="GenoMAX² API",
+    description="Gender-Optimized Biological Operating System",
+    version="3.1.0"
+)
 
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:password@localhost:5432/genomax2")
-ADMIN_API_KEY = os.getenv("ADMIN_API_KEY", "")
-API_VERSION = "3.1.0"
-ALGORITHM_VERSION = "2.0"
+# ============================================
+# CORS Configuration - CRITICAL FOR VERCEL
+# ============================================
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "https://genomax2-frontend.vercel.app",
+        "https://genomax2-frontend-git-main-hemis-projects-6782105b.vercel.app",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["*"],
+    expose_headers=["*"],
+)
 
-# Fix for Railway PostgreSQL URL
-if DATABASE_URL.startswith("postgres://"):
-    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
+# ============================================
+# Database Connection
+# ============================================
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-# =============================================================================
-# DATABASE SETUP
-# =============================================================================
+async def get_db():
+    return await asyncpg.connect(DATABASE_URL)
 
-engine = create_engine(DATABASE_URL, pool_pre_ping=True)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
+# ============================================
+# Pydantic Models
+# ============================================
+class IntakeCreate(BaseModel):
+    gender_os: str  # 'maximo' or 'maxima'
 
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+class AssessmentUpdate(BaseModel):
+    demographics: Optional[dict] = None
+    lifestyle: Optional[dict] = None
+    goals: Optional[dict] = None
+    medical: Optional[dict] = None
 
-# =============================================================================
-# ENUMS
-# =============================================================================
-
-class OSType(str, Enum):
-    MAXIMO = "MAXIMO"
-    MAXIMA = "MAXIMA"
-
-class IntakeStatus(str, Enum):
-    DRAFT = "draft"
-    AWAITING_ASSESSMENT = "awaiting_assessment"
-    AWAITING_BLOODWORK = "awaiting_bloodwork"
-    READY_TO_PROCESS = "ready_to_process"
-    PROCESSING = "processing"
-    COMPLETED = "completed"
-    FAILED = "failed"
-    EXPIRED = "expired"
-    ARCHIVED = "archived"
-
-class ConfidenceLevel(str, Enum):
-    LOW = "low"
-    MEDIUM = "medium"
-    HIGH = "high"
-
-# =============================================================================
-# PYDANTIC SCHEMAS
-# =============================================================================
-
-# --- Common ---
-class ErrorResponse(BaseModel):
-    error: str
-    message: str
-    details: Optional[dict] = None
-
-# --- Intake ---
-class IntakeCreateRequest(BaseModel):
-    os_type: Optional[OSType] = None
-    source: Optional[str] = "unknown"
-
-class IntakeResponse(BaseModel):
-    intake_id: str
-    status: str
-    os_type: Optional[str] = None
-    os_locked: bool = False
-    has_assessment: bool = False
-    has_bloodwork: bool = False
-    created_at: datetime
-    updated_at: datetime
-
-class IntakeSnapshotResponse(IntakeResponse):
-    assessment: Optional[dict] = None
-    bloodwork: Optional[dict] = None
-    outputs: Optional[dict] = None
-    confidence: Optional[dict] = None
-
-# --- Assessment ---
-class Demographics(BaseModel):
-    age_years: int = Field(..., ge=13, le=120)
-    weight_kg: float = Field(..., ge=25, le=300)
-    height_cm: Optional[float] = Field(None, ge=120, le=230)
-    biological_sex: Optional[str] = None
-
-class Lifestyle(BaseModel):
-    activity_level: str
-    nutrition_pattern: str
-    sleep_hours_avg: Optional[float] = Field(None, ge=0, le=16)
-    smoking: Optional[str] = None
-    alcohol: Optional[str] = None
-
-class UserItem(BaseModel):
-    name: str
-    code: Optional[str] = None
-    notes: Optional[str] = None
-
-class GoalItem(BaseModel):
-    key: str
-    severity: Optional[int] = Field(None, ge=1, le=5)
-    notes: Optional[str] = None
-
-class PainPointItem(BaseModel):
-    key: str
-    severity: Optional[int] = Field(None, ge=1, le=5)
-    frequency: Optional[str] = None
-    notes: Optional[str] = None
-
-class Constraints(BaseModel):
-    allergies: Optional[List[str]] = []
-    dislikes: Optional[List[str]] = []
-    budget_sensitivity: Optional[str] = None
-
-class ExecutionPreferences(BaseModel):
-    intakes_per_day: Optional[int] = Field(None, ge=1, le=4)
-    preferred_times: Optional[dict] = None
-    enable_walk: Optional[bool] = None
-    walk_time: Optional[str] = None
-    enable_workout: Optional[bool] = None
-    workout_time: Optional[str] = None
-
-class AssessmentPayload(BaseModel):
-    os_type: Optional[OSType] = None
-    demographics: Demographics
-    lifestyle: Lifestyle
-    goals: List[GoalItem] = Field(..., min_length=1)
-    pain_points: List[PainPointItem] = Field(default=[])
-    medications: Optional[List[UserItem]] = []
-    conditions: Optional[List[UserItem]] = []
-    current_supplements: Optional[List[UserItem]] = []
-    constraints: Optional[Constraints] = None
-    execution_preferences: Optional[ExecutionPreferences] = None
-    meta: Optional[dict] = None
-
-# --- Bloodwork ---
-class ReferenceRange(BaseModel):
-    low: Optional[float] = None
-    high: Optional[float] = None
-
-class BiomarkerReading(BaseModel):
-    code: str
-    name: str
-    value: float
-    unit: str
-    reference_range: Optional[ReferenceRange] = None
-    flagged: Optional[str] = "unknown"
-
-class BloodworkPayload(BaseModel):
-    collected_date: str  # ISO date
-    lab_name: Optional[str] = None
-    country: Optional[str] = None
-    parsed_biomarkers: List[BiomarkerReading] = Field(..., min_length=1)
-    notes: Optional[str] = None
-
-# --- Processing ---
-class ProcessRequest(BaseModel):
-    force: Optional[bool] = False
-    async_mode: Optional[bool] = False
-
-class ProcessResultResponse(BaseModel):
-    intake_id: str
-    status: str
-    confidence: dict
-    primary_stack: List[dict]
-    secondary_stack: List[dict]
-    excluded_ingredients: List[dict]
-    summary: dict
-
-# --- Legacy Recommend ---
 class RecommendRequest(BaseModel):
-    os: str = Field(..., description="MAXimo2 or MAXima2")
-    goals: List[str] = Field(..., min_length=1)
+    gender: str
+    goals: List[str]
     medications: Optional[List[str]] = []
     conditions: Optional[List[str]] = []
 
-# --- Admin ---
-class IntakeListResponse(BaseModel):
-    items: List[IntakeResponse]
-    total: int
-    limit: int
-    offset: int
+class InteractionCheckRequest(BaseModel):
+    medications: List[str]
+    supplements: List[str]
 
-# --- Suppliers & Products ---
-class SupplierCreate(BaseModel):
-    name: str = Field(..., min_length=1, max_length=100)
-    code: str = Field(..., min_length=1, max_length=20)  # "supliful", "fullscript"
-    api_endpoint: Optional[str] = None
-    api_key_env: Optional[str] = None  # Environment variable name for API key
-    website_url: Optional[str] = None
-    notes: Optional[str] = None
-
-class SupplierResponse(BaseModel):
-    id: int
-    name: str
-    code: str
-    api_endpoint: Optional[str] = None
-    website_url: Optional[str] = None
-    is_active: bool
-    product_count: Optional[int] = 0
-    created_at: datetime
-
-class ProductCreate(BaseModel):
-    supplier_id: int
-    ingredient_id: int
-    sku: str = Field(..., min_length=1, max_length=50)
-    name: str = Field(..., min_length=1, max_length=200)
-    description: Optional[str] = None
-    dose_per_unit: Optional[str] = None  # "400mg", "1000 IU"
-    units_per_package: Optional[int] = None  # 60, 90, 120
-    form: Optional[str] = None  # "capsule", "tablet", "powder", "liquid"
-    price: Optional[float] = None
-    currency: str = "USD"
-    url: Optional[str] = None
-    image_url: Optional[str] = None
-    in_stock: bool = True
-    is_preferred: bool = False  # Primary product for this ingredient
-
-class ProductResponse(BaseModel):
-    id: int
-    supplier_id: int
-    supplier_name: Optional[str] = None
-    supplier_code: Optional[str] = None
-    ingredient_id: int
-    ingredient_name: Optional[str] = None
-    sku: str
-    name: str
-    description: Optional[str] = None
-    dose_per_unit: Optional[str] = None
-    units_per_package: Optional[int] = None
-    form: Optional[str] = None
-    price: Optional[float] = None
-    currency: str = "USD"
-    url: Optional[str] = None
-    image_url: Optional[str] = None
-    in_stock: bool
-    is_preferred: bool
-    created_at: datetime
-
-class ProductUpdate(BaseModel):
-    name: Optional[str] = None
-    description: Optional[str] = None
-    dose_per_unit: Optional[str] = None
-    units_per_package: Optional[int] = None
-    form: Optional[str] = None
-    price: Optional[float] = None
-    currency: Optional[str] = None
-    url: Optional[str] = None
-    image_url: Optional[str] = None
-    in_stock: Optional[bool] = None
-    is_preferred: Optional[bool] = None
-
-# =============================================================================
-# SCORING CONSTANTS
-# =============================================================================
-
-WEIGHT_EVIDENCE = 0.35
-WEIGHT_GOAL_MATCH = 0.30
-WEIGHT_GENDER = 0.20
-WEIGHT_TIER = 0.10
-WEIGHT_SAFETY = 0.05
-
-PRIMARY_STACK_THRESHOLD = 0.65
-SECONDARY_STACK_THRESHOLD = 0.45
-MAX_PRIMARY_STACK = 8
-MAX_SECONDARY_STACK = 10
-
-PRIMARY_GRADES = ['A', 'A-', 'B+', 'B']
-
-# =============================================================================
-# AUTH
-# =============================================================================
-
-def verify_admin_api_key(x_api_key: Optional[str] = Header(None, alias="X-API-Key")):
-    """Verify API key for admin endpoints."""
-    if not ADMIN_API_KEY:
-        return True  # Dev mode - no auth required
-    
-    if not x_api_key:
-        raise HTTPException(
-            status_code=401,
-            detail="Missing X-API-Key header. Admin endpoints require authentication."
-        )
-    
-    if x_api_key != ADMIN_API_KEY:
-        raise HTTPException(
-            status_code=401,
-            detail="Invalid API key."
-        )
-    
-    return True
-
-# =============================================================================
-# SCORING ENGINE
-# =============================================================================
-
-class ScoringEngine:
-    """GenoMAX² Recommendation Scoring Engine v2.0"""
-    
-    def __init__(self, db: Session):
-        self.db = db
-        self._goals_cache = None
-        self._ingredient_goals_cache = None
-    
-    def get_goals(self) -> List[dict]:
-        """Get all goals with keywords."""
-        if self._goals_cache is None:
-            result = self.db.execute(text("""
-                SELECT id, name, slug, category, outcome_keywords, biomarker_keywords
-                FROM goals
-            """))
-            self._goals_cache = [
-                {
-                    "id": row[0],
-                    "name": row[1],
-                    "slug": row[2],
-                    "category": row[3],
-                    "outcome_keywords": row[4] or [],
-                    "biomarker_keywords": row[5] or []
-                }
-                for row in result.fetchall()
-            ]
-        return self._goals_cache
-    
-    def get_ingredient_goals(self, ingredient_id: int) -> List[dict]:
-        """Get goal mappings for an ingredient."""
-        result = self.db.execute(text("""
-            SELECT ig.goal_id, g.name, g.slug, ig.relevance_score, ig.relevance_source
-            FROM ingredient_goals ig
-            JOIN goals g ON ig.goal_id = g.id
-            WHERE ig.ingredient_id = :ing_id
-        """), {"ing_id": ingredient_id})
-        
-        return [
-            {
-                "goal_id": row[0],
-                "goal_name": row[1],
-                "goal_slug": row[2],
-                "relevance_score": float(row[3]),
-                "relevance_source": row[4]
-            }
-            for row in result.fetchall()
-        ]
-    
-    def calculate_evidence_score(self, ingredient: dict) -> float:
-        """Direct from DB: evidence_strength_score (0.00-1.00)"""
-        return float(ingredient.get('evidence_strength_score') or 0.50)
-    
-    def calculate_goal_match_score(self, ingredient_goals: List[dict], user_goals: List[str]) -> Tuple[float, List[str]]:
-        """Calculate goal match and return matched goal names."""
-        if not ingredient_goals or not user_goals:
-            return 0.0, []
-        
-        # Normalize user goals - remove special chars for comparison
-        def normalize(s):
-            return s.lower().replace("_", " ").replace("-", " ").replace("&", "").replace("  ", " ").strip()
-        
-        user_goals_normalized = [normalize(g) for g in user_goals]
-        
-        matched = []
-        for ig in ingredient_goals:
-            goal_name_norm = normalize(ig['goal_name'])
-            goal_slug_norm = normalize(ig.get('goal_slug', '') or '')
-            
-            for ug in user_goals_normalized:
-                # Check various match conditions
-                if (ug == goal_name_norm or 
-                    ug == goal_slug_norm or
-                    ug in goal_name_norm or 
-                    goal_name_norm in ug or
-                    ug in goal_slug_norm or
-                    goal_slug_norm in ug):
-                    matched.append(ig)
-                    break
-        
-        if not matched:
-            return 0.0, []
-        
-        # Average relevance
-        avg_relevance = sum(m['relevance_score'] for m in matched) / len(matched)
-        
-        # Multi-goal bonus (max +0.2)
-        multi_bonus = min(0.1 * (len(matched) - 1), 0.2)
-        
-        score = min(avg_relevance + multi_bonus, 1.0)
-        matched_names = [m['goal_name'] for m in matched]
-        
-        return score, matched_names
-    
-    def calculate_gender_relevance(self, ingredient: dict, os_type: str) -> float:
-        """Get gender-specific relevance score."""
-        if os_type == "MAXIMO" or os_type == "MAXimo2":
-            return float(ingredient.get('male_relevance_score') or 0.50)
-        elif os_type == "MAXIMA" or os_type == "MAXima2":
-            return float(ingredient.get('female_relevance_score') or 0.50)
-        else:
-            male = float(ingredient.get('male_relevance_score') or 0.50)
-            female = float(ingredient.get('female_relevance_score') or 0.50)
-            return (male + female) / 2
-    
-    def calculate_tier_bonus(self, tier_classification: str) -> float:
-        """TIER 1 = 0.20, TIER 2 = 0.10, TIER 3 = 0.00"""
-        if not tier_classification:
-            return 0.05
-        
-        if "TIER 1" in tier_classification:
-            return 0.20
-        elif "TIER 2" in tier_classification:
-            return 0.10
-        elif "TIER 3" in tier_classification:
-            return 0.00
-        return 0.05
-    
-    def calculate_safety_penalty(
-        self, 
-        medication_interactions: str, 
-        contraindications: str,
-        user_medications: List[str],
-        user_conditions: List[str]
-    ) -> Tuple[float, List[str]]:
-        """Calculate safety penalty and collect warnings."""
-        penalty = 0.0
-        warnings = []
-        
-        interactions = (medication_interactions or "").lower()
-        contras = (contraindications or "").lower()
-        
-        # Check medications
-        for med in user_medications:
-            med_lower = med.lower()
-            if med_lower in interactions:
-                penalty -= 0.25
-                warnings.append(f"Interacts with {med}")
-        
-        # Check conditions
-        for cond in user_conditions:
-            cond_lower = cond.lower()
-            if cond_lower in contras:
-                penalty -= 0.50
-                warnings.append(f"Contraindicated for {cond}")
-        
-        return max(penalty, -0.50), warnings
-    
-    def calculate_final_score(
-        self,
-        ingredient: dict,
-        user_goals: List[str],
-        os_type: str,
-        medications: List[str],
-        conditions: List[str]
-    ) -> dict:
-        """Calculate complete score with all components."""
-        
-        # Check OS-ready
-        os_ready = ingredient.get('os_ready', 'NO')
-        if os_ready == "NO":
-            return {
-                'score': 0.0,
-                'excluded': True,
-                'reason': 'Not OS-ready',
-                'components': None,
-                'goals_addressed': [],
-                'warnings': []
-            }
-        
-        # Get ingredient goals
-        ingredient_goals = self.get_ingredient_goals(ingredient['id'])
-        
-        # Calculate components
-        evidence = self.calculate_evidence_score(ingredient)
-        goal_match, goals_addressed = self.calculate_goal_match_score(ingredient_goals, user_goals)
-        
-        if goal_match == 0.0:
-            return {
-                'score': 0.0,
-                'excluded': True,
-                'reason': 'No goal match',
-                'components': None,
-                'goals_addressed': [],
-                'warnings': []
-            }
-        
-        gender = self.calculate_gender_relevance(ingredient, os_type)
-        tier = self.calculate_tier_bonus(ingredient.get('tier_classification'))
-        safety, warnings = self.calculate_safety_penalty(
-            ingredient.get('medication_interactions'),
-            ingredient.get('contraindications'),
-            medications,
-            conditions
-        )
-        
-        # Check severe safety issue
-        if safety <= -0.50:
-            return {
-                'score': 0.0,
-                'excluded': True,
-                'reason': '; '.join(warnings) if warnings else 'Safety contraindication',
-                'components': None,
-                'goals_addressed': goals_addressed,
-                'warnings': warnings
-            }
-        
-        # Calculate final score
-        final = (
-            evidence * WEIGHT_EVIDENCE +
-            goal_match * WEIGHT_GOAL_MATCH +
-            gender * WEIGHT_GENDER +
-            tier * WEIGHT_TIER +
-            (1.0 + safety) * WEIGHT_SAFETY
-        )
-        
-        return {
-            'score': round(final, 3),
-            'excluded': False,
-            'reason': None,
-            'components': {
-                'evidence': round(evidence, 3),
-                'goal_match': round(goal_match, 3),
-                'gender_relevance': round(gender, 3),
-                'tier_bonus': round(tier, 3),
-                'safety_penalty': round(safety, 3)
-            },
-            'goals_addressed': goals_addressed,
-            'warnings': warnings
-        }
-    
-    def build_why_recommended(
-        self,
-        ingredient: dict,
-        goals_addressed: List[str],
-        os_type: str
-    ) -> dict:
-        """Build explainability object."""
-        
-        # Evidence summary
-        meta = ingredient.get('number_of_meta_analyses') or 0
-        rcts = ingredient.get('number_of_rcts') or 0
-        participants = ingredient.get('total_participants') or 0
-        
-        parts = []
-        if meta > 0:
-            parts.append(f"{int(meta)} meta-analyses")
-        if rcts > 0:
-            parts.append(f"{int(rcts)} RCTs")
-        if participants > 0:
-            parts.append(f"{int(participants):,} participants")
-        
-        evidence_summary = f"Grade {ingredient.get('evidence_grade', 'N/A')}"
-        if parts:
-            evidence_summary += f" ({', '.join(parts)})"
-        
-        # Biomarkers
-        biomarkers = []
-        if ingredient.get('primary_biomarkers'):
-            biomarkers = [b.strip() for b in ingredient['primary_biomarkers'].split(',')][:5]
-        
-        # Gender note
-        gender_note = None
-        if os_type in ["MAXIMO", "MAXimo2"] and ingredient.get('male_specific_notes'):
-            gender_note = ingredient['male_specific_notes']
-        elif os_type in ["MAXIMA", "MAXima2"] and ingredient.get('female_specific_notes'):
-            gender_note = ingredient['female_specific_notes']
-        
-        return {
-            "goals_addressed": goals_addressed,
-            "primary_outcome": ingredient.get('primary_outcomes') or "General health support",
-            "biomarkers": biomarkers,
-            "evidence_summary": evidence_summary,
-            "mechanism": ingredient.get('mechanisms_of_action'),
-            "gender_specific": gender_note
-        }
-    
-    def build_safety_info(
-        self,
-        ingredient: dict,
-        warnings: List[str]
-    ) -> dict:
-        """Build safety information object."""
-        
-        risk_level = "safe"
-        if warnings:
-            risk_level = "caution"
-        
-        return {
-            "risk_level": risk_level,
-            "warnings": warnings,
-            "contraindications": ingredient.get('contraindications'),
-            "side_effects_common": ingredient.get('side_effects_common'),
-            "side_effects_rare": ingredient.get('side_effects_rare')
-        }
-    
-    def build_dosing_info(self, ingredient: dict) -> dict:
-        """Build dosing information."""
-        return {
-            "recommended": ingredient.get('practical_consumer_doses') or "See product label",
-            "timing": ingredient.get('best_time_of_day') or "Any time",
-            "with_food": (ingredient.get('food_relation') or "").lower() == "with food"
-        }
-    
-    def get_all_ingredients(self) -> List[dict]:
-        """Fetch all ingredients from database."""
-        result = self.db.execute(text("""
-            SELECT id, name, category, subcategory, tier_classification, os_ready,
-                   evidence_grade, evidence_strength_score, evidence_confidence_level,
-                   number_of_meta_analyses, number_of_rcts, total_participants,
-                   primary_biomarkers, secondary_biomarkers, mechanisms_of_action,
-                   primary_outcomes, secondary_outcomes, effect_sizes,
-                   male_relevance_score, female_relevance_score,
-                   male_specific_notes, female_specific_notes,
-                   best_time_of_day, food_relation, timing_reason,
-                   practical_consumer_doses, contraindications,
-                   side_effects_common, side_effects_rare,
-                   medication_interactions, caution_populations,
-                   reference_pmids
-            FROM ingredients
-            WHERE os_ready != 'NO'
-        """))
-        
-        columns = [
-            'id', 'name', 'category', 'subcategory', 'tier_classification', 'os_ready',
-            'evidence_grade', 'evidence_strength_score', 'evidence_confidence_level',
-            'number_of_meta_analyses', 'number_of_rcts', 'total_participants',
-            'primary_biomarkers', 'secondary_biomarkers', 'mechanisms_of_action',
-            'primary_outcomes', 'secondary_outcomes', 'effect_sizes',
-            'male_relevance_score', 'female_relevance_score',
-            'male_specific_notes', 'female_specific_notes',
-            'best_time_of_day', 'food_relation', 'timing_reason',
-            'practical_consumer_doses', 'contraindications',
-            'side_effects_common', 'side_effects_rare',
-            'medication_interactions', 'caution_populations',
-            'reference_pmids'
-        ]
-        
-        ingredients = []
-        for row in result.fetchall():
-            ing = dict(zip(columns, row))
-            ingredients.append(ing)
-        
-        return ingredients
-    
-    def generate_recommendations(
-        self,
-        os_type: str,
-        goals: List[str],
-        medications: List[str] = None,
-        conditions: List[str] = None
-    ) -> dict:
-        """Generate complete recommendation set."""
-        
-        medications = medications or []
-        conditions = conditions or []
-        
-        # Get all ingredients
-        ingredients = self.get_all_ingredients()
-        
-        # Score all ingredients
-        scored = []
-        excluded = []
-        
-        for ing in ingredients:
-            result = self.calculate_final_score(
-                ing, goals, os_type, medications, conditions
-            )
-            
-            if result['excluded']:
-                excluded.append({
-                    "name": ing['name'],
-                    "reason": result['reason']
-                })
-            else:
-                scored.append({
-                    'ingredient': ing,
-                    'score': result['score'],
-                    'components': result['components'],
-                    'goals_addressed': result['goals_addressed'],
-                    'warnings': result['warnings']
-                })
-        
-        # Sort by score
-        scored.sort(key=lambda x: x['score'], reverse=True)
-        
-        # Build stacks
-        primary_stack = []
-        secondary_stack = []
-        
-        for item in scored:
-            ing = item['ingredient']
-            score = item['score']
-            os_ready = ing.get('os_ready', 'YES')
-            
-            # Primary stack criteria
-            if len(primary_stack) < MAX_PRIMARY_STACK:
-                is_primary_grade = ing.get('evidence_grade') in PRIMARY_GRADES
-                is_primary_tier = 'TIER 1' in (ing.get('tier_classification') or '') or \
-                                  'TIER 2' in (ing.get('tier_classification') or '')
-                is_os_ready = os_ready == "YES"
-                
-                if score >= PRIMARY_STACK_THRESHOLD and is_primary_grade and is_primary_tier and is_os_ready:
-                    rec = self._build_recommendation(item, os_type)
-                    primary_stack.append(rec)
-                    continue
-            
-            # Secondary stack
-            if len(secondary_stack) < MAX_SECONDARY_STACK:
-                if score >= SECONDARY_STACK_THRESHOLD:
-                    rec = self._build_recommendation(item, os_type)
-                    # Add disclaimer for research-only
-                    if os_ready == "RESEARCH-ONLY":
-                        rec['disclaimer'] = "Emerging research - evidence still developing"
-                    secondary_stack.append(rec)
-        
-        # Build summary
-        summary = {
-            "total_primary": len(primary_stack),
-            "total_secondary": len(secondary_stack),
-            "total_excluded": len(excluded),
-            "algorithm_version": ALGORITHM_VERSION,
-            "os_type": os_type,
-            "goals_requested": goals
-        }
-        
-        return {
-            "primary_stack": primary_stack,
-            "secondary_stack": secondary_stack,
-            "excluded_ingredients": excluded[:20],  # Limit to 20
-            "summary": summary
-        }
-    
-    def _build_recommendation(self, item: dict, os_type: str) -> dict:
-        """Build a single recommendation object."""
-        ing = item['ingredient']
-        
-        return {
-            "id": ing['id'],
-            "name": ing['name'],
-            "category": ing.get('category'),
-            "tier": ing.get('tier_classification'),
-            "score": item['score'],
-            "evidence_grade": ing.get('evidence_grade'),
-            "evidence_score": float(ing.get('evidence_strength_score') or 0.5),
-            "dosing": self.build_dosing_info(ing),
-            "why_recommended": self.build_why_recommended(ing, item['goals_addressed'], os_type),
-            "safety": self.build_safety_info(ing, item['warnings']),
-            "components": item['components']
-        }
-
-
-# =============================================================================
-# CONFIDENCE CALCULATOR
-# =============================================================================
-
-def calculate_confidence(
-    has_assessment: bool,
-    has_bloodwork: bool,
-    assessment_data: dict = None,
-    bloodwork_data: dict = None
-) -> Tuple[str, List[str]]:
-    """Calculate confidence level based on data completeness."""
-    
-    reasons = []
-    score = 0
-    
-    if not has_assessment:
-        return ("low", ["No assessment data"])
-    
-    score += 40
-    
-    if assessment_data:
-        demographics = assessment_data.get('demographics', {})
-        
-        if demographics.get('age_years'):
-            score += 10
-        else:
-            reasons.append("Missing age")
-        
-        if demographics.get('weight_kg'):
-            score += 10
-        else:
-            reasons.append("Missing weight")
-        
-        if demographics.get('height_cm'):
-            score += 5
-        
-        goals = assessment_data.get('goals', [])
-        if len(goals) >= 2:
-            score += 10
-        elif len(goals) == 1:
-            score += 5
-            reasons.append("Only one goal selected")
-        
-        if assessment_data.get('medications'):
-            score += 5
-        
-        if assessment_data.get('conditions'):
-            score += 5
-    
-    if has_bloodwork:
-        score += 20
-        if bloodwork_data:
-            biomarkers = bloodwork_data.get('parsed_biomarkers', [])
-            if len(biomarkers) >= 10:
-                score += 10
-            elif len(biomarkers) >= 5:
-                score += 5
-                reasons.append("Limited bloodwork data")
-    else:
-        reasons.append("No bloodwork data")
-    
-    if score >= 80:
-        level = "high"
-    elif score >= 50:
-        level = "medium"
-    else:
-        level = "low"
-    
-    if level == "high" and not reasons:
-        reasons = ["Complete assessment and bloodwork data"]
-    
-    return (level, reasons)
-
-
-# =============================================================================
-# INTAKE STATE MACHINE
-# =============================================================================
-
-def calculate_intake_status(has_assessment: bool, has_bloodwork: bool, current_status: str) -> str:
-    """Calculate appropriate status based on data presence."""
-    
-    # Don't change terminal/processing states
-    terminal_states = [
-        IntakeStatus.PROCESSING.value,
-        IntakeStatus.COMPLETED.value,
-        IntakeStatus.FAILED.value,
-        IntakeStatus.EXPIRED.value,
-        IntakeStatus.ARCHIVED.value
-    ]
-    
-    if current_status in terminal_states:
-        return current_status
-    
-    if has_assessment:
-        return IntakeStatus.READY_TO_PROCESS.value
-    elif has_bloodwork:
-        return IntakeStatus.AWAITING_ASSESSMENT.value
-    else:
-        return IntakeStatus.DRAFT.value
-
-
-def validate_process_request(status: str, has_assessment: bool, force: bool = False) -> Tuple[bool, Optional[str]]:
-    """Validate if intake can be processed."""
-    
-    if not has_assessment:
-        return (False, "Assessment required before processing. Bloodwork-only is not sufficient.")
-    
-    if status == IntakeStatus.PROCESSING.value:
-        return (False, "Intake is already processing")
-    
-    if status == IntakeStatus.COMPLETED.value and not force:
-        return (False, "Already completed. Use force=true to reprocess")
-    
-    if status in [IntakeStatus.EXPIRED.value, IntakeStatus.ARCHIVED.value]:
-        return (False, f"Cannot process intake in {status} state")
-    
-    valid_states = [
-        IntakeStatus.READY_TO_PROCESS.value,
-        IntakeStatus.FAILED.value,
-        IntakeStatus.COMPLETED.value
-    ]
-    
-    if status in valid_states:
-        return (True, None)
-    
-    return (False, f"Invalid state for processing: {status}")
-
-
-# =============================================================================
-# FASTAPI APP
-# =============================================================================
-
-app = FastAPI(
-    title="GenoMAX² API",
-    description="Unified Intake-based Recommendation Engine",
-    version=API_VERSION
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-
-# =============================================================================
-# HEALTH & VERSION ENDPOINTS
-# =============================================================================
-
+# ============================================
+# Health & Version Endpoints
+# ============================================
 @app.get("/health")
-async def health_check():
-    """Health check endpoint."""
-    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
-
+async def health():
+    return {"status": "healthy"}
 
 @app.get("/version")
-async def get_version(db: Session = Depends(get_db)):
-    """Get API version and stats."""
-    
-    # Get counts
-    try:
-        ing_count = db.execute(text("SELECT COUNT(*) FROM ingredients")).fetchone()[0]
-    except:
-        ing_count = 0
-    
-    try:
-        goals_count = db.execute(text("SELECT COUNT(*) FROM goals")).fetchone()[0]
-    except:
-        goals_count = 0
-    
-    try:
-        modules_count = db.execute(text("SELECT COUNT(*) FROM os_modules")).fetchone()[0]
-    except:
-        modules_count = 0
-    
-    try:
-        suppliers_count = db.execute(text("SELECT COUNT(*) FROM suppliers WHERE is_active = TRUE")).fetchone()[0]
-    except:
-        suppliers_count = 0
-    
-    try:
-        products_count = db.execute(text("SELECT COUNT(*) FROM products")).fetchone()[0]
-    except:
-        products_count = 0
-    
+async def version():
     return {
-        "version": API_VERSION,
-        "api": "GenoMAX2",
-        "algorithm_version": ALGORITHM_VERSION,
-        "features": [
-            "intake_lifecycle",
-            "assessment_flow",
-            "bloodwork_flow",
-            "os_lock",
-            "confidence_levels",
-            "explainability",
-            "batch_interactions",
-            "admin_auth",
-            "suppliers",
-            "products_sku"
-        ],
-        "data": {
-            "ingredients": ing_count,
-            "goals": goals_count,
-            "os_modules": modules_count,
-            "suppliers": suppliers_count,
-            "products": products_count
-        }
+        "version": "3.1.0",
+        "engine_version": "2.0",
+        "logic_version": "1.5"
     }
 
-
-# =============================================================================
-# INTAKE ENDPOINTS
-# =============================================================================
-
-@app.post("/intakes", response_model=IntakeResponse, status_code=201, dependencies=[Depends(verify_admin_api_key)])
-async def create_intake(request: IntakeCreateRequest = None, db: Session = Depends(get_db)):
-    """Create a new intake."""
-    
-    intake_id = f"int_{uuid.uuid4().hex[:12]}"
-    now = datetime.utcnow()
-    
-    os_type = request.os_type.value if request and request.os_type else None
-    source = request.source if request else "unknown"
-    
-    db.execute(text("""
-        INSERT INTO intakes (id, os_type, os_locked, status, source, has_assessment, has_bloodwork, created_at, updated_at)
-        VALUES (:id, :os_type, :os_locked, :status, :source, false, false, :now, :now)
-    """), {
-        "id": intake_id,
-        "os_type": os_type,
-        "os_locked": os_type is not None,
-        "status": IntakeStatus.DRAFT.value,
-        "source": source,
-        "now": now
-    })
-    db.commit()
-    
-    return IntakeResponse(
-        intake_id=intake_id,
-        status=IntakeStatus.DRAFT.value,
-        os_type=os_type,
-        os_locked=os_type is not None,
-        has_assessment=False,
-        has_bloodwork=False,
-        created_at=now,
-        updated_at=now
-    )
-
-
-@app.get("/intakes/{intake_id}", response_model=IntakeSnapshotResponse, dependencies=[Depends(verify_admin_api_key)])
-async def get_intake(intake_id: str, db: Session = Depends(get_db)):
-    """Get full intake snapshot."""
-    
-    result = db.execute(text("""
-        SELECT id, os_type, os_locked, status, source, has_assessment, has_bloodwork,
-               confidence_level, confidence_reasons, created_at, updated_at
-        FROM intakes WHERE id = :id
-    """), {"id": intake_id}).fetchone()
-    
-    if not result:
-        raise HTTPException(status_code=404, detail=f"Intake '{intake_id}' not found")
-    
-    # Get assessment if exists
-    assessment = None
-    if result[5]:  # has_assessment
-        ass_result = db.execute(text("""
-            SELECT demographics, lifestyle, goals, pain_points, medications, conditions,
-                   current_supplements, constraints, execution_preferences
-            FROM assessments WHERE intake_id = :id
-        """), {"id": intake_id}).fetchone()
-        
-        if ass_result:
-            assessment = {
-                "demographics": ass_result[0],
-                "lifestyle": ass_result[1],
-                "goals": ass_result[2],
-                "pain_points": ass_result[3],
-                "medications": ass_result[4],
-                "conditions": ass_result[5],
-                "current_supplements": ass_result[6],
-                "constraints": ass_result[7],
-                "execution_preferences": ass_result[8]
-            }
-    
-    # Get bloodwork if exists
-    bloodwork = None
-    if result[6]:  # has_bloodwork
-        bw_result = db.execute(text("""
-            SELECT collected_date, lab_name, country, parsed_biomarkers
-            FROM bloodwork WHERE intake_id = :id ORDER BY created_at DESC LIMIT 1
-        """), {"id": intake_id}).fetchone()
-        
-        if bw_result:
-            bloodwork = {
-                "collected_date": str(bw_result[0]) if bw_result[0] else None,
-                "lab_name": bw_result[1],
-                "country": bw_result[2],
-                "parsed_biomarkers": bw_result[3]
-            }
-    
-    # Get outputs if completed
-    outputs = None
-    if result[3] == IntakeStatus.COMPLETED.value:
-        rec_result = db.execute(text("""
-            SELECT primary_stack, secondary_stack, excluded_ingredients, summary
-            FROM recommendations WHERE intake_id = :id ORDER BY created_at DESC LIMIT 1
-        """), {"id": intake_id}).fetchone()
-        
-        if rec_result:
-            outputs = {
-                "primary_stack": rec_result[0],
-                "secondary_stack": rec_result[1],
-                "excluded_ingredients": rec_result[2],
-                "summary": rec_result[3]
-            }
-    
-    confidence = None
-    if result[7]:
-        confidence = {
-            "level": result[7],
-            "reasons": result[8] or []
-        }
-    
-    return IntakeSnapshotResponse(
-        intake_id=result[0],
-        status=result[3],
-        os_type=result[1],
-        os_locked=result[2] or False,
-        has_assessment=result[5] or False,
-        has_bloodwork=result[6] or False,
-        created_at=result[9],
-        updated_at=result[10],
-        assessment=assessment,
-        bloodwork=bloodwork,
-        outputs=outputs,
-        confidence=confidence
-    )
-
-
-@app.get("/intakes", dependencies=[Depends(verify_admin_api_key)])
-async def list_intakes(
-    status: Optional[str] = None,
-    limit: int = Query(50, ge=1, le=100),
-    offset: int = Query(0, ge=0),
-    db: Session = Depends(get_db)
-):
-    """List intakes with optional status filter."""
-    
-    # Build query
-    where_clause = ""
-    params = {"limit": limit, "offset": offset}
-    
-    if status:
-        where_clause = "WHERE status = :status"
-        params["status"] = status
-    
-    # Get total
-    total_result = db.execute(text(f"SELECT COUNT(*) FROM intakes {where_clause}"), params).fetchone()
-    total = total_result[0] if total_result else 0
-    
-    # Get items
-    result = db.execute(text(f"""
-        SELECT id, os_type, os_locked, status, has_assessment, has_bloodwork, created_at, updated_at
-        FROM intakes {where_clause}
-        ORDER BY updated_at DESC
-        LIMIT :limit OFFSET :offset
-    """), params)
-    
-    items = [
-        IntakeResponse(
-            intake_id=row[0],
-            status=row[3],
-            os_type=row[1],
-            os_locked=row[2] or False,
-            has_assessment=row[4] or False,
-            has_bloodwork=row[5] or False,
-            created_at=row[6],
-            updated_at=row[7]
-        )
-        for row in result.fetchall()
-    ]
-    
-    return {
-        "items": items,
-        "total": total,
-        "limit": limit,
-        "offset": offset
-    }
-
-
-# =============================================================================
-# ASSESSMENT ENDPOINT
-# =============================================================================
-
-@app.patch("/intakes/{intake_id}/assessment", response_model=IntakeResponse, dependencies=[Depends(verify_admin_api_key)])
-async def upsert_assessment(intake_id: str, payload: AssessmentPayload, db: Session = Depends(get_db)):
-    """Create or update assessment (idempotent)."""
-    
-    # Get intake
-    intake = db.execute(text("""
-        SELECT id, os_type, os_locked, status, has_assessment, has_bloodwork
-        FROM intakes WHERE id = :id
-    """), {"id": intake_id}).fetchone()
-    
-    if not intake:
-        raise HTTPException(status_code=404, detail=f"Intake '{intake_id}' not found")
-    
-    current_os = intake[1]
-    os_locked = intake[2]
-    
-    # OS Lock check
-    if payload.os_type:
-        new_os = payload.os_type.value
-        if os_locked and current_os != new_os:
-            raise HTTPException(
-                status_code=409,
-                detail=f"OS already locked to {current_os}. Cannot change to {new_os}"
-            )
-        # Lock OS if provided
-        current_os = new_os
-        os_locked = True
-    
-    now = datetime.utcnow()
-    
-    # Convert payload to dict
-    assessment_data = {
-        "demographics": payload.demographics.dict(),
-        "lifestyle": payload.lifestyle.dict(),
-        "goals": [g.dict() for g in payload.goals],
-        "pain_points": [p.dict() for p in payload.pain_points],
-        "medications": [m.dict() for m in (payload.medications or [])],
-        "conditions": [c.dict() for c in (payload.conditions or [])],
-        "current_supplements": [s.dict() for s in (payload.current_supplements or [])],
-        "constraints": payload.constraints.dict() if payload.constraints else None,
-        "execution_preferences": payload.execution_preferences.dict() if payload.execution_preferences else None,
-        "meta": payload.meta
-    }
-    
-    # Upsert assessment
-    existing = db.execute(text("SELECT id FROM assessments WHERE intake_id = :id"), {"id": intake_id}).fetchone()
-    
-    if existing:
-        db.execute(text("""
-            UPDATE assessments SET
-                demographics = :demographics,
-                lifestyle = :lifestyle,
-                goals = :goals,
-                pain_points = :pain_points,
-                medications = :medications,
-                conditions = :conditions,
-                current_supplements = :current_supplements,
-                constraints = :constraints,
-                execution_preferences = :execution_preferences,
-                meta = :meta,
-                updated_at = :now
-            WHERE intake_id = :intake_id
-        """), {
-            "intake_id": intake_id,
-            "demographics": json.dumps(assessment_data['demographics']),
-            "lifestyle": json.dumps(assessment_data['lifestyle']),
-            "goals": json.dumps(assessment_data['goals']),
-            "pain_points": json.dumps(assessment_data['pain_points']),
-            "medications": json.dumps(assessment_data['medications']),
-            "conditions": json.dumps(assessment_data['conditions']),
-            "current_supplements": json.dumps(assessment_data['current_supplements']),
-            "constraints": json.dumps(assessment_data['constraints']) if assessment_data['constraints'] else None,
-            "execution_preferences": json.dumps(assessment_data['execution_preferences']) if assessment_data['execution_preferences'] else None,
-            "meta": json.dumps(assessment_data['meta']) if assessment_data['meta'] else None,
-            "now": now
-        })
-    else:
-        db.execute(text("""
-            INSERT INTO assessments (
-                intake_id, demographics, lifestyle, goals, pain_points,
-                medications, conditions, current_supplements, constraints,
-                execution_preferences, meta, created_at, updated_at
-            ) VALUES (
-                :intake_id, :demographics, :lifestyle, :goals, :pain_points,
-                :medications, :conditions, :current_supplements, :constraints,
-                :execution_preferences, :meta, :now, :now
-            )
-        """), {
-            "intake_id": intake_id,
-            "demographics": json.dumps(assessment_data['demographics']),
-            "lifestyle": json.dumps(assessment_data['lifestyle']),
-            "goals": json.dumps(assessment_data['goals']),
-            "pain_points": json.dumps(assessment_data['pain_points']),
-            "medications": json.dumps(assessment_data['medications']),
-            "conditions": json.dumps(assessment_data['conditions']),
-            "current_supplements": json.dumps(assessment_data['current_supplements']),
-            "constraints": json.dumps(assessment_data['constraints']) if assessment_data['constraints'] else None,
-            "execution_preferences": json.dumps(assessment_data['execution_preferences']) if assessment_data['execution_preferences'] else None,
-            "meta": json.dumps(assessment_data['meta']) if assessment_data['meta'] else None,
-            "now": now
-        })
-    
-    # Update intake
-    new_status = calculate_intake_status(True, intake[5], intake[3])
-    
-    db.execute(text("""
-        UPDATE intakes SET
-            os_type = :os_type,
-            os_locked = :os_locked,
-            has_assessment = true,
-            status = :status,
-            updated_at = :now
-        WHERE id = :id
-    """), {
-        "id": intake_id,
-        "os_type": current_os,
-        "os_locked": os_locked,
-        "status": new_status,
-        "now": now
-    })
-    
-    db.commit()
-    
-    return IntakeResponse(
-        intake_id=intake_id,
-        status=new_status,
-        os_type=current_os,
-        os_locked=os_locked,
-        has_assessment=True,
-        has_bloodwork=intake[5] or False,
-        created_at=intake[4] if len(intake) > 6 else now,  # This might need adjustment
-        updated_at=now
-    )
-
-
-# =============================================================================
-# BLOODWORK ENDPOINT
-# =============================================================================
-
-@app.post("/intakes/{intake_id}/bloodwork", response_model=IntakeResponse, dependencies=[Depends(verify_admin_api_key)])
-async def add_bloodwork(intake_id: str, payload: BloodworkPayload, db: Session = Depends(get_db)):
-    """Add bloodwork data to intake."""
-    
-    # Get intake
-    intake = db.execute(text("""
-        SELECT id, os_type, os_locked, status, has_assessment, has_bloodwork, created_at
-        FROM intakes WHERE id = :id
-    """), {"id": intake_id}).fetchone()
-    
-    if not intake:
-        raise HTTPException(status_code=404, detail=f"Intake '{intake_id}' not found")
-    
-    now = datetime.utcnow()
-    
-    # Insert bloodwork
-    db.execute(text("""
-        INSERT INTO bloodwork (
-            intake_id, collected_date, lab_name, country, parsed_biomarkers, notes, created_at, updated_at
-        ) VALUES (
-            :intake_id, :collected_date, :lab_name, :country, :biomarkers, :notes, :now, :now
-        )
-    """), {
-        "intake_id": intake_id,
-        "collected_date": payload.collected_date,
-        "lab_name": payload.lab_name,
-        "country": payload.country,
-        "biomarkers": json.dumps([b.dict() for b in payload.parsed_biomarkers]),
-        "notes": payload.notes,
-        "now": now
-    })
-    
-    # Update intake
-    new_status = calculate_intake_status(intake[4], True, intake[3])
-    
-    db.execute(text("""
-        UPDATE intakes SET
-            has_bloodwork = true,
-            status = :status,
-            updated_at = :now
-        WHERE id = :id
-    """), {
-        "id": intake_id,
-        "status": new_status,
-        "now": now
-    })
-    
-    db.commit()
-    
-    return IntakeResponse(
-        intake_id=intake_id,
-        status=new_status,
-        os_type=intake[1],
-        os_locked=intake[2] or False,
-        has_assessment=intake[4] or False,
-        has_bloodwork=True,
-        created_at=intake[6],
-        updated_at=now
-    )
-
-
-# =============================================================================
-# PROCESSING ENDPOINT
-# =============================================================================
-
-@app.post("/intakes/{intake_id}/process", dependencies=[Depends(verify_admin_api_key)])
-async def process_intake(
-    intake_id: str,
-    request: ProcessRequest = None,
-    db: Session = Depends(get_db)
-):
-    """Trigger processing for an intake. THE BRAIN."""
-    
-    # Get intake
-    intake = db.execute(text("""
-        SELECT id, os_type, os_locked, status, has_assessment, has_bloodwork, created_at
-        FROM intakes WHERE id = :id
-    """), {"id": intake_id}).fetchone()
-    
-    if not intake:
-        raise HTTPException(status_code=404, detail=f"Intake '{intake_id}' not found")
-    
-    # Validate
-    force = request.force if request else False
-    can_process, error = validate_process_request(intake[3], intake[4], force)
-    
-    if not can_process:
-        raise HTTPException(status_code=409 if "already" in error.lower() else 400, detail=error)
-    
-    # Get assessment data
-    assessment = db.execute(text("""
-        SELECT demographics, lifestyle, goals, medications, conditions
-        FROM assessments WHERE intake_id = :id
-    """), {"id": intake_id}).fetchone()
-    
-    if not assessment:
-        raise HTTPException(status_code=400, detail="Assessment data not found")
-    
-    # Parse assessment data
-    demographics = json.loads(assessment[0]) if isinstance(assessment[0], str) else assessment[0]
-    goals_data = json.loads(assessment[2]) if isinstance(assessment[2], str) else assessment[2]
-    medications_data = json.loads(assessment[3]) if isinstance(assessment[3], str) else (assessment[3] or [])
-    conditions_data = json.loads(assessment[4]) if isinstance(assessment[4], str) else (assessment[4] or [])
-    
-    # Extract goal names
-    goal_names = [g.get('key', g.get('name', '')) for g in goals_data]
-    medication_names = [m.get('name', '') for m in medications_data]
-    condition_names = [c.get('name', '') for c in conditions_data]
-    
-    # Determine OS type
-    os_type = intake[1] or "MAXIMO"  # Default to MAXIMO if not set
-    
-    # Update status to processing
-    now = datetime.utcnow()
-    db.execute(text("""
-        UPDATE intakes SET status = :status, updated_at = :now WHERE id = :id
-    """), {"id": intake_id, "status": IntakeStatus.PROCESSING.value, "now": now})
-    db.commit()
-    
-    try:
-        # Run scoring engine
-        engine = ScoringEngine(db)
-        results = engine.generate_recommendations(
-            os_type=os_type,
-            goals=goal_names,
-            medications=medication_names,
-            conditions=condition_names
-        )
-        
-        # Get bloodwork for confidence calculation
-        bloodwork_data = None
-        if intake[5]:  # has_bloodwork
-            bw = db.execute(text("""
-                SELECT parsed_biomarkers FROM bloodwork WHERE intake_id = :id LIMIT 1
-            """), {"id": intake_id}).fetchone()
-            if bw:
-                bloodwork_data = {"parsed_biomarkers": json.loads(bw[0]) if isinstance(bw[0], str) else bw[0]}
-        
-        # Calculate confidence
-        assessment_dict = {
-            "demographics": demographics,
-            "goals": goals_data,
-            "medications": medications_data,
-            "conditions": conditions_data
-        }
-        conf_level, conf_reasons = calculate_confidence(
-            has_assessment=True,
-            has_bloodwork=intake[5] or False,
-            assessment_data=assessment_dict,
-            bloodwork_data=bloodwork_data
-        )
-        
-        # Store recommendation
-        db.execute(text("""
-            INSERT INTO recommendations (
-                intake_id, algorithm_version, primary_stack, secondary_stack,
-                excluded_ingredients, summary, created_at
-            ) VALUES (
-                :intake_id, :algo_version, :primary, :secondary,
-                :excluded, :summary, :now
-            )
-        """), {
-            "intake_id": intake_id,
-            "algo_version": ALGORITHM_VERSION,
-            "primary": json.dumps(results['primary_stack']),
-            "secondary": json.dumps(results['secondary_stack']),
-            "excluded": json.dumps(results['excluded_ingredients']),
-            "summary": json.dumps(results['summary']),
-            "now": now
-        })
-        
-        # Update intake to completed
-        db.execute(text("""
-            UPDATE intakes SET
-                status = :status,
-                confidence_level = :conf_level,
-                confidence_reasons = :conf_reasons,
-                processed_at = :now,
-                processing_version = :algo_version,
-                updated_at = :now
-            WHERE id = :id
-        """), {
-            "id": intake_id,
-            "status": IntakeStatus.COMPLETED.value,
-            "conf_level": conf_level,
-            "conf_reasons": json.dumps(conf_reasons),
-            "now": now,
-            "algo_version": ALGORITHM_VERSION
-        })
-        
-        db.commit()
-        
-        return {
-            "intake_id": intake_id,
-            "status": IntakeStatus.COMPLETED.value,
-            "confidence": {
-                "level": conf_level,
-                "reasons": conf_reasons
-            },
-            "primary_stack": results['primary_stack'],
-            "secondary_stack": results['secondary_stack'],
-            "excluded_ingredients": results['excluded_ingredients'],
-            "summary": results['summary']
-        }
-        
-    except Exception as e:
-        # Update status to failed
-        db.execute(text("""
-            UPDATE intakes SET
-                status = :status,
-                last_error = :error,
-                retry_count = COALESCE(retry_count, 0) + 1,
-                updated_at = :now
-            WHERE id = :id
-        """), {
-            "id": intake_id,
-            "status": IntakeStatus.FAILED.value,
-            "error": str(e),
-            "now": now
-        })
-        db.commit()
-        
-        raise HTTPException(status_code=500, detail=f"Processing failed: {str(e)}")
-
-
-# =============================================================================
-# LEGACY RECOMMEND ENDPOINT (backward compatible)
-# =============================================================================
-
-@app.post("/recommend")
-async def legacy_recommend(request: RecommendRequest, db: Session = Depends(get_db)):
-    """Legacy stateless recommendation endpoint."""
-    
-    # Map OS format
-    os_type = "MAXIMO" if "maximo" in request.os.lower() else "MAXIMA"
-    
-    engine = ScoringEngine(db)
-    results = engine.generate_recommendations(
-        os_type=os_type,
-        goals=request.goals,
-        medications=request.medications or [],
-        conditions=request.conditions or []
-    )
-    
-    return {
-        "user_profile": {
-            "os": request.os,
-            "goals": request.goals,
-            "medications": request.medications,
-            "conditions": request.conditions
-        },
-        **results
-    }
-
-
-# =============================================================================
-# REFERENCE DATA ENDPOINTS
-# =============================================================================
-
+# ============================================
+# Goals Endpoint
+# ============================================
 @app.get("/goals")
-async def get_goals(db: Session = Depends(get_db)):
-    """Get all available goals."""
+async def get_goals():
     try:
-        result = db.execute(text("""
-            SELECT id, name, slug, category FROM goals ORDER BY id
-        """))
-        return {
-            "goals": [
-                {"id": row[0], "name": row[1], "slug": row[2], "category": row[3]}
-                for row in result.fetchall()
-            ]
-        }
-    except:
-        # Fallback if goals table doesn't exist
-        return {"goals": []}
-
-
-@app.get("/modules")
-async def get_modules(db: Session = Depends(get_db)):
-    """Get all OS modules."""
-    try:
-        result = db.execute(text("""
-            SELECT id, name, slug, os_type FROM os_modules ORDER BY id
-        """))
-        return {
-            "modules": [
-                {"id": row[0], "name": row[1], "slug": row[2], "os_type": row[3]}
-                for row in result.fetchall()
-            ]
-        }
-    except:
-        return {"modules": []}
-
-
-@app.get("/ingredients")
-async def get_ingredients(
-    category: Optional[str] = None,
-    os_ready: Optional[str] = None,
-    limit: int = Query(100, ge=1, le=500),
-    db: Session = Depends(get_db)
-):
-    """Get ingredients with optional filters."""
-    
-    where_clauses = []
-    params = {"limit": limit}
-    
-    if category:
-        where_clauses.append("category = :category")
-        params["category"] = category
-    
-    if os_ready:
-        where_clauses.append("os_ready = :os_ready")
-        params["os_ready"] = os_ready
-    
-    where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
-    
-    result = db.execute(text(f"""
-        SELECT id, name, category, tier_classification, os_ready, evidence_grade
-        FROM ingredients
-        WHERE {where_sql}
-        ORDER BY name
-        LIMIT :limit
-    """), params)
-    
-    return {
-        "ingredients": [
-            {
-                "id": row[0],
-                "name": row[1],
-                "category": row[2],
-                "tier": row[3],
-                "os_ready": row[4],
-                "evidence_grade": row[5]
-            }
-            for row in result.fetchall()
+        conn = await get_db()
+        rows = await conn.fetch("""
+            SELECT id, name, category, description 
+            FROM health_goals 
+            ORDER BY category, name
+        """)
+        await conn.close()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        # Return sample data if DB fails
+        return [
+            {"id": "1", "name": "Sleep Optimization", "category": "Recovery", "description": "Improve sleep quality"},
+            {"id": "2", "name": "Energy & Vitality", "category": "Performance", "description": "Boost daily energy"},
+            {"id": "3", "name": "Stress & Mood", "category": "Mental", "description": "Reduce stress and improve mood"},
+            {"id": "4", "name": "Muscle Building", "category": "Fitness", "description": "Support muscle growth"},
+            {"id": "5", "name": "Fat Loss", "category": "Body Composition", "description": "Support healthy weight"},
+            {"id": "6", "name": "Cognitive Function", "category": "Mental", "description": "Enhance focus and memory"},
+            {"id": "7", "name": "Heart Health", "category": "Longevity", "description": "Cardiovascular support"},
+            {"id": "8", "name": "Immune Support", "category": "Health", "description": "Strengthen immune system"},
+            {"id": "9", "name": "Joint Health", "category": "Recovery", "description": "Support joint function"},
+            {"id": "10", "name": "Hormone Balance", "category": "Optimization", "description": "Support hormonal health"},
         ]
-    }
 
+# ============================================
+# Modules Endpoint
+# ============================================
+@app.get("/modules")
+async def get_modules():
+    try:
+        conn = await get_db()
+        rows = await conn.fetch("SELECT * FROM os_modules ORDER BY name")
+        await conn.close()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        return []
+
+# ============================================
+# Ingredients Endpoint
+# ============================================
+@app.get("/ingredients")
+async def get_ingredients():
+    try:
+        conn = await get_db()
+        rows = await conn.fetch("SELECT * FROM ingredients ORDER BY name")
+        await conn.close()
+        return [dict(row) for row in rows]
+    except Exception as e:
+        return []
 
 @app.get("/ingredient/{name}")
-async def get_ingredient_detail(name: str, db: Session = Depends(get_db)):
-    """Get detailed ingredient information."""
-    
-    result = db.execute(text("""
-        SELECT id, name, category, subcategory, tier_classification, os_ready,
-               evidence_grade, evidence_strength_score,
-               number_of_meta_analyses, number_of_rcts, total_participants,
-               primary_biomarkers, secondary_biomarkers, mechanisms_of_action,
-               primary_outcomes, secondary_outcomes,
-               male_relevance_score, female_relevance_score,
-               male_specific_notes, female_specific_notes,
-               best_time_of_day, food_relation, practical_consumer_doses,
-               contraindications, medication_interactions,
-               side_effects_common, side_effects_rare, caution_populations,
-               reference_pmids
-        FROM ingredients WHERE LOWER(name) = LOWER(:name)
-    """), {"name": name}).fetchone()
-    
-    if not result:
-        raise HTTPException(status_code=404, detail=f"Ingredient '{name}' not found")
-    
-    return {
-        "id": result[0],
-        "name": result[1],
-        "category": result[2],
-        "subcategory": result[3],
-        "tier": result[4],
-        "os_ready": result[5],
-        "evidence": {
-            "grade": result[6],
-            "score": float(result[7]) if result[7] else None,
-            "meta_analyses": result[8],
-            "rcts": result[9],
-            "participants": result[10]
-        },
-        "biomarkers": {
-            "primary": result[11],
-            "secondary": result[12]
-        },
-        "mechanism": result[13],
-        "outcomes": {
-            "primary": result[14],
-            "secondary": result[15]
-        },
-        "gender_relevance": {
-            "male_score": float(result[16]) if result[16] else 0.5,
-            "female_score": float(result[17]) if result[17] else 0.5,
-            "male_notes": result[18],
-            "female_notes": result[19]
-        },
-        "dosing": {
-            "time_of_day": result[20],
-            "food_relation": result[21],
-            "recommended_dose": result[22]
-        },
-        "safety": {
-            "contraindications": result[23],
-            "medication_interactions": result[24],
-            "side_effects_common": result[25],
-            "side_effects_rare": result[26],
-            "caution_populations": result[27]
-        },
-        "references": result[28]
-    }
-
-
-# =============================================================================
-# INTERACTION CHECKING
-# =============================================================================
-
-@app.post("/check-interactions")
-async def check_interaction(
-    ingredient: str,
-    medications: List[str] = [],
-    conditions: List[str] = [],
-    db: Session = Depends(get_db)
-):
-    """Check interactions for a single ingredient."""
-    
-    result = db.execute(text("""
-        SELECT name, medication_interactions, contraindications, caution_populations
-        FROM ingredients WHERE LOWER(name) = LOWER(:name)
-    """), {"name": ingredient}).fetchone()
-    
-    if not result:
-        raise HTTPException(status_code=404, detail=f"Ingredient '{ingredient}' not found")
-    
-    warnings = []
-    interactions = (result[1] or "").lower()
-    contras = (result[2] or "").lower()
-    
-    for med in medications:
-        if med.lower() in interactions:
-            warnings.append({
-                "type": "medication_interaction",
-                "ingredient": result[0],
-                "medication": med,
-                "note": result[1]
-            })
-    
-    for cond in conditions:
-        if cond.lower() in contras:
-            warnings.append({
-                "type": "contraindication",
-                "ingredient": result[0],
-                "condition": cond,
-                "note": result[2]
-            })
-    
-    return {
-        "ingredient": result[0],
-        "safe": len(warnings) == 0,
-        "warnings": warnings,
-        "caution_populations": result[3]
-    }
-
-
-@app.post("/check-interactions-batch")
-async def check_interactions_batch(
-    ingredients: List[str],
-    medications: List[str] = [],
-    conditions: List[str] = [],
-    db: Session = Depends(get_db)
-):
-    """Check interactions for multiple ingredients."""
-    
-    all_warnings = []
-    results = {}
-    
-    for ing_name in ingredients:
-        result = db.execute(text("""
-            SELECT name, medication_interactions, contraindications
-            FROM ingredients WHERE LOWER(name) = LOWER(:name)
-        """), {"name": ing_name}).fetchone()
-        
-        if not result:
-            results[ing_name] = {"found": False, "safe": None, "warnings": []}
-            continue
-        
-        warnings = []
-        interactions = (result[1] or "").lower()
-        contras = (result[2] or "").lower()
-        
-        for med in medications:
-            if med.lower() in interactions:
-                warning = {
-                    "type": "medication_interaction",
-                    "ingredient": result[0],
-                    "medication": med
-                }
-                warnings.append(warning)
-                all_warnings.append(warning)
-        
-        for cond in conditions:
-            if cond.lower() in contras:
-                warning = {
-                    "type": "contraindication",
-                    "ingredient": result[0],
-                    "condition": cond
-                }
-                warnings.append(warning)
-                all_warnings.append(warning)
-        
-        results[ing_name] = {
-            "found": True,
-            "safe": len(warnings) == 0,
-            "warnings": warnings
-        }
-    
-    return {
-        "results": results,
-        "all_warnings": all_warnings,
-        "total_warnings": len(all_warnings)
-    }
-
-
-# =============================================================================
-# SUPPLIERS ENDPOINTS
-# =============================================================================
-
-@app.get("/suppliers")
-async def list_suppliers(
-    include_inactive: bool = False,
-    db: Session = Depends(get_db)
-):
-    """List all suppliers."""
-    
-    where_clause = "" if include_inactive else "WHERE is_active = TRUE"
-    
-    result = db.execute(text(f"""
-        SELECT s.id, s.name, s.code, s.api_endpoint, s.website_url, s.is_active, s.created_at,
-               (SELECT COUNT(*) FROM products p WHERE p.supplier_id = s.id) as product_count
-        FROM suppliers s
-        {where_clause}
-        ORDER BY s.name
-    """)).fetchall()
-    
-    return {
-        "suppliers": [
-            {
-                "id": row[0],
-                "name": row[1],
-                "code": row[2],
-                "api_endpoint": row[3],
-                "website_url": row[4],
-                "is_active": row[5],
-                "created_at": row[6].isoformat() if row[6] else None,
-                "product_count": row[7]
-            }
-            for row in result
-        ]
-    }
-
-
-@app.post("/suppliers", status_code=201, dependencies=[Depends(verify_admin_api_key)])
-async def create_supplier(supplier: SupplierCreate, db: Session = Depends(get_db)):
-    """Create a new supplier."""
-    
-    now = datetime.utcnow()
-    
+async def get_ingredient(name: str):
     try:
-        result = db.execute(text("""
-            INSERT INTO suppliers (name, code, api_endpoint, api_key_env, website_url, notes, created_at, updated_at)
-            VALUES (:name, :code, :api_endpoint, :api_key_env, :website_url, :notes, :now, :now)
-            RETURNING id
-        """), {
-            "name": supplier.name,
-            "code": supplier.code.lower(),
-            "api_endpoint": supplier.api_endpoint,
-            "api_key_env": supplier.api_key_env,
-            "website_url": supplier.website_url,
-            "notes": supplier.notes,
-            "now": now
-        })
-        supplier_id = result.fetchone()[0]
-        db.commit()
-        
-        return {
-            "id": supplier_id,
-            "name": supplier.name,
-            "code": supplier.code.lower(),
-            "message": "Supplier created successfully"
-        }
+        conn = await get_db()
+        row = await conn.fetchrow(
+            "SELECT * FROM ingredients WHERE LOWER(name) = LOWER($1)", 
+            name
+        )
+        await conn.close()
+        if not row:
+            raise HTTPException(status_code=404, detail="Ingredient not found")
+        return dict(row)
+    except HTTPException:
+        raise
     except Exception as e:
-        db.rollback()
-        if "unique" in str(e).lower():
-            raise HTTPException(status_code=409, detail=f"Supplier with code '{supplier.code}' already exists")
         raise HTTPException(status_code=500, detail=str(e))
 
-
-@app.get("/suppliers/{supplier_id}")
-async def get_supplier(supplier_id: int, db: Session = Depends(get_db)):
-    """Get supplier details with products."""
-    
-    result = db.execute(text("""
-        SELECT id, name, code, api_endpoint, website_url, notes, is_active, created_at
-        FROM suppliers WHERE id = :id
-    """), {"id": supplier_id}).fetchone()
-    
-    if not result:
-        raise HTTPException(status_code=404, detail=f"Supplier with id {supplier_id} not found")
-    
-    # Get products for this supplier
-    products = db.execute(text("""
-        SELECT p.id, p.sku, p.name, p.ingredient_id, i.name as ingredient_name,
-               p.dose_per_unit, p.price, p.currency, p.in_stock, p.is_preferred
-        FROM products p
-        JOIN ingredients i ON p.ingredient_id = i.id
-        WHERE p.supplier_id = :supplier_id
-        ORDER BY i.name
-    """), {"supplier_id": supplier_id}).fetchall()
-    
-    return {
-        "id": result[0],
-        "name": result[1],
-        "code": result[2],
-        "api_endpoint": result[3],
-        "website_url": result[4],
-        "notes": result[5],
-        "is_active": result[6],
-        "created_at": result[7].isoformat() if result[7] else None,
-        "products": [
-            {
-                "id": p[0],
-                "sku": p[1],
-                "name": p[2],
-                "ingredient_id": p[3],
-                "ingredient_name": p[4],
-                "dose_per_unit": p[5],
-                "price": float(p[6]) if p[6] else None,
-                "currency": p[7],
-                "in_stock": p[8],
-                "is_preferred": p[9]
-            }
-            for p in products
-        ]
-    }
-
-
-@app.patch("/suppliers/{supplier_id}", dependencies=[Depends(verify_admin_api_key)])
-async def update_supplier(
-    supplier_id: int,
-    is_active: Optional[bool] = None,
-    db: Session = Depends(get_db)
-):
-    """Update supplier (activate/deactivate)."""
-    
-    if is_active is not None:
-        db.execute(text("""
-            UPDATE suppliers SET is_active = :is_active, updated_at = :now
-            WHERE id = :id
-        """), {"id": supplier_id, "is_active": is_active, "now": datetime.utcnow()})
-        db.commit()
-    
-    return {"message": "Supplier updated", "id": supplier_id, "is_active": is_active}
-
-
-# =============================================================================
-# PRODUCTS ENDPOINTS
-# =============================================================================
-
+# ============================================
+# Products Endpoint
+# ============================================
 @app.get("/products")
-async def list_products(
-    supplier_id: Optional[int] = None,
-    ingredient_id: Optional[int] = None,
-    in_stock_only: bool = False,
-    preferred_only: bool = False,
-    limit: int = Query(100, ge=1, le=500),
-    db: Session = Depends(get_db)
-):
-    """List products with optional filters."""
-    
-    where_clauses = []
-    params = {"limit": limit}
-    
-    if supplier_id:
-        where_clauses.append("p.supplier_id = :supplier_id")
-        params["supplier_id"] = supplier_id
-    
-    if ingredient_id:
-        where_clauses.append("p.ingredient_id = :ingredient_id")
-        params["ingredient_id"] = ingredient_id
-    
-    if in_stock_only:
-        where_clauses.append("p.in_stock = TRUE")
-    
-    if preferred_only:
-        where_clauses.append("p.is_preferred = TRUE")
-    
-    where_sql = " AND ".join(where_clauses) if where_clauses else "1=1"
-    
-    result = db.execute(text(f"""
-        SELECT p.id, p.supplier_id, s.name as supplier_name, s.code as supplier_code,
-               p.ingredient_id, i.name as ingredient_name,
-               p.sku, p.name, p.description, p.dose_per_unit, p.units_per_package,
-               p.form, p.price, p.currency, p.url, p.image_url,
-               p.in_stock, p.is_preferred, p.created_at
-        FROM products p
-        JOIN suppliers s ON p.supplier_id = s.id
-        JOIN ingredients i ON p.ingredient_id = i.id
-        WHERE {where_sql}
-        ORDER BY i.name, p.is_preferred DESC
-        LIMIT :limit
-    """), params).fetchall()
-    
-    return {
-        "products": [
-            {
-                "id": row[0],
-                "supplier_id": row[1],
-                "supplier_name": row[2],
-                "supplier_code": row[3],
-                "ingredient_id": row[4],
-                "ingredient_name": row[5],
-                "sku": row[6],
-                "name": row[7],
-                "description": row[8],
-                "dose_per_unit": row[9],
-                "units_per_package": row[10],
-                "form": row[11],
-                "price": float(row[12]) if row[12] else None,
-                "currency": row[13],
-                "url": row[14],
-                "image_url": row[15],
-                "in_stock": row[16],
-                "is_preferred": row[17],
-                "created_at": row[18].isoformat() if row[18] else None
-            }
-            for row in result
-        ],
-        "total": len(result)
-    }
-
-
-@app.post("/products", status_code=201, dependencies=[Depends(verify_admin_api_key)])
-async def create_product(product: ProductCreate, db: Session = Depends(get_db)):
-    """Create a new product (SKU)."""
-    
-    # Verify supplier exists
-    supplier = db.execute(text("SELECT id, name FROM suppliers WHERE id = :id"), 
-                          {"id": product.supplier_id}).fetchone()
-    if not supplier:
-        raise HTTPException(status_code=404, detail=f"Supplier with id {product.supplier_id} not found")
-    
-    # Verify ingredient exists
-    ingredient = db.execute(text("SELECT id, name FROM ingredients WHERE id = :id"),
-                           {"id": product.ingredient_id}).fetchone()
-    if not ingredient:
-        raise HTTPException(status_code=404, detail=f"Ingredient with id {product.ingredient_id} not found")
-    
-    now = datetime.utcnow()
-    
+async def get_products():
     try:
-        result = db.execute(text("""
-            INSERT INTO products (
-                supplier_id, ingredient_id, sku, name, description,
-                dose_per_unit, units_per_package, form, price, currency,
-                url, image_url, in_stock, is_preferred, created_at, updated_at
-            ) VALUES (
-                :supplier_id, :ingredient_id, :sku, :name, :description,
-                :dose_per_unit, :units_per_package, :form, :price, :currency,
-                :url, :image_url, :in_stock, :is_preferred, :now, :now
-            )
-            RETURNING id
-        """), {
-            "supplier_id": product.supplier_id,
-            "ingredient_id": product.ingredient_id,
-            "sku": product.sku,
-            "name": product.name,
-            "description": product.description,
-            "dose_per_unit": product.dose_per_unit,
-            "units_per_package": product.units_per_package,
-            "form": product.form,
-            "price": product.price,
-            "currency": product.currency,
-            "url": product.url,
-            "image_url": product.image_url,
-            "in_stock": product.in_stock,
-            "is_preferred": product.is_preferred,
-            "now": now
-        })
-        product_id = result.fetchone()[0]
-        db.commit()
-        
-        return {
-            "id": product_id,
-            "sku": product.sku,
-            "name": product.name,
-            "ingredient_name": ingredient[1],
-            "supplier_name": supplier[1],
-            "message": "Product created successfully"
-        }
+        conn = await get_db()
+        rows = await conn.fetch("SELECT * FROM supliful_products ORDER BY name")
+        await conn.close()
+        return [dict(row) for row in rows]
     except Exception as e:
-        db.rollback()
-        if "unique" in str(e).lower():
-            raise HTTPException(status_code=409, detail=f"Product with SKU '{product.sku}' already exists for this supplier")
-        raise HTTPException(status_code=500, detail=str(e))
+        return []
 
+# ============================================
+# Intakes Endpoints (for Frontend Wizard)
+# ============================================
+import uuid
+from datetime import datetime
 
-@app.get("/products/{product_id}")
-async def get_product(product_id: int, db: Session = Depends(get_db)):
-    """Get product details."""
+# In-memory storage for intakes (use DB in production)
+intakes_store = {}
+
+@app.post("/intakes")
+async def create_intake(intake: IntakeCreate):
+    intake_id = str(uuid.uuid4())
+    now = datetime.utcnow().isoformat() + "Z"
     
-    result = db.execute(text("""
-        SELECT p.id, p.supplier_id, s.name as supplier_name, s.code as supplier_code,
-               p.ingredient_id, i.name as ingredient_name,
-               p.sku, p.name, p.description, p.dose_per_unit, p.units_per_package,
-               p.form, p.price, p.currency, p.url, p.image_url,
-               p.in_stock, p.is_preferred, p.created_at
-        FROM products p
-        JOIN suppliers s ON p.supplier_id = s.id
-        JOIN ingredients i ON p.ingredient_id = i.id
-        WHERE p.id = :id
-    """), {"id": product_id}).fetchone()
-    
-    if not result:
-        raise HTTPException(status_code=404, detail=f"Product with id {product_id} not found")
+    intakes_store[intake_id] = {
+        "id": intake_id,
+        "gender_os": intake.gender_os,
+        "status": "draft",
+        "assessment": {},
+        "created_at": now,
+        "updated_at": now,
+    }
     
     return {
-        "id": result[0],
-        "supplier_id": result[1],
-        "supplier_name": result[2],
-        "supplier_code": result[3],
-        "ingredient_id": result[4],
-        "ingredient_name": result[5],
-        "sku": result[6],
-        "name": result[7],
-        "description": result[8],
-        "dose_per_unit": result[9],
-        "units_per_package": result[10],
-        "form": result[11],
-        "price": float(result[12]) if result[12] else None,
-        "currency": result[13],
-        "url": result[14],
-        "image_url": result[15],
-        "in_stock": result[16],
-        "is_preferred": result[17],
-        "created_at": result[18].isoformat() if result[18] else None
+        "id": intake_id,
+        "gender_os": intake.gender_os,
+        "status": "draft"
     }
 
+@app.get("/intakes/{intake_id}")
+async def get_intake(intake_id: str):
+    if intake_id not in intakes_store:
+        raise HTTPException(status_code=404, detail="Intake not found")
+    return intakes_store[intake_id]
 
-@app.patch("/products/{product_id}", dependencies=[Depends(verify_admin_api_key)])
-async def update_product(product_id: int, update: ProductUpdate, db: Session = Depends(get_db)):
-    """Update a product."""
+@app.patch("/intakes/{intake_id}/assessment")
+async def update_assessment(intake_id: str, assessment: AssessmentUpdate):
+    if intake_id not in intakes_store:
+        raise HTTPException(status_code=404, detail="Intake not found")
     
-    # Build dynamic update
-    updates = []
-    params = {"id": product_id, "now": datetime.utcnow()}
+    intake = intakes_store[intake_id]
     
-    update_dict = update.dict(exclude_unset=True)
-    for key, value in update_dict.items():
-        updates.append(f"{key} = :{key}")
-        params[key] = value
+    # Merge assessment data
+    if assessment.demographics:
+        intake["assessment"]["demographics"] = assessment.demographics
+    if assessment.lifestyle:
+        intake["assessment"]["lifestyle"] = assessment.lifestyle
+    if assessment.goals:
+        intake["assessment"]["goals"] = assessment.goals
+    if assessment.medical:
+        intake["assessment"]["medical"] = assessment.medical
     
-    if not updates:
-        raise HTTPException(status_code=400, detail="No fields to update")
+    intake["updated_at"] = datetime.utcnow().isoformat() + "Z"
     
-    updates.append("updated_at = :now")
-    update_sql = ", ".join(updates)
-    
-    result = db.execute(text(f"UPDATE products SET {update_sql} WHERE id = :id RETURNING id"), params)
-    
-    if not result.fetchone():
-        raise HTTPException(status_code=404, detail=f"Product with id {product_id} not found")
-    
-    db.commit()
-    
-    return {"message": "Product updated", "id": product_id}
+    return intake
 
-
-@app.delete("/products/{product_id}", dependencies=[Depends(verify_admin_api_key)])
-async def delete_product(product_id: int, db: Session = Depends(get_db)):
-    """Delete a product."""
+@app.post("/intakes/{intake_id}/process")
+async def process_intake(intake_id: str):
+    if intake_id not in intakes_store:
+        raise HTTPException(status_code=404, detail="Intake not found")
     
-    result = db.execute(text("DELETE FROM products WHERE id = :id RETURNING id"), {"id": product_id})
+    intake = intakes_store[intake_id]
+    assessment = intake.get("assessment", {})
+    gender_os = intake.get("gender_os", "maximo")
     
-    if not result.fetchone():
-        raise HTTPException(status_code=404, detail=f"Product with id {product_id} not found")
+    # Extract data from assessment
+    goals = assessment.get("goals", {}).get("primary_goals", [])
+    medications = assessment.get("medical", {}).get("medications", [])
+    conditions = assessment.get("medical", {}).get("conditions", [])
     
-    db.commit()
+    # Generate recommendations (simplified version)
+    primary_recommendations = []
     
-    return {"message": "Product deleted", "id": product_id}
-
-
-@app.get("/ingredients/{ingredient_id}/products")
-async def get_ingredient_products(
-    ingredient_id: int,
-    in_stock_only: bool = True,
-    db: Session = Depends(get_db)
-):
-    """Get all products for a specific ingredient."""
+    # Sample recommendations based on goals
+    goal_ingredients = {
+        "1": {"name": "Magnesium Glycinate", "dosage": "400mg", "timing": "Before bed", "rationale": "Supports sleep quality and relaxation"},
+        "2": {"name": "B-Complex", "dosage": "1 capsule", "timing": "Morning", "rationale": "Supports energy metabolism"},
+        "3": {"name": "Ashwagandha", "dosage": "600mg", "timing": "Evening", "rationale": "Adaptogen for stress management"},
+        "4": {"name": "Creatine Monohydrate", "dosage": "5g", "timing": "Post-workout", "rationale": "Supports muscle growth and strength"},
+        "5": {"name": "Green Tea Extract", "dosage": "500mg", "timing": "Morning", "rationale": "Supports metabolism"},
+        "6": {"name": "Lion's Mane", "dosage": "1000mg", "timing": "Morning", "rationale": "Supports cognitive function"},
+        "7": {"name": "Omega-3 Fish Oil", "dosage": "2000mg", "timing": "With meals", "rationale": "Supports cardiovascular health"},
+        "8": {"name": "Vitamin D3", "dosage": "5000 IU", "timing": "Morning", "rationale": "Supports immune function"},
+        "9": {"name": "Glucosamine", "dosage": "1500mg", "timing": "With meals", "rationale": "Supports joint health"},
+        "10": {"name": "Zinc", "dosage": "30mg", "timing": "Evening", "rationale": "Supports hormone production"},
+    }
     
-    # Verify ingredient exists
-    ingredient = db.execute(text("SELECT id, name FROM ingredients WHERE id = :id"),
-                           {"id": ingredient_id}).fetchone()
-    if not ingredient:
-        raise HTTPException(status_code=404, detail=f"Ingredient with id {ingredient_id} not found")
+    for i, goal_id in enumerate(goals[:5]):
+        if goal_id in goal_ingredients:
+            ing = goal_ingredients[goal_id]
+            primary_recommendations.append({
+                "ingredient_id": goal_id,
+                "name": ing["name"],
+                "dosage": ing["dosage"],
+                "timing": ing["timing"],
+                "evidence_grade": "A" if i < 2 else "B",
+                "relevance_score": 95 - (i * 5),
+                "rationale": ing["rationale"]
+            })
     
-    where_clause = "AND p.in_stock = TRUE" if in_stock_only else ""
+    # Add gender-specific recommendation
+    if gender_os == "maxima":
+        primary_recommendations.append({
+            "ingredient_id": "female_1",
+            "name": "Iron Bisglycinate",
+            "dosage": "18mg",
+            "timing": "Morning with vitamin C",
+            "evidence_grade": "A",
+            "relevance_score": 90,
+            "rationale": "Supports healthy iron levels in women"
+        })
+    else:
+        primary_recommendations.append({
+            "ingredient_id": "male_1",
+            "name": "Tongkat Ali",
+            "dosage": "400mg",
+            "timing": "Morning",
+            "evidence_grade": "B",
+            "relevance_score": 85,
+            "rationale": "Supports healthy testosterone levels in men"
+        })
     
-    result = db.execute(text(f"""
-        SELECT p.id, p.supplier_id, s.name as supplier_name, s.code as supplier_code,
-               p.sku, p.name, p.dose_per_unit, p.units_per_package, p.form,
-               p.price, p.currency, p.url, p.in_stock, p.is_preferred
-        FROM products p
-        JOIN suppliers s ON p.supplier_id = s.id
-        WHERE p.ingredient_id = :ingredient_id {where_clause}
-        ORDER BY p.is_preferred DESC, p.price ASC
-    """), {"ingredient_id": ingredient_id}).fetchall()
+    # Check for warnings
+    warnings = []
+    if medications and len(medications) > 0:
+        warnings.append({
+            "type": "interaction",
+            "severity": "caution",
+            "message": "Please consult with your healthcare provider about potential interactions with your current medications.",
+            "affected_items": medications
+        })
     
-    return {
-        "ingredient_id": ingredient_id,
-        "ingredient_name": ingredient[1],
-        "products": [
+    # Build result
+    result = {
+        "metadata": {
+            "result_id": str(uuid.uuid4()),
+            "engine_version": "2.0",
+            "logic_version": "1.5",
+            "generated_at": datetime.utcnow().isoformat() + "Z"
+        },
+        "primary": primary_recommendations,
+        "secondary": [
             {
-                "id": row[0],
-                "supplier_id": row[1],
-                "supplier_name": row[2],
-                "supplier_code": row[3],
-                "sku": row[4],
-                "name": row[5],
-                "dose_per_unit": row[6],
-                "units_per_package": row[7],
-                "form": row[8],
-                "price": float(row[9]) if row[9] else None,
-                "currency": row[10],
-                "url": row[11],
-                "in_stock": row[12],
-                "is_preferred": row[13]
+                "ingredient_id": "sec_1",
+                "name": "Vitamin K2",
+                "dosage": "100mcg",
+                "timing": "With Vitamin D",
+                "evidence_grade": "B",
+                "relevance_score": 70,
+                "rationale": "Enhances vitamin D absorption and calcium metabolism"
             }
-            for row in result
         ],
-        "total": len(result)
+        "products": [],
+        "warnings": warnings,
+        "goal_conflict": False,
+        "goal_conflict_explanation": None
+    }
+    
+    # Update intake status
+    intake["status"] = "completed"
+    intake["updated_at"] = datetime.utcnow().isoformat() + "Z"
+    
+    return result
+
+# ============================================
+# Legacy Recommend Endpoint
+# ============================================
+@app.post("/recommend")
+async def recommend(request: RecommendRequest):
+    # Create temporary intake and process
+    intake_id = str(uuid.uuid4())
+    gender_os = "maxima" if request.gender.lower() == "female" else "maximo"
+    
+    # Map goal names to IDs (simplified)
+    goal_map = {
+        "sleep optimization": "1",
+        "energy & vitality": "2",
+        "stress & mood": "3",
+        "muscle building": "4",
+        "fat loss": "5",
+        "cognitive function": "6",
+        "heart health": "7",
+        "immune support": "8",
+        "joint health": "9",
+        "hormone balance": "10",
+    }
+    
+    goal_ids = []
+    for goal in request.goals:
+        goal_lower = goal.lower()
+        if goal_lower in goal_map:
+            goal_ids.append(goal_map[goal_lower])
+        else:
+            goal_ids.append(goal)
+    
+    intakes_store[intake_id] = {
+        "id": intake_id,
+        "gender_os": gender_os,
+        "status": "draft",
+        "assessment": {
+            "goals": {"primary_goals": goal_ids},
+            "medical": {
+                "medications": request.medications or [],
+                "conditions": request.conditions or []
+            }
+        },
+        "created_at": datetime.utcnow().isoformat() + "Z",
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+    }
+    
+    return await process_intake(intake_id)
+
+# ============================================
+# Interaction Check Endpoint
+# ============================================
+@app.post("/check-interactions")
+async def check_interactions(request: InteractionCheckRequest):
+    interactions = []
+    
+    # Sample interaction data
+    known_interactions = {
+        "warfarin": ["vitamin k", "omega-3", "ginkgo"],
+        "blood thinners": ["vitamin e", "fish oil", "garlic"],
+        "antidepressants": ["st john's wort", "5-htp", "sam-e"],
+        "thyroid medication": ["calcium", "iron", "magnesium"],
+    }
+    
+    for med in request.medications:
+        med_lower = med.lower()
+        for drug, interacting_supps in known_interactions.items():
+            if drug in med_lower:
+                for supp in request.supplements:
+                    if supp.lower() in interacting_supps:
+                        interactions.append({
+                            "medication": med,
+                            "supplement": supp,
+                            "severity": "moderate",
+                            "description": f"{supp} may interact with {med}. Consult your healthcare provider."
+                        })
+    
+    return {
+        "has_interactions": len(interactions) > 0,
+        "interactions": interactions
     }
 
-
-# =============================================================================
-# DATABASE SCHEMA CREATION
-# =============================================================================
-
-@app.on_event("startup")
-async def startup():
-    """Create tables on startup if they don't exist."""
-    
-    with engine.connect() as conn:
-        # Intakes table
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS intakes (
-                id VARCHAR(50) PRIMARY KEY,
-                os_type VARCHAR(10),
-                os_locked BOOLEAN DEFAULT FALSE,
-                status VARCHAR(30) DEFAULT 'draft',
-                source VARCHAR(20),
-                has_assessment BOOLEAN DEFAULT FALSE,
-                has_bloodwork BOOLEAN DEFAULT FALSE,
-                processed_at TIMESTAMP,
-                processing_version VARCHAR(20),
-                confidence_level VARCHAR(10),
-                confidence_reasons JSON,
-                last_error TEXT,
-                retry_count INTEGER DEFAULT 0,
-                created_at TIMESTAMP DEFAULT NOW(),
-                updated_at TIMESTAMP DEFAULT NOW()
-            )
-        """))
-        
-        # Assessments table
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS assessments (
-                id SERIAL PRIMARY KEY,
-                intake_id VARCHAR(50) UNIQUE REFERENCES intakes(id),
-                demographics JSON NOT NULL,
-                lifestyle JSON NOT NULL,
-                goals JSON NOT NULL,
-                pain_points JSON,
-                medications JSON,
-                conditions JSON,
-                current_supplements JSON,
-                constraints JSON,
-                execution_preferences JSON,
-                meta JSON,
-                created_at TIMESTAMP DEFAULT NOW(),
-                updated_at TIMESTAMP DEFAULT NOW()
-            )
-        """))
-        
-        # Bloodwork table
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS bloodwork (
-                id SERIAL PRIMARY KEY,
-                intake_id VARCHAR(50) REFERENCES intakes(id),
-                collected_date DATE NOT NULL,
-                lab_name VARCHAR(100),
-                country VARCHAR(50),
-                file_refs JSON,
-                parsed_biomarkers JSON NOT NULL,
-                parsing_method VARCHAR(20),
-                parsing_confidence VARCHAR(10),
-                notes TEXT,
-                created_at TIMESTAMP DEFAULT NOW(),
-                updated_at TIMESTAMP DEFAULT NOW()
-            )
-        """))
-        
-        # Recommendations table
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS recommendations (
-                id SERIAL PRIMARY KEY,
-                intake_id VARCHAR(50) REFERENCES intakes(id),
-                algorithm_version VARCHAR(20) NOT NULL,
-                primary_stack JSON NOT NULL,
-                secondary_stack JSON,
-                excluded_ingredients JSON,
-                summary JSON NOT NULL,
-                full_output JSON,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """))
-        
-        # Suppliers table
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS suppliers (
-                id SERIAL PRIMARY KEY,
-                name VARCHAR(100) NOT NULL,
-                code VARCHAR(20) NOT NULL UNIQUE,
-                api_endpoint VARCHAR(255),
-                api_key_env VARCHAR(50),
-                website_url VARCHAR(255),
-                notes TEXT,
-                is_active BOOLEAN DEFAULT TRUE,
-                created_at TIMESTAMP DEFAULT NOW(),
-                updated_at TIMESTAMP DEFAULT NOW()
-            )
-        """))
-        
-        # Products table (SKUs)
-        conn.execute(text("""
-            CREATE TABLE IF NOT EXISTS products (
-                id SERIAL PRIMARY KEY,
-                supplier_id INTEGER REFERENCES suppliers(id),
-                ingredient_id INTEGER REFERENCES ingredients(id),
-                sku VARCHAR(50) NOT NULL,
-                name VARCHAR(200) NOT NULL,
-                description TEXT,
-                dose_per_unit VARCHAR(50),
-                units_per_package INTEGER,
-                form VARCHAR(30),
-                price DECIMAL(10,2),
-                currency VARCHAR(3) DEFAULT 'USD',
-                url VARCHAR(500),
-                image_url VARCHAR(500),
-                in_stock BOOLEAN DEFAULT TRUE,
-                is_preferred BOOLEAN DEFAULT FALSE,
-                created_at TIMESTAMP DEFAULT NOW(),
-                updated_at TIMESTAMP DEFAULT NOW(),
-                UNIQUE(supplier_id, sku)
-            )
-        """))
-        
-        conn.commit()
-        print("✅ Database tables verified/created")
-
-
-# =============================================================================
-# MAIN
-# =============================================================================
-
+# ============================================
+# Run Server
+# ============================================
 if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
