@@ -8,7 +8,10 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import List, Optional
-import asyncpg
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import uuid
+from datetime import datetime
 
 # ============================================
 # App Configuration
@@ -16,7 +19,7 @@ import asyncpg
 app = FastAPI(
     title="GenoMAX² API",
     description="Gender-Optimized Biological Operating System",
-    version="3.1.0"
+    version="3.1.1"
 )
 
 # ============================================
@@ -29,6 +32,7 @@ app.add_middleware(
         "https://genomax2-frontend-git-main-hemis-projects-6782105b.vercel.app",
         "http://localhost:3000",
         "http://127.0.0.1:3000",
+        "*",
     ],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
@@ -41,8 +45,13 @@ app.add_middleware(
 # ============================================
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-async def get_db():
-    return await asyncpg.connect(DATABASE_URL)
+def get_db():
+    try:
+        conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
+        return conn
+    except Exception as e:
+        print(f"Database connection error: {e}")
+        return None
 
 # ============================================
 # Pydantic Models
@@ -67,16 +76,21 @@ class InteractionCheckRequest(BaseModel):
     supplements: List[str]
 
 # ============================================
+# In-memory storage for intakes
+# ============================================
+intakes_store = {}
+
+# ============================================
 # Health & Version Endpoints
 # ============================================
 @app.get("/health")
-async def health():
+def health():
     return {"status": "healthy"}
 
 @app.get("/version")
-async def version():
+def version():
     return {
-        "version": "3.1.0",
+        "version": "3.1.1",
         "engine_version": "2.0",
         "logic_version": "1.5"
     }
@@ -85,98 +99,128 @@ async def version():
 # Goals Endpoint
 # ============================================
 @app.get("/goals")
-async def get_goals():
-    try:
-        conn = await get_db()
-        rows = await conn.fetch("""
-            SELECT id, name, category, description 
-            FROM health_goals 
-            ORDER BY category, name
-        """)
-        await conn.close()
-        return [dict(row) for row in rows]
-    except Exception as e:
-        # Return sample data if DB fails
-        return [
-            {"id": "1", "name": "Sleep Optimization", "category": "Recovery", "description": "Improve sleep quality"},
-            {"id": "2", "name": "Energy & Vitality", "category": "Performance", "description": "Boost daily energy"},
-            {"id": "3", "name": "Stress & Mood", "category": "Mental", "description": "Reduce stress and improve mood"},
-            {"id": "4", "name": "Muscle Building", "category": "Fitness", "description": "Support muscle growth"},
-            {"id": "5", "name": "Fat Loss", "category": "Body Composition", "description": "Support healthy weight"},
-            {"id": "6", "name": "Cognitive Function", "category": "Mental", "description": "Enhance focus and memory"},
-            {"id": "7", "name": "Heart Health", "category": "Longevity", "description": "Cardiovascular support"},
-            {"id": "8", "name": "Immune Support", "category": "Health", "description": "Strengthen immune system"},
-            {"id": "9", "name": "Joint Health", "category": "Recovery", "description": "Support joint function"},
-            {"id": "10", "name": "Hormone Balance", "category": "Optimization", "description": "Support hormonal health"},
-        ]
+def get_goals():
+    conn = get_db()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT id::text, name, category, description 
+                FROM health_goals 
+                ORDER BY category, name
+            """)
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            print(f"Error fetching goals: {e}")
+            if conn:
+                conn.close()
+    
+    # Return sample data if DB fails
+    return [
+        {"id": "1", "name": "Sleep Optimization", "category": "Recovery", "description": "Improve sleep quality"},
+        {"id": "2", "name": "Energy & Vitality", "category": "Performance", "description": "Boost daily energy"},
+        {"id": "3", "name": "Stress & Mood", "category": "Mental", "description": "Reduce stress and improve mood"},
+        {"id": "4", "name": "Muscle Building", "category": "Fitness", "description": "Support muscle growth"},
+        {"id": "5", "name": "Fat Loss", "category": "Body Composition", "description": "Support healthy weight"},
+        {"id": "6", "name": "Cognitive Function", "category": "Mental", "description": "Enhance focus and memory"},
+        {"id": "7", "name": "Heart Health", "category": "Longevity", "description": "Cardiovascular support"},
+        {"id": "8", "name": "Immune Support", "category": "Health", "description": "Strengthen immune system"},
+        {"id": "9", "name": "Joint Health", "category": "Recovery", "description": "Support joint function"},
+        {"id": "10", "name": "Hormone Balance", "category": "Optimization", "description": "Support hormonal health"},
+    ]
 
 # ============================================
 # Modules Endpoint
 # ============================================
 @app.get("/modules")
-async def get_modules():
-    try:
-        conn = await get_db()
-        rows = await conn.fetch("SELECT * FROM os_modules ORDER BY name")
-        await conn.close()
-        return [dict(row) for row in rows]
-    except Exception as e:
-        return []
+def get_modules():
+    conn = get_db()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM os_modules ORDER BY name")
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            print(f"Error fetching modules: {e}")
+            if conn:
+                conn.close()
+    return []
 
 # ============================================
 # Ingredients Endpoint
 # ============================================
 @app.get("/ingredients")
-async def get_ingredients():
-    try:
-        conn = await get_db()
-        rows = await conn.fetch("SELECT * FROM ingredients ORDER BY name")
-        await conn.close()
-        return [dict(row) for row in rows]
-    except Exception as e:
-        return []
+def get_ingredients():
+    conn = get_db()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM ingredients ORDER BY name")
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            print(f"Error fetching ingredients: {e}")
+            if conn:
+                conn.close()
+    return []
 
 @app.get("/ingredient/{name}")
-async def get_ingredient(name: str):
-    try:
-        conn = await get_db()
-        row = await conn.fetchrow(
-            "SELECT * FROM ingredients WHERE LOWER(name) = LOWER($1)", 
-            name
-        )
-        await conn.close()
-        if not row:
-            raise HTTPException(status_code=404, detail="Ingredient not found")
-        return dict(row)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+def get_ingredient(name: str):
+    conn = get_db()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT * FROM ingredients WHERE LOWER(name) = LOWER(%s)", 
+                (name,)
+            )
+            row = cur.fetchone()
+            cur.close()
+            conn.close()
+            if not row:
+                raise HTTPException(status_code=404, detail="Ingredient not found")
+            return dict(row)
+        except HTTPException:
+            raise
+        except Exception as e:
+            if conn:
+                conn.close()
+            raise HTTPException(status_code=500, detail=str(e))
+    raise HTTPException(status_code=500, detail="Database connection failed")
 
 # ============================================
 # Products Endpoint
 # ============================================
 @app.get("/products")
-async def get_products():
-    try:
-        conn = await get_db()
-        rows = await conn.fetch("SELECT * FROM supliful_products ORDER BY name")
-        await conn.close()
-        return [dict(row) for row in rows]
-    except Exception as e:
-        return []
+def get_products():
+    conn = get_db()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT * FROM supliful_products ORDER BY name")
+            rows = cur.fetchall()
+            cur.close()
+            conn.close()
+            return [dict(row) for row in rows]
+        except Exception as e:
+            print(f"Error fetching products: {e}")
+            if conn:
+                conn.close()
+    return []
 
 # ============================================
 # Intakes Endpoints (for Frontend Wizard)
 # ============================================
-import uuid
-from datetime import datetime
-
-# In-memory storage for intakes (use DB in production)
-intakes_store = {}
-
 @app.post("/intakes")
-async def create_intake(intake: IntakeCreate):
+def create_intake(intake: IntakeCreate):
     intake_id = str(uuid.uuid4())
     now = datetime.utcnow().isoformat() + "Z"
     
@@ -196,13 +240,13 @@ async def create_intake(intake: IntakeCreate):
     }
 
 @app.get("/intakes/{intake_id}")
-async def get_intake(intake_id: str):
+def get_intake(intake_id: str):
     if intake_id not in intakes_store:
         raise HTTPException(status_code=404, detail="Intake not found")
     return intakes_store[intake_id]
 
 @app.patch("/intakes/{intake_id}/assessment")
-async def update_assessment(intake_id: str, assessment: AssessmentUpdate):
+def update_assessment(intake_id: str, assessment: AssessmentUpdate):
     if intake_id not in intakes_store:
         raise HTTPException(status_code=404, detail="Intake not found")
     
@@ -223,7 +267,7 @@ async def update_assessment(intake_id: str, assessment: AssessmentUpdate):
     return intake
 
 @app.post("/intakes/{intake_id}/process")
-async def process_intake(intake_id: str):
+def process_intake(intake_id: str):
     if intake_id not in intakes_store:
         raise HTTPException(status_code=404, detail="Intake not found")
     
@@ -334,7 +378,7 @@ async def process_intake(intake_id: str):
 # Legacy Recommend Endpoint
 # ============================================
 @app.post("/recommend")
-async def recommend(request: RecommendRequest):
+def recommend(request: RecommendRequest):
     # Create temporary intake and process
     intake_id = str(uuid.uuid4())
     gender_os = "maxima" if request.gender.lower() == "female" else "maximo"
@@ -376,13 +420,13 @@ async def recommend(request: RecommendRequest):
         "updated_at": datetime.utcnow().isoformat() + "Z",
     }
     
-    return await process_intake(intake_id)
+    return process_intake(intake_id)
 
 # ============================================
 # Interaction Check Endpoint
 # ============================================
 @app.post("/check-interactions")
-async def check_interactions(request: InteractionCheckRequest):
+def check_interactions(request: InteractionCheckRequest):
     interactions = []
     
     # Sample interaction data
