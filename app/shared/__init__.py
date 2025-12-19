@@ -1,1 +1,1 @@
-"""GenoMAXý Shared Utilities""" 
+"""GenoMAX2 Shared Utilities"""
