@@ -93,6 +93,43 @@ intakes_store = {}
 def health():
     return {"status": "healthy"}
 
+@app.get("/migrate-brain")
+def migrate_brain():
+    conn = get_db()
+    if not conn:
+        return {"error": "Database connection failed"}
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS brain_runs (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id UUID,
+                status VARCHAR(20) DEFAULT 'running',
+                input_hash VARCHAR(64),
+                output_hash VARCHAR(64),
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                completed_at TIMESTAMPTZ
+            );
+            CREATE TABLE IF NOT EXISTS signal_registry (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                user_id UUID NOT NULL,
+                signal_type VARCHAR(50) NOT NULL,
+                signal_hash VARCHAR(64) NOT NULL,
+                signal_json JSONB NOT NULL,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(user_id, signal_type, signal_hash)
+            );
+            CREATE INDEX IF NOT EXISTS idx_signal_user ON signal_registry(user_id);
+            CREATE INDEX IF NOT EXISTS idx_brain_runs_user ON brain_runs(user_id);
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {"status": "success", "message": "Brain tables created"}
+    except Exception as e:
+        conn.close()
+        return {"error": str(e)}
+
 @app.get("/version")
 def version():
     return {
