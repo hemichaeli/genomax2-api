@@ -11,7 +11,8 @@ from typing import List, Optional
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import uuid
-from datetime import datetime`nfrom app.brain import brain_router
+from datetime import datetime
+from app.brain import brain_router
 
 # ============================================
 # App Configuration
@@ -19,11 +20,11 @@ from datetime import datetime`nfrom app.brain import brain_router
 app = FastAPI(
     title="GenoMAX² API",
     description="Gender-Optimized Biological Operating System",
-    version="3.1.1"
+    version="3.2.0"
 )
 
 # ============================================
-# CORS Configuration - CRITICAL FOR VERCEL
+# CORS Configuration
 # ============================================
 app.add_middleware(
     CORSMiddleware,
@@ -39,6 +40,11 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["*"],
 )
+
+# ============================================
+# Brain API Router
+# ============================================
+app.include_router(brain_router)
 
 # ============================================
 # Database Connection
@@ -57,7 +63,7 @@ def get_db():
 # Pydantic Models
 # ============================================
 class IntakeCreate(BaseModel):
-    gender_os: str  # 'maximo' or 'maxima'
+    gender_os: str
 
 class AssessmentUpdate(BaseModel):
     demographics: Optional[dict] = None
@@ -90,9 +96,10 @@ def health():
 @app.get("/version")
 def version():
     return {
-        "version": "3.1.1",
+        "version": "3.2.0",
         "engine_version": "2.0",
-        "logic_version": "1.5"
+        "logic_version": "1.5",
+        "brain_version": "1.0.0"
     }
 
 # ============================================
@@ -105,8 +112,8 @@ def get_goals():
         try:
             cur = conn.cursor()
             cur.execute("""
-                SELECT id::text, name, category, description 
-                FROM health_goals 
+                SELECT id::text, name, category, description
+                FROM health_goals
                 ORDER BY category, name
             """)
             rows = cur.fetchall()
@@ -117,8 +124,7 @@ def get_goals():
             print(f"Error fetching goals: {e}")
             if conn:
                 conn.close()
-    
-    # Return sample data if DB fails
+
     return [
         {"id": "1", "name": "Sleep Optimization", "category": "Recovery", "description": "Improve sleep quality"},
         {"id": "2", "name": "Energy & Vitality", "category": "Performance", "description": "Boost daily energy"},
@@ -179,7 +185,7 @@ def get_ingredient(name: str):
         try:
             cur = conn.cursor()
             cur.execute(
-                "SELECT * FROM ingredients WHERE LOWER(name) = LOWER(%s)", 
+                "SELECT * FROM ingredients WHERE LOWER(name) = LOWER(%s)",
                 (name,)
             )
             row = cur.fetchone()
@@ -217,13 +223,13 @@ def get_products():
     return []
 
 # ============================================
-# Intakes Endpoints (for Frontend Wizard)
+# Intakes Endpoints
 # ============================================
 @app.post("/intakes")
 def create_intake(intake: IntakeCreate):
     intake_id = str(uuid.uuid4())
     now = datetime.utcnow().isoformat() + "Z"
-    
+
     intakes_store[intake_id] = {
         "id": intake_id,
         "gender_os": intake.gender_os,
@@ -232,7 +238,7 @@ def create_intake(intake: IntakeCreate):
         "created_at": now,
         "updated_at": now,
     }
-    
+
     return {
         "id": intake_id,
         "gender_os": intake.gender_os,
@@ -249,10 +255,9 @@ def get_intake(intake_id: str):
 def update_assessment(intake_id: str, assessment: AssessmentUpdate):
     if intake_id not in intakes_store:
         raise HTTPException(status_code=404, detail="Intake not found")
-    
+
     intake = intakes_store[intake_id]
-    
-    # Merge assessment data
+
     if assessment.demographics:
         intake["assessment"]["demographics"] = assessment.demographics
     if assessment.lifestyle:
@@ -261,29 +266,25 @@ def update_assessment(intake_id: str, assessment: AssessmentUpdate):
         intake["assessment"]["goals"] = assessment.goals
     if assessment.medical:
         intake["assessment"]["medical"] = assessment.medical
-    
+
     intake["updated_at"] = datetime.utcnow().isoformat() + "Z"
-    
+
     return intake
 
 @app.post("/intakes/{intake_id}/process")
 def process_intake(intake_id: str):
     if intake_id not in intakes_store:
         raise HTTPException(status_code=404, detail="Intake not found")
-    
+
     intake = intakes_store[intake_id]
     assessment = intake.get("assessment", {})
     gender_os = intake.get("gender_os", "maximo")
-    
-    # Extract data from assessment
+
     goals = assessment.get("goals", {}).get("primary_goals", [])
     medications = assessment.get("medical", {}).get("medications", [])
-    conditions = assessment.get("medical", {}).get("conditions", [])
-    
-    # Generate recommendations (simplified version)
+
     primary_recommendations = []
-    
-    # Sample recommendations based on goals
+
     goal_ingredients = {
         "1": {"name": "Magnesium Glycinate", "dosage": "400mg", "timing": "Before bed", "rationale": "Supports sleep quality and relaxation"},
         "2": {"name": "B-Complex", "dosage": "1 capsule", "timing": "Morning", "rationale": "Supports energy metabolism"},
@@ -296,7 +297,7 @@ def process_intake(intake_id: str):
         "9": {"name": "Glucosamine", "dosage": "1500mg", "timing": "With meals", "rationale": "Supports joint health"},
         "10": {"name": "Zinc", "dosage": "30mg", "timing": "Evening", "rationale": "Supports hormone production"},
     }
-    
+
     for i, goal_id in enumerate(goals[:5]):
         if goal_id in goal_ingredients:
             ing = goal_ingredients[goal_id]
@@ -309,8 +310,7 @@ def process_intake(intake_id: str):
                 "relevance_score": 95 - (i * 5),
                 "rationale": ing["rationale"]
             })
-    
-    # Add gender-specific recommendation
+
     if gender_os == "maxima":
         primary_recommendations.append({
             "ingredient_id": "female_1",
@@ -331,8 +331,7 @@ def process_intake(intake_id: str):
             "relevance_score": 85,
             "rationale": "Supports healthy testosterone levels in men"
         })
-    
-    # Check for warnings
+
     warnings = []
     if medications and len(medications) > 0:
         warnings.append({
@@ -341,8 +340,7 @@ def process_intake(intake_id: str):
             "message": "Please consult with your healthcare provider about potential interactions with your current medications.",
             "affected_items": medications
         })
-    
-    # Build result
+
     result = {
         "metadata": {
             "result_id": str(uuid.uuid4()),
@@ -367,11 +365,10 @@ def process_intake(intake_id: str):
         "goal_conflict": False,
         "goal_conflict_explanation": None
     }
-    
-    # Update intake status
+
     intake["status"] = "completed"
     intake["updated_at"] = datetime.utcnow().isoformat() + "Z"
-    
+
     return result
 
 # ============================================
@@ -379,11 +376,9 @@ def process_intake(intake_id: str):
 # ============================================
 @app.post("/recommend")
 def recommend(request: RecommendRequest):
-    # Create temporary intake and process
     intake_id = str(uuid.uuid4())
     gender_os = "maxima" if request.gender.lower() == "female" else "maximo"
-    
-    # Map goal names to IDs (simplified)
+
     goal_map = {
         "sleep optimization": "1",
         "energy & vitality": "2",
@@ -396,7 +391,7 @@ def recommend(request: RecommendRequest):
         "joint health": "9",
         "hormone balance": "10",
     }
-    
+
     goal_ids = []
     for goal in request.goals:
         goal_lower = goal.lower()
@@ -404,7 +399,7 @@ def recommend(request: RecommendRequest):
             goal_ids.append(goal_map[goal_lower])
         else:
             goal_ids.append(goal)
-    
+
     intakes_store[intake_id] = {
         "id": intake_id,
         "gender_os": gender_os,
@@ -419,7 +414,7 @@ def recommend(request: RecommendRequest):
         "created_at": datetime.utcnow().isoformat() + "Z",
         "updated_at": datetime.utcnow().isoformat() + "Z",
     }
-    
+
     return process_intake(intake_id)
 
 # ============================================
@@ -428,15 +423,14 @@ def recommend(request: RecommendRequest):
 @app.post("/check-interactions")
 def check_interactions(request: InteractionCheckRequest):
     interactions = []
-    
-    # Sample interaction data
+
     known_interactions = {
         "warfarin": ["vitamin k", "omega-3", "ginkgo"],
         "blood thinners": ["vitamin e", "fish oil", "garlic"],
         "antidepressants": ["st john's wort", "5-htp", "sam-e"],
         "thyroid medication": ["calcium", "iron", "magnesium"],
     }
-    
+
     for med in request.medications:
         med_lower = med.lower()
         for drug, interacting_supps in known_interactions.items():
@@ -449,7 +443,7 @@ def check_interactions(request: InteractionCheckRequest):
                             "severity": "moderate",
                             "description": f"{supp} may interact with {med}. Consult your healthcare provider."
                         })
-    
+
     return {
         "has_interactions": len(interactions) > 0,
         "interactions": interactions
