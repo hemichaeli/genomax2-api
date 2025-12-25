@@ -1,13 +1,16 @@
 """
 GenoMAX² API Server
 Gender-Optimized Biological Operating System
-Version 3.8.0 - Phase 3 Route Integration
+Version 3.8.1 - Route Query Optimization
 
-v3.8.0:
-- Added /api/v1/brain/route endpoint (Phase 3: Constraint-Aware Module Routing)
-- Added INTENT_CATALOG for deterministic intent->module mapping
-- Route queries os_modules table with blocked_ingredients filtering
+v3.8.1:
+- Route uses exact deterministic queries (A/B/E pattern)
+- Query A: protocol_runs -> run_id (404 if missing)
+- Query B: JSONB #>> for gender extraction (422 if missing)  
+- Query E: ILIKE ANY() for module selection
+- Direct run_id INSERT instead of subquery
 
+v3.8.0: Added /api/v1/brain/route endpoint
 v3.7.2: Added /debug/catalog-gaps endpoint
 """
 
@@ -24,7 +27,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import uuid
 
-app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.8.0")
+app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.8.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -639,22 +642,22 @@ def migrate_brain_full():
 
 @app.get("/")
 def root():
-    return {"service": "GenoMAX² API", "version": "3.8.0", "status": "operational"}
+    return {"service": "GenoMAX² API", "version": "3.8.1", "status": "operational"}
 
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "3.8.0"}
+    return {"status": "healthy", "version": "3.8.1"}
 
 
 @app.get("/version")
 def version():
-    return {"api_version": "3.8.0", "brain_version": "1.4.0", "features": ["orchestrate", "orchestrate_v2", "compose", "route", "debug-catalog", "debug-catalog-gaps"]}
+    return {"api_version": "3.8.1", "brain_version": "1.4.1", "features": ["orchestrate", "orchestrate_v2", "compose", "route", "debug-catalog", "debug-catalog-gaps"]}
 
 
 @app.get("/api/v1/brain/health")
 def brain_health():
-    return {"status": "healthy", "service": "brain", "version": "1.4.0"}
+    return {"status": "healthy", "service": "brain", "version": "1.4.1"}
 
 
 @app.post("/api/v1/brain/orchestrate/v2", response_model=OrchestrateOutputV2)
@@ -668,9 +671,9 @@ async def brain_orchestrate_v2(request: OrchestrateInputV2) -> OrchestrateOutput
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"error": "INVALID_SCHEMA_VERSION"})
     routing_constraints = build_routing_constraints_from_gates(signal)
     run_id = str(uuid.uuid4())
-    output_data = {"run_id": run_id, "signal_id": signal.signal_id, "routing_constraints": routing_constraints, "selected_goals": request.selected_goals}
+    output_data = {"run_id": run_id, "signal_id": signal.signal_id, "routing_constraints": routing_constraints, "selected_goals": request.selected_goals, "assessment_context": request.assessment_context}
     output_hash = compute_hash(output_data)
-    chain_entry = {"stage": "brain_orchestrate_v2", "engine": "brain_1.4.0", "timestamp": created_at, "input_hashes": [signal.audit.output_hash], "output_hash": output_hash}
+    chain_entry = {"stage": "brain_orchestrate_v2", "engine": "brain_1.4.1", "timestamp": created_at, "input_hashes": [signal.audit.output_hash], "output_hash": output_hash}
     conn = get_db()
     if conn:
         try:
@@ -764,6 +767,11 @@ def brain_route(request: RouteRequest):
     """
     Phase 3: Constraint-Aware Module Routing
     Converts protocol_intents to sku_plan by querying os_modules.
+    
+    Query flow:
+    A) protocol_runs -> run_id (404 if missing)
+    B) decision_outputs -> gender via JSONB #>> (422 if missing)
+    E) os_modules -> module matching via ILIKE ANY
     """
     created_at = now_iso()
     
@@ -774,35 +782,62 @@ def brain_route(request: RouteRequest):
     try:
         cur = conn.cursor()
         
-        # Fetch orchestrate output for assessment_context.gender
+        # Query A: Get run_id from protocol_id (deterministic lookup)
         cur.execute("""
-            SELECT do.output_json FROM decision_outputs do
-            JOIN protocol_runs pr ON do.run_id = pr.run_id
-            WHERE pr.id = %s AND do.phase IN ('orchestrate', 'orchestrate_v2')
-            ORDER BY do.created_at DESC LIMIT 1
+            SELECT pr.run_id
+            FROM protocol_runs pr
+            WHERE pr.id = %s
+            LIMIT 1
         """, (request.protocol_id,))
-        orch_row = cur.fetchone()
+        run_row = cur.fetchone()
         
-        if not orch_row:
+        if not run_row or not run_row.get("run_id"):
             cur.close()
             conn.close()
-            raise HTTPException(status_code=404, detail=f"No orchestrate output for protocol_id: {request.protocol_id}")
+            raise HTTPException(status_code=404, detail=f"No run_id found for protocol_id: {request.protocol_id}")
         
-        assessment_context = orch_row["output_json"].get("assessment_context", {})
+        run_id = run_row["run_id"]
+        
+        # Query B: Get gender from orchestrate output via JSONB operator
+        cur.execute("""
+            SELECT
+                COALESCE(
+                    do.output_json #>> '{assessment_context,gender}',
+                    do.output_json #>> '{assessment_context,sex}'
+                ) AS gender
+            FROM decision_outputs do
+            WHERE do.run_id = %s
+              AND do.phase IN ('orchestrate_v2', 'orchestrate')
+            ORDER BY do.created_at DESC
+            LIMIT 1
+        """, (run_id,))
+        gender_row = cur.fetchone()
+        
+        gender = gender_row.get("gender") if gender_row else None
+        
+        if not gender:
+            cur.close()
+            conn.close()
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "MISSING_OS_ENVIRONMENT", "message": "Cannot route without assessment_context.gender"}
+            )
         
         # Derive OS environment from gender
-        os_env = derive_os_environment(assessment_context)
-        if not os_env:
+        gender_lower = gender.lower()
+        if gender_lower == "male":
+            os_env = "MAXimo²"
+        elif gender_lower == "female":
+            os_env = "MAXima²"
+        else:
             cur.close()
             conn.close()
-            return {
-                "protocol_id": request.protocol_id,
-                "sku_plan": {"items": []},
-                "skipped_intents": [],
-                "audit": {"status": "FAILED", "error": "MISSING_OS_ENVIRONMENT", "details": "Cannot route without assessment_context.gender", "created_at": created_at}
-            }
+            raise HTTPException(
+                status_code=422,
+                detail={"error": "INVALID_GENDER", "message": f"Gender '{gender}' not recognized. Expected 'male' or 'female'."}
+            )
         
-        # Extract constraints
+        # Extract constraints from request (with optional DB fallback)
         blocked_targets = request.routing_constraints.get("blocked_targets", [])
         caution_targets = request.routing_constraints.get("caution_targets", [])
         blocked_ingredients = request.routing_constraints.get("blocked_ingredients", [])
@@ -827,46 +862,56 @@ def brain_route(request: RouteRequest):
                 skipped_intents.append({"intent_id": intent_id, "reason": "BLOCKED_BY_TARGET", "reason_codes": ["BLOCKED_TARGET"], "details": {"blocked_by": blocking}})
                 continue
             
-            query, params = build_module_query(
-                os_env=os_env,
-                must_have_tags=intent_spec.get("must_have_tags", []),
-                blocked_ingredients=blocked_ingredients,
-                max_modules=intent_spec.get("max_modules", 1)
-            )
+            # Query E: Module selection with ILIKE ANY pattern
+            must_have_tags = intent_spec.get("must_have_tags", [])
+            must_patterns = [f"%{tag}%" for tag in must_have_tags] if must_have_tags else ["%__match_all__%"]
+            blocked_patterns = [f"%{ing}%" for ing in blocked_ingredients] if blocked_ingredients else ["%__never_match__%"]
             
-            cur.execute(query, params)
-            rows = cur.fetchall()
+            cur.execute("""
+                SELECT module_code, product_name, os_layer, biological_domain, shopify_store, shopify_handle
+                FROM os_modules
+                WHERE os_environment = %s
+                  AND ingredient_tags ILIKE ANY(%s)
+                  AND NOT (ingredient_tags ILIKE ANY(%s))
+                ORDER BY
+                    CASE os_layer WHEN 'Core' THEN 1 WHEN 'Adaptive' THEN 2 ELSE 3 END,
+                    biological_domain,
+                    module_code
+                LIMIT 1
+            """, (os_env, must_patterns, blocked_patterns))
             
-            if not rows:
-                skipped_intents.append({"intent_id": intent_id, "reason": "NO_MATCHING_MODULE", "reason_codes": ["NO_MODULE_FOUND"], "details": {"must_have_tags": intent_spec.get("must_have_tags", [])}})
+            row = cur.fetchone()
+            
+            if not row:
+                skipped_intents.append({"intent_id": intent_id, "reason": "NO_MATCHING_MODULE", "reason_codes": ["NO_MODULE_FOUND"], "details": {"must_have_tags": must_have_tags, "os_environment": os_env}})
                 continue
             
-            for row in rows:
-                module_code = row["module_code"]
-                if module_code in used_modules:
-                    continue
-                used_modules.add(module_code)
-                
-                reason_codes = []
-                if has_caution_target(intent_spec, caution_targets):
-                    reason_codes.append("CAUTION_TARGET")
-                
-                sku_items.append({
-                    "sku": module_code,
-                    "intent_id": intent_id,
-                    "target_id": target_id,
-                    "shopify_store": row["shopify_store"] or "",
-                    "shopify_handle": row["shopify_handle"] or "",
-                    "reason_codes": reason_codes
-                })
+            module_code = row["module_code"]
+            if module_code in used_modules:
+                continue
+            used_modules.add(module_code)
+            
+            reason_codes = []
+            if has_caution_target(intent_spec, caution_targets):
+                reason_codes.append("CAUTION_TARGET")
+            
+            sku_items.append({
+                "sku": module_code,
+                "intent_id": intent_id,
+                "target_id": target_id,
+                "shopify_store": row["shopify_store"] or "",
+                "shopify_handle": row["shopify_handle"] or "",
+                "reason_codes": reason_codes
+            })
         
+        # Write-back to decision_outputs for replay/debug
         output_data = {"protocol_id": request.protocol_id, "sku_plan": {"items": sku_items}, "skipped_intents": skipped_intents}
         output_hash = compute_hash(output_data)
         
         cur.execute("""
             INSERT INTO decision_outputs (run_id, phase, output_json, output_hash)
-            SELECT run_id, 'route', %s, %s FROM protocol_runs WHERE id = %s
-        """, (json.dumps(output_data, default=str), output_hash, request.protocol_id))
+            VALUES (%s, 'route', %s, %s)
+        """, (run_id, json.dumps(output_data, default=str), output_hash))
         conn.commit()
         cur.close()
         conn.close()
@@ -877,7 +922,9 @@ def brain_route(request: RouteRequest):
             "skipped_intents": skipped_intents,
             "audit": {
                 "status": "SUCCESS",
+                "run_id": str(run_id),
                 "os_environment": os_env,
+                "gender_source": "decision_outputs.orchestrate",
                 "intents_processed": len(supplement_intents),
                 "modules_routed": len(sku_items),
                 "intents_skipped": len(skipped_intents),
