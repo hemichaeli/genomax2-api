@@ -1,10 +1,14 @@
 """
 GenoMAX² API Server
 Gender-Optimized Biological Operating System
-Version 3.7.2 - Catalog Gap Analysis
+Version 3.8.0 - Phase 3 Route Integration
 
-v3.7.2:
-- Added /debug/catalog-gaps endpoint for detailed gap analysis
+v3.8.0:
+- Added /api/v1/brain/route endpoint (Phase 3: Constraint-Aware Module Routing)
+- Added INTENT_CATALOG for deterministic intent->module mapping
+- Route queries os_modules table with blocked_ingredients filtering
+
+v3.7.2: Added /debug/catalog-gaps endpoint
 """
 
 import os
@@ -20,7 +24,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import uuid
 
-app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.7.2")
+app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.8.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -185,6 +189,36 @@ class ComposeRequest(BaseModel):
     selected_goals: List[str]
 
 
+# =============================================================================
+# Phase 3: Route Models
+# =============================================================================
+
+class RouteRequest(BaseModel):
+    protocol_id: str
+    protocol_intents: Dict[str, Any]
+    routing_constraints: Dict[str, Any]
+
+
+class SKUItem(BaseModel):
+    sku: str
+    intent_id: str
+    target_id: str
+    shopify_store: str
+    shopify_handle: str
+    reason_codes: List[str] = Field(default_factory=list)
+
+
+class SKUPlan(BaseModel):
+    items: List[SKUItem] = Field(default_factory=list)
+
+
+class SkippedIntent(BaseModel):
+    intent_id: str
+    reason: str
+    reason_codes: List[str] = Field(default_factory=list)
+    details: Optional[Dict[str, Any]] = None
+
+
 def compute_hash(data: Any) -> str:
     json_str = json.dumps(data, sort_keys=True, default=str)
     return f"sha256:{hashlib.sha256(json_str.encode()).hexdigest()}"
@@ -240,6 +274,232 @@ ROUTING_RULES = {
     "vitamin_d": {"low_threshold": 30, "constraint": {"ingredient_class": "vitamin_d", "constraint_type": "required", "reason": "Vitamin D deficient ({value} ng/mL). Supplementation recommended.", "severity": "soft"}},
     "b12": {"low_threshold": 400, "constraint": {"ingredient_class": "vitamin_b12", "constraint_type": "required", "reason": "B12 suboptimal ({value} pg/mL). Supplementation recommended.", "severity": "soft"}}
 }
+
+# =============================================================================
+# INTENT CATALOG - Maps intent_id to os_modules selection criteria
+# =============================================================================
+
+INTENT_CATALOG = {
+    "magnesium_for_sleep": {
+        "must_have_tags": ["magnesium"],
+        "blocked_by_targets": [],
+        "caution_by_targets": [],
+        "max_modules": 1
+    },
+    "glycine_for_sleep": {
+        "must_have_tags": ["gaba-oral", "l-theanine"],
+        "blocked_by_targets": [],
+        "caution_by_targets": [],
+        "max_modules": 1
+    },
+    "omega3_brain_support": {
+        "must_have_tags": ["omega-3-epa"],
+        "blocked_by_targets": [],
+        "caution_by_targets": [],
+        "max_modules": 1
+    },
+    "omega3_cardiovascular": {
+        "must_have_tags": ["omega-3-epa"],
+        "blocked_by_targets": [],
+        "caution_by_targets": [],
+        "max_modules": 1
+    },
+    "omega3_antiinflammatory": {
+        "must_have_tags": ["omega-3-epa"],
+        "blocked_by_targets": [],
+        "caution_by_targets": [],
+        "max_modules": 1
+    },
+    "iron_energy_support": {
+        "must_have_tags": ["iron-when-deficient"],
+        "blocked_by_targets": ["iron_boost", "ferritin_elevated"],
+        "caution_by_targets": [],
+        "max_modules": 1
+    },
+    "b12_energy_support": {
+        "must_have_tags": ["niacin-vitamin-b3"],
+        "blocked_by_targets": [],
+        "caution_by_targets": [],
+        "max_modules": 1
+    },
+    "coq10_cellular_energy": {
+        "must_have_tags": ["coq10-ubiquinone", "ubiquinol"],
+        "blocked_by_targets": [],
+        "caution_by_targets": [],
+        "max_modules": 1
+    },
+    "coq10_heart_support": {
+        "must_have_tags": ["coq10-ubiquinone", "ubiquinol"],
+        "blocked_by_targets": [],
+        "caution_by_targets": [],
+        "max_modules": 1
+    },
+    "magnesium_stress_support": {
+        "must_have_tags": ["magnesium"],
+        "blocked_by_targets": [],
+        "caution_by_targets": [],
+        "max_modules": 1
+    },
+    "magnesium_heart": {
+        "must_have_tags": ["magnesium"],
+        "blocked_by_targets": [],
+        "caution_by_targets": [],
+        "max_modules": 1
+    },
+    "adaptogen_support": {
+        "must_have_tags": ["holy-basil-tulsi", "panax-ginseng"],
+        "blocked_by_targets": [],
+        "caution_by_targets": [],
+        "max_modules": 1
+    },
+    "lions_mane_cognition": {
+        "must_have_tags": ["lion-s-mane-hericium-erinaceus"],
+        "blocked_by_targets": [],
+        "caution_by_targets": [],
+        "max_modules": 1
+    },
+    "vitamin_d_immune": {
+        "must_have_tags": ["vitamin-d3"],
+        "blocked_by_targets": ["hypercalcemia"],
+        "caution_by_targets": ["high_dose_vitamin_d"],
+        "max_modules": 1
+    },
+    "zinc_immune_support": {
+        "must_have_tags": ["zinc"],
+        "blocked_by_targets": [],
+        "caution_by_targets": [],
+        "max_modules": 1
+    },
+    "vitamin_c_immune": {
+        "must_have_tags": ["vitamin-c"],
+        "blocked_by_targets": [],
+        "caution_by_targets": [],
+        "max_modules": 1
+    },
+    "probiotic_support": {
+        "must_have_tags": ["probiotics-multi-strain"],
+        "blocked_by_targets": [],
+        "caution_by_targets": [],
+        "max_modules": 1
+    },
+    "digestive_enzyme_support": {
+        "must_have_tags": ["digestive-enzymes"],
+        "blocked_by_targets": [],
+        "caution_by_targets": [],
+        "max_modules": 1
+    },
+    "curcumin_inflammation": {
+        "must_have_tags": ["curcumin"],
+        "blocked_by_targets": [],
+        "caution_by_targets": [],
+        "max_modules": 1
+    },
+    "milk_thistle_liver": {
+        "must_have_tags": ["milk-thistle-silymarin"],
+        "blocked_by_targets": ["hepatotoxic"],
+        "caution_by_targets": [],
+        "max_modules": 1
+    },
+    "nac_liver_support": {
+        "must_have_tags": ["nac-n-acetyl-cysteine"],
+        "blocked_by_targets": [],
+        "caution_by_targets": [],
+        "max_modules": 1
+    },
+    "creatine_performance": {
+        "must_have_tags": ["creatine-monohydrate"],
+        "blocked_by_targets": ["kidney_impairment"],
+        "caution_by_targets": [],
+        "max_modules": 1
+    },
+    "protein_muscle_support": {
+        "must_have_tags": ["whey-protein"],
+        "blocked_by_targets": [],
+        "caution_by_targets": [],
+        "max_modules": 1
+    },
+    "collagen_joint_support": {
+        "must_have_tags": ["collagen-peptides"],
+        "blocked_by_targets": [],
+        "caution_by_targets": [],
+        "max_modules": 1
+    },
+    "berberine_glucose": {
+        "must_have_tags": ["berberine"],
+        "blocked_by_targets": [],
+        "caution_by_targets": ["metformin_interaction"],
+        "max_modules": 1
+    },
+    "fiber_gut_health": {
+        "must_have_tags": ["psyllium-husk"],
+        "blocked_by_targets": [],
+        "caution_by_targets": [],
+        "max_modules": 1
+    },
+    "melatonin_sleep": {
+        "must_have_tags": ["melatonin"],
+        "blocked_by_targets": [],
+        "caution_by_targets": [],
+        "max_modules": 1
+    }
+}
+
+
+# =============================================================================
+# Phase 3: Route Helper Functions
+# =============================================================================
+
+def derive_os_environment(assessment_context: Dict[str, Any]) -> Optional[str]:
+    """Derive os_environment from assessment_context.gender."""
+    gender = assessment_context.get("gender", "").lower()
+    if gender == "male":
+        return "MAXimo²"
+    elif gender == "female":
+        return "MAXima²"
+    return None
+
+
+def is_blocked_by_target(intent_spec: Dict, blocked_targets: List[str]) -> bool:
+    """Check if intent is blocked by any target."""
+    return any(t in blocked_targets for t in intent_spec.get("blocked_by_targets", []))
+
+
+def has_caution_target(intent_spec: Dict, caution_targets: List[str]) -> bool:
+    """Check if intent has caution from any target."""
+    return any(t in caution_targets for t in intent_spec.get("caution_by_targets", []))
+
+
+def build_module_query(os_env: str, must_have_tags: List[str], blocked_ingredients: List[str], max_modules: int = 1) -> tuple:
+    """Build SQL query for os_modules. Returns (query_string, params_tuple)."""
+    query_parts = ["""
+        SELECT module_code, product_name, os_environment, os_layer, biological_domain,
+               ingredient_tags, shopify_store, shopify_handle
+        FROM os_modules
+        WHERE os_environment = %s
+    """]
+    params = [os_env]
+    
+    if must_have_tags:
+        tag_conditions = []
+        for tag in must_have_tags:
+            tag_conditions.append("ingredient_tags ILIKE %s")
+            params.append(f"%'{tag}'%")
+        query_parts.append(f"AND ({' OR '.join(tag_conditions)})")
+    
+    for blocked in blocked_ingredients:
+        query_parts.append("AND ingredient_tags NOT ILIKE %s")
+        params.append(f"%'{blocked}'%")
+    
+    query_parts.append("""
+        ORDER BY
+            CASE os_layer WHEN 'Core' THEN 1 WHEN 'Adaptive' THEN 2 ELSE 3 END,
+            LENGTH(ingredient_tags) - LENGTH(REPLACE(ingredient_tags, ',', '')),
+            module_code
+        LIMIT %s
+    """)
+    params.append(max_modules)
+    
+    return " ".join(query_parts), tuple(params)
 
 
 def derive_routing_constraints(markers: Dict[str, float]) -> List[Dict[str, Any]]:
@@ -379,22 +639,22 @@ def migrate_brain_full():
 
 @app.get("/")
 def root():
-    return {"service": "GenoMAX² API", "version": "3.7.2", "status": "operational"}
+    return {"service": "GenoMAX² API", "version": "3.8.0", "status": "operational"}
 
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "3.7.2"}
+    return {"status": "healthy", "version": "3.8.0"}
 
 
 @app.get("/version")
 def version():
-    return {"api_version": "3.7.2", "brain_version": "1.3.0", "features": ["orchestrate", "orchestrate_v2", "compose", "debug-catalog", "debug-catalog-gaps"]}
+    return {"api_version": "3.8.0", "brain_version": "1.4.0", "features": ["orchestrate", "orchestrate_v2", "compose", "route", "debug-catalog", "debug-catalog-gaps"]}
 
 
 @app.get("/api/v1/brain/health")
 def brain_health():
-    return {"status": "healthy", "service": "brain", "version": "1.3.0"}
+    return {"status": "healthy", "service": "brain", "version": "1.4.0"}
 
 
 @app.post("/api/v1/brain/orchestrate/v2", response_model=OrchestrateOutputV2)
@@ -410,7 +670,7 @@ async def brain_orchestrate_v2(request: OrchestrateInputV2) -> OrchestrateOutput
     run_id = str(uuid.uuid4())
     output_data = {"run_id": run_id, "signal_id": signal.signal_id, "routing_constraints": routing_constraints, "selected_goals": request.selected_goals}
     output_hash = compute_hash(output_data)
-    chain_entry = {"stage": "brain_orchestrate_v2", "engine": "brain_1.3.0", "timestamp": created_at, "input_hashes": [signal.audit.output_hash], "output_hash": output_hash}
+    chain_entry = {"stage": "brain_orchestrate_v2", "engine": "brain_1.4.0", "timestamp": created_at, "input_hashes": [signal.audit.output_hash], "output_hash": output_hash}
     conn = get_db()
     if conn:
         try:
@@ -499,6 +759,146 @@ def brain_compose(request: ComposeRequest):
     return {"protocol_id": protocol_id, "status": "success", "phase": "compose", "run_id": request.run_id, "selected_goals": request.selected_goals, "protocol_intents": protocol_intents, "summary": {"constraints_applied": compose_output["constraints_applied"], "intents_generated": compose_output["intents_generated"]}, "next_phase": "route", "audit": {"created_at": created_at, "input_hashes": [orchestrate_hash], "output_hash": output_hash}}
 
 
+@app.post("/api/v1/brain/route")
+def brain_route(request: RouteRequest):
+    """
+    Phase 3: Constraint-Aware Module Routing
+    Converts protocol_intents to sku_plan by querying os_modules.
+    """
+    created_at = now_iso()
+    
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        cur = conn.cursor()
+        
+        # Fetch orchestrate output for assessment_context.gender
+        cur.execute("""
+            SELECT do.output_json FROM decision_outputs do
+            JOIN protocol_runs pr ON do.run_id = pr.run_id
+            WHERE pr.id = %s AND do.phase IN ('orchestrate', 'orchestrate_v2')
+            ORDER BY do.created_at DESC LIMIT 1
+        """, (request.protocol_id,))
+        orch_row = cur.fetchone()
+        
+        if not orch_row:
+            cur.close()
+            conn.close()
+            raise HTTPException(status_code=404, detail=f"No orchestrate output for protocol_id: {request.protocol_id}")
+        
+        assessment_context = orch_row["output_json"].get("assessment_context", {})
+        
+        # Derive OS environment from gender
+        os_env = derive_os_environment(assessment_context)
+        if not os_env:
+            cur.close()
+            conn.close()
+            return {
+                "protocol_id": request.protocol_id,
+                "sku_plan": {"items": []},
+                "skipped_intents": [],
+                "audit": {"status": "FAILED", "error": "MISSING_OS_ENVIRONMENT", "details": "Cannot route without assessment_context.gender", "created_at": created_at}
+            }
+        
+        # Extract constraints
+        blocked_targets = request.routing_constraints.get("blocked_targets", [])
+        caution_targets = request.routing_constraints.get("caution_targets", [])
+        blocked_ingredients = request.routing_constraints.get("blocked_ingredients", [])
+        
+        supplement_intents = request.protocol_intents.get("supplements", [])
+        
+        sku_items = []
+        skipped_intents = []
+        used_modules = set()
+        
+        for intent in supplement_intents:
+            intent_id = intent.get("intent_id")
+            target_id = intent.get("target_id", intent_id)
+            
+            intent_spec = INTENT_CATALOG.get(intent_id)
+            if not intent_spec:
+                skipped_intents.append({"intent_id": intent_id, "reason": "INTENT_NOT_IN_CATALOG", "reason_codes": ["UNKNOWN_INTENT"]})
+                continue
+            
+            if is_blocked_by_target(intent_spec, blocked_targets):
+                blocking = [t for t in intent_spec.get("blocked_by_targets", []) if t in blocked_targets]
+                skipped_intents.append({"intent_id": intent_id, "reason": "BLOCKED_BY_TARGET", "reason_codes": ["BLOCKED_TARGET"], "details": {"blocked_by": blocking}})
+                continue
+            
+            query, params = build_module_query(
+                os_env=os_env,
+                must_have_tags=intent_spec.get("must_have_tags", []),
+                blocked_ingredients=blocked_ingredients,
+                max_modules=intent_spec.get("max_modules", 1)
+            )
+            
+            cur.execute(query, params)
+            rows = cur.fetchall()
+            
+            if not rows:
+                skipped_intents.append({"intent_id": intent_id, "reason": "NO_MATCHING_MODULE", "reason_codes": ["NO_MODULE_FOUND"], "details": {"must_have_tags": intent_spec.get("must_have_tags", [])}})
+                continue
+            
+            for row in rows:
+                module_code = row["module_code"]
+                if module_code in used_modules:
+                    continue
+                used_modules.add(module_code)
+                
+                reason_codes = []
+                if has_caution_target(intent_spec, caution_targets):
+                    reason_codes.append("CAUTION_TARGET")
+                
+                sku_items.append({
+                    "sku": module_code,
+                    "intent_id": intent_id,
+                    "target_id": target_id,
+                    "shopify_store": row["shopify_store"] or "",
+                    "shopify_handle": row["shopify_handle"] or "",
+                    "reason_codes": reason_codes
+                })
+        
+        output_data = {"protocol_id": request.protocol_id, "sku_plan": {"items": sku_items}, "skipped_intents": skipped_intents}
+        output_hash = compute_hash(output_data)
+        
+        cur.execute("""
+            INSERT INTO decision_outputs (run_id, phase, output_json, output_hash)
+            SELECT run_id, 'route', %s, %s FROM protocol_runs WHERE id = %s
+        """, (json.dumps(output_data, default=str), output_hash, request.protocol_id))
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        return {
+            "protocol_id": request.protocol_id,
+            "sku_plan": {"items": sku_items},
+            "skipped_intents": skipped_intents,
+            "audit": {
+                "status": "SUCCESS",
+                "os_environment": os_env,
+                "intents_processed": len(supplement_intents),
+                "modules_routed": len(sku_items),
+                "intents_skipped": len(skipped_intents),
+                "constraints_applied": {
+                    "blocked_targets": blocked_targets,
+                    "caution_targets": caution_targets,
+                    "blocked_ingredients": blocked_ingredients
+                },
+                "created_at": created_at,
+                "output_hash": output_hash
+            }
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        try: conn.close()
+        except: pass
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/v1/intake")
 def create_intake(intake: IntakeCreate):
     return {"status": "received", "gender_os": intake.gender_os, "next_step": "bloodwork_upload"}
@@ -563,8 +963,6 @@ def catalog_gaps():
         return {"error": "DB connection failed"}
     try:
         cur = conn.cursor()
-        
-        # 1. Products WITHOUT ingredient link (ingredient_id IS NULL)
         cur.execute("""
             SELECT id, product_name, supplier_name, product_url
             FROM fulfillment_catalog 
@@ -572,8 +970,6 @@ def catalog_gaps():
             ORDER BY product_name
         """)
         unlinked_products = [dict(row) for row in cur.fetchall()]
-        
-        # 2. Products WITH ingredient link - show the mapping
         cur.execute("""
             SELECT 
                 fc.id as product_id,
@@ -586,8 +982,6 @@ def catalog_gaps():
             ORDER BY fc.product_name
         """)
         linked_products = [dict(row) for row in cur.fetchall()]
-        
-        # 3. Potential mismatches (product name doesn't contain ingredient name)
         cur.execute("""
             SELECT 
                 fc.id as product_id,
@@ -600,8 +994,6 @@ def catalog_gaps():
             ORDER BY fc.product_name
         """)
         potential_mismatches = [dict(row) for row in cur.fetchall()]
-        
-        # 4. Ingredients not linked to any product
         cur.execute("""
             SELECT i.id, i.name, i.category
             FROM ingredients i
@@ -610,16 +1002,12 @@ def catalog_gaps():
             ORDER BY i.name
         """)
         orphan_ingredients = [dict(row) for row in cur.fetchall()]
-        
-        # 5. Summary stats
         cur.execute("SELECT COUNT(*) FROM fulfillment_catalog")
         total_products = cur.fetchone()["count"]
         cur.execute("SELECT COUNT(*) FROM ingredients")
         total_ingredients = cur.fetchone()["count"]
-        
         cur.close()
         conn.close()
-        
         return {
             "summary": {
                 "total_products": total_products,
