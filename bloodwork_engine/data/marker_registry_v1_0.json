@@ -1,0 +1,156 @@
+{
+  "version": "1.0",
+  "scope": "GenoMAX² Bloodwork Engine v1 (Metabolic + Safety Gates only)",
+  "allowed_marker_codes": [
+    "ferritin",
+    "vitamin_d_25oh",
+    "calcium_serum",
+    "hs_crp",
+    "fasting_glucose",
+    "hba1c",
+    "creatinine",
+    "egfr",
+    "alt",
+    "ast",
+    "magnesium_serum",
+    "hemoglobin",
+    "total_testosterone"
+  ],
+  "lab_profiles": [
+    "GLOBAL_CONSERVATIVE",
+    "IL_HMO_GENERIC",
+    "US_QUEST",
+    "US_LABCORP",
+    "EU_GENERIC"
+  ],
+  "markers": [
+    {
+      "code": "ferritin",
+      "aliases": ["Ferritin", "Serum Ferritin"],
+      "canonical_unit": "ng/mL",
+      "allowed_units": ["ng/mL", "µg/L"],
+      "conversions": [
+        {"from": "µg/L", "to": "ng/mL", "multiplier": 1.0},
+        {"from": "ng/mL", "to": "µg/L", "multiplier": 1.0}
+      ],
+      "sex_relevance": "both"
+    },
+    {
+      "code": "vitamin_d_25oh",
+      "aliases": ["Vitamin D", "25-OH Vitamin D", "25(OH)D"],
+      "canonical_unit": "ng/mL",
+      "allowed_units": ["ng/mL", "nmol/L"],
+      "conversions": [
+        {"from": "nmol/L", "to": "ng/mL", "multiplier": 0.4},
+        {"from": "ng/mL", "to": "nmol/L", "multiplier": 2.5}
+      ],
+      "sex_relevance": "both"
+    },
+    {
+      "code": "calcium_serum",
+      "aliases": ["Calcium", "Serum Calcium", "Ca"],
+      "canonical_unit": "mg/dL",
+      "allowed_units": ["mg/dL", "mmol/L"],
+      "conversions": [
+        {"from": "mmol/L", "to": "mg/dL", "multiplier": 4.0078},
+        {"from": "mg/dL", "to": "mmol/L", "multiplier": 0.24951344877488899}
+      ],
+      "sex_relevance": "both"
+    },
+    {
+      "code": "hs_crp",
+      "aliases": ["hs-CRP", "High sensitivity CRP"],
+      "canonical_unit": "mg/L",
+      "allowed_units": ["mg/L"],
+      "conversions": [],
+      "sex_relevance": "both"
+    },
+    {
+      "code": "fasting_glucose",
+      "aliases": ["Fasting Glucose", "Glucose (fasting)"],
+      "canonical_unit": "mg/dL",
+      "allowed_units": ["mg/dL", "mmol/L"],
+      "conversions": [
+        {"from": "mmol/L", "to": "mg/dL", "multiplier": 18.01559},
+        {"from": "mg/dL", "to": "mmol/L", "multiplier": 0.055507479910455335}
+      ],
+      "sex_relevance": "both"
+    },
+    {
+      "code": "hba1c",
+      "aliases": ["HbA1c", "Hemoglobin A1c", "A1c"],
+      "canonical_unit": "%",
+      "allowed_units": ["%"],
+      "conversions": [],
+      "sex_relevance": "both"
+    },
+    {
+      "code": "creatinine",
+      "aliases": ["Creatinine", "Serum Creatinine"],
+      "canonical_unit": "mg/dL",
+      "allowed_units": ["mg/dL", "µmol/L"],
+      "conversions": [
+        {"from": "µmol/L", "to": "mg/dL", "multiplier": 0.011312217194570135},
+        {"from": "mg/dL", "to": "µmol/L", "multiplier": 88.4}
+      ],
+      "sex_relevance": "both"
+    },
+    {
+      "code": "egfr",
+      "aliases": ["eGFR", "Estimated GFR"],
+      "canonical_unit": "mL/min/1.73m2",
+      "allowed_units": ["mL/min/1.73m2"],
+      "conversions": [],
+      "sex_relevance": "both"
+    },
+    {
+      "code": "alt",
+      "aliases": ["ALT", "Alanine Aminotransferase", "SGPT"],
+      "canonical_unit": "U/L",
+      "allowed_units": ["U/L"],
+      "conversions": [],
+      "sex_relevance": "both"
+    },
+    {
+      "code": "ast",
+      "aliases": ["AST", "Aspartate Aminotransferase", "SGOT"],
+      "canonical_unit": "U/L",
+      "allowed_units": ["U/L"],
+      "conversions": [],
+      "sex_relevance": "both"
+    },
+    {
+      "code": "magnesium_serum",
+      "aliases": ["Magnesium", "Serum Magnesium", "Mg"],
+      "canonical_unit": "mg/dL",
+      "allowed_units": ["mg/dL", "mmol/L"],
+      "conversions": [
+        {"from": "mmol/L", "to": "mg/dL", "multiplier": 2.4305},
+        {"from": "mg/dL", "to": "mmol/L", "multiplier": 0.41143797572515944}
+      ],
+      "sex_relevance": "both"
+    },
+    {
+      "code": "hemoglobin",
+      "aliases": ["Hemoglobin", "Hb", "HGB"],
+      "canonical_unit": "g/dL",
+      "allowed_units": ["g/dL", "g/L"],
+      "conversions": [
+        {"from": "g/L", "to": "g/dL", "multiplier": 0.1},
+        {"from": "g/dL", "to": "g/L", "multiplier": 10.0}
+      ],
+      "sex_relevance": "both"
+    },
+    {
+      "code": "total_testosterone",
+      "aliases": ["Total Testosterone", "Testosterone (total)"],
+      "canonical_unit": "ng/dL",
+      "allowed_units": ["ng/dL", "nmol/L"],
+      "conversions": [
+        {"from": "nmol/L", "to": "ng/dL", "multiplier": 28.842},
+        {"from": "ng/dL", "to": "nmol/L", "multiplier": 0.0346716593856182}
+      ],
+      "sex_relevance": "male"
+    }
+  ]
+}
