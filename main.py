@@ -1,6 +1,6 @@
 """
-GenoMAX2 API Server Entry Point v3.10.1
-Adds /painpoints and /lifestyle-schema endpoints directly.
+GenoMAX2 API Server Entry Point v3.11.0
+Adds Bloodwork Engine v1 endpoints.
 
 Use this file for Railway deployment:
   uvicorn main:app --host 0.0.0.0 --port $PORT
@@ -8,6 +8,10 @@ Use this file for Railway deployment:
 
 from api_server import app
 from app.brain.painpoints_data import PAINPOINTS_DICTIONARY, LIFESTYLE_SCHEMA
+
+# ===== BLOODWORK ENGINE V1 =====
+from bloodwork_engine.api import register_bloodwork_endpoints
+register_bloodwork_endpoints(app)
 
 
 # ===== PAINPOINTS AND LIFESTYLE SCHEMA ENDPOINTS =====
