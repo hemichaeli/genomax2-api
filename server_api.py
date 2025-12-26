@@ -4,6 +4,8 @@ Gender-Optimized Biological Operating System
 """
 
 import os
+import sys
+import traceback
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -34,12 +36,19 @@ app.add_middleware(
 # ============================================
 # Include Brain Router
 # ============================================
+BRAIN_LOADED = False
+BRAIN_ERROR = None
+
 try:
+    print(">>> Attempting to import brain_router...")
     from app.brain import brain_router
     app.include_router(brain_router)
-    print("✅ Brain router loaded successfully")
-except ImportError as e:
-    print(f"⚠️ Brain router not available: {e}")
+    BRAIN_LOADED = True
+    print(">>> Brain router loaded successfully!")
+except Exception as e:
+    BRAIN_ERROR = str(e)
+    print(f">>> Brain router failed to load: {e}")
+    traceback.print_exc()
 
 # ============================================
 # Database Connection
@@ -76,7 +85,11 @@ class InteractionCheckRequest(BaseModel):
 # ============================================
 @app.get("/health")
 async def health():
-    return {"status": "healthy"}
+    return {
+        "status": "healthy",
+        "brain_loaded": BRAIN_LOADED,
+        "brain_error": BRAIN_ERROR
+    }
 
 @app.get("/version")
 async def version():
@@ -84,7 +97,8 @@ async def version():
         "version": "3.2.0",
         "engine_version": "2.0",
         "logic_version": "1.5",
-        "brain_version": "1.2.0"
+        "brain_version": "1.2.0",
+        "brain_loaded": BRAIN_LOADED
     }
 
 # ============================================
