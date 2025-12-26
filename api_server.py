@@ -1,17 +1,18 @@
 """
 GenoMAX² API Server
 Gender-Optimized Biological Operating System
-Version 3.9.0 - Supplier Availability Gating
+Version 3.10.0 - Brain Resolver Integration
+
+v3.10.0:
+- Add /api/v1/brain/resolve endpoint (Contract v1.0)
+- Deterministic constraint/intent merging
+- Mock engine support for development
 
 v3.9.0:
 - Supplier availability gating: ACTIVE/UNKNOWN/DISCONTINUING_SOON/INACTIVE
 - /route filters by supplier_status (INACTIVE never selected)
 - Controlled fallback to DISCONTINUING_SOON with reason_codes
 - Add /migrate-supplier-status and /debug/supplier-status endpoints
-
-v3.8.4: Fix SQL reserved keyword 'do' -> 'd' alias
-v3.8.3: Force json.loads() on ALL JSONB fields from PostgreSQL
-v3.8.2: Fix orchestrate_v2 assessment_context + compose JSON parse
 """
 
 import os
@@ -27,7 +28,22 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import uuid
 
-app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.9.0")
+# Brain Resolver imports
+from app.brain.contracts import (
+    CONTRACT_VERSION,
+    AssessmentContext as ResolverAssessmentContext,
+    RoutingConstraints as ResolverRoutingConstraints,
+    ProtocolIntents as ResolverProtocolIntents,
+    ProtocolIntentItem,
+    ResolverInput,
+    ResolverOutput,
+    empty_routing_constraints,
+    empty_protocol_intents,
+)
+from app.brain.resolver import resolve_all, compute_hash as resolver_compute_hash
+from app.brain.mocks import bloodwork_mock, lifestyle_mock, goals_mock
+
+app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.10.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -225,7 +241,7 @@ class RouteRequest(BaseModel):
     protocol_id: str
     protocol_intents: Dict[str, Any]
     routing_constraints: Dict[str, Any]
-    allow_discontinuing_fallback: bool = True  # Allow controlled fallback
+    allow_discontinuing_fallback: bool = True
 
 
 class SKUItem(BaseModel):
@@ -246,6 +262,29 @@ class SkippedIntent(BaseModel):
     reason: str
     reason_codes: List[str] = Field(default_factory=list)
     details: Optional[Dict[str, Any]] = None
+
+
+# ===== RESOLVE REQUEST MODEL =====
+class ResolveRequest(BaseModel):
+    """Request model for /api/v1/brain/resolve endpoint."""
+    protocol_id: Optional[str] = Field(None, description="Protocol ID to load context from DB")
+    run_id: Optional[str] = Field(None, description="Run ID to load context from DB")
+    
+    # Direct input (alternative to protocol_id)
+    assessment_context: Optional[Dict[str, Any]] = Field(None, description="Direct assessment context")
+    bloodwork_constraints: Optional[Dict[str, Any]] = Field(None, description="Direct bloodwork constraints")
+    lifestyle_constraints: Optional[Dict[str, Any]] = Field(None, description="Direct lifestyle constraints")
+    
+    # Intent generation inputs
+    raw_goals: List[str] = Field(default_factory=list, description="Goals to generate intents from")
+    raw_painpoints: List[str] = Field(default_factory=list, description="Painpoints to generate intents from")
+    
+    # Pre-computed intents (optional)
+    goals_intents: Optional[Dict[str, Any]] = Field(None, description="Pre-computed goals intents")
+    painpoint_intents: Optional[Dict[str, Any]] = Field(None, description="Pre-computed painpoint intents")
+    
+    # Options
+    use_mocks: bool = Field(default=True, description="Use mock engines for constraints/intents")
 
 
 def compute_hash(data: Any) -> str:
@@ -482,6 +521,8 @@ def compose_intents(selected_goals: List[str], routing_constraints: Any, assessm
     return protocol_intents
 
 
+# ===== ENDPOINTS =====
+
 @app.get("/migrate-supplier-status")
 def migrate_supplier_status():
     """Add supplier_status columns to os_modules_v3_1 for availability gating."""
@@ -501,7 +542,6 @@ def migrate_supplier_status():
             ON public.os_modules_v3_1 (supplier_status);
         """)
         conn.commit()
-        # Recreate view to include new columns
         cur.execute("""
             CREATE OR REPLACE VIEW public.os_modules AS
             SELECT * FROM public.os_modules_v3_1;
@@ -546,22 +586,22 @@ def migrate_brain_full():
 
 @app.get("/")
 def root():
-    return {"service": "GenoMAX² API", "version": "3.9.0", "status": "operational"}
+    return {"service": "GenoMAX² API", "version": "3.10.0", "status": "operational"}
 
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "3.9.0"}
+    return {"status": "healthy", "version": "3.10.0"}
 
 
 @app.get("/version")
 def version():
-    return {"api_version": "3.9.0", "brain_version": "1.5.0", "features": ["orchestrate", "orchestrate_v2", "compose", "route", "supplier-gating", "debug-catalog", "debug-supplier-status"]}
+    return {"api_version": "3.10.0", "brain_version": "1.5.0", "resolver_version": "1.0.0", "contract_version": CONTRACT_VERSION, "features": ["orchestrate", "orchestrate_v2", "compose", "route", "resolve", "supplier-gating", "debug-catalog", "debug-supplier-status"]}
 
 
 @app.get("/api/v1/brain/health")
 def brain_health():
-    return {"status": "healthy", "service": "brain", "version": "1.5.0"}
+    return {"status": "healthy", "service": "brain", "version": "1.5.0", "resolver_version": "1.0.0", "contract_version": CONTRACT_VERSION}
 
 
 @app.get("/debug/supplier-status")
@@ -572,7 +612,6 @@ def debug_supplier_status():
         return {"error": "Database connection failed"}
     try:
         cur = conn.cursor()
-        # Check if column exists
         cur.execute("""
             SELECT column_name FROM information_schema.columns 
             WHERE table_name = 'os_modules_v3_1' AND column_name = 'supplier_status'
@@ -581,7 +620,6 @@ def debug_supplier_status():
             cur.close()
             conn.close()
             return {"error": "supplier_status column not found. Run /migrate-supplier-status first."}
-        # Get status distribution
         cur.execute("""
             SELECT supplier_status, COUNT(*) as count 
             FROM os_modules_v3_1 
@@ -589,7 +627,6 @@ def debug_supplier_status():
             ORDER BY count DESC
         """)
         distribution = {row["supplier_status"]: row["count"] for row in cur.fetchall()}
-        # Get inactive modules
         cur.execute("""
             SELECT module_code, product_name, os_environment, supplier_status_details, supplier_last_checked_at
             FROM os_modules_v3_1 
@@ -597,7 +634,6 @@ def debug_supplier_status():
             ORDER BY module_code
         """)
         inactive = [dict(row) for row in cur.fetchall()]
-        # Get discontinuing modules
         cur.execute("""
             SELECT module_code, product_name, os_environment, supplier_status_details, supplier_last_checked_at
             FROM os_modules_v3_1 
@@ -621,6 +657,208 @@ def debug_supplier_status():
         try: conn.close()
         except: pass
         return {"error": str(e)}
+
+
+# ===== BRAIN RESOLVE ENDPOINT (NEW) =====
+
+@app.post("/api/v1/brain/resolve")
+def brain_resolve(request: ResolveRequest):
+    """
+    Resolve constraints and intents using the Contract v1.0 Resolver.
+    
+    This endpoint is the integration layer between:
+    - Bloodwork Engine + Lifestyle Engine -> RoutingConstraints
+    - Goals/Painpoints Engine -> ProtocolIntents
+    
+    Output is deterministic: same inputs = same outputs.
+    
+    Modes:
+    1. Direct input: Provide assessment_context directly
+    2. DB lookup: Provide protocol_id to load from decision_outputs
+    3. Mixed: Load from DB, override with request fields
+    """
+    created_at = now_iso()
+    
+    # Determine protocol_id and run_id
+    protocol_id = request.protocol_id or str(uuid.uuid4())
+    run_id = request.run_id
+    
+    # Try to load from DB if protocol_id or run_id provided
+    db_context = None
+    db_constraints = None
+    
+    conn = get_db()
+    if conn and (request.protocol_id or request.run_id):
+        try:
+            cur = conn.cursor()
+            
+            # Find run_id from protocol_id if needed
+            if request.protocol_id and not run_id:
+                cur.execute("SELECT run_id FROM protocol_runs WHERE id = %s LIMIT 1", (request.protocol_id,))
+                row = cur.fetchone()
+                if row:
+                    run_id = str(row["run_id"])
+            
+            # Load orchestrate output
+            if run_id:
+                cur.execute("""
+                    SELECT output_json FROM decision_outputs 
+                    WHERE run_id = %s AND phase IN ('orchestrate_v2', 'orchestrate') 
+                    ORDER BY created_at DESC LIMIT 1
+                """, (run_id,))
+                row = cur.fetchone()
+                if row:
+                    orchestrate_output = parse_jsonb(row["output_json"])
+                    db_context = orchestrate_output.get("assessment_context", {})
+                    db_constraints = orchestrate_output.get("routing_constraints", {})
+            
+            cur.close()
+        except Exception as e:
+            print(f"DB load error: {e}")
+        finally:
+            try: conn.close()
+            except: pass
+    
+    # Build assessment context
+    raw_context = request.assessment_context or db_context or {}
+    
+    # Ensure required fields
+    if not raw_context.get("protocol_id"):
+        raw_context["protocol_id"] = protocol_id
+    if not raw_context.get("run_id"):
+        raw_context["run_id"] = run_id or str(uuid.uuid4())
+    if not raw_context.get("gender"):
+        raise HTTPException(status_code=422, detail={"error": "MISSING_GENDER", "message": "assessment_context.gender is required"})
+    
+    # Build AssessmentContext
+    try:
+        assessment_context = ResolverAssessmentContext(
+            protocol_id=raw_context.get("protocol_id"),
+            run_id=raw_context.get("run_id"),
+            gender=raw_context.get("gender"),
+            age=raw_context.get("age"),
+            height_cm=raw_context.get("height_cm"),
+            weight_kg=raw_context.get("weight_kg"),
+            meds=raw_context.get("meds", raw_context.get("medications", [])),
+            conditions=raw_context.get("conditions", []),
+            allergies=raw_context.get("allergies", []),
+            flags=raw_context.get("flags", {}),
+        )
+    except Exception as e:
+        raise HTTPException(status_code=422, detail={"error": "INVALID_ASSESSMENT_CONTEXT", "message": str(e)})
+    
+    # Build constraints
+    if request.use_mocks:
+        # Use mock engines
+        bloodwork_constraints = bloodwork_mock(assessment_context)
+        lifestyle_constraints = lifestyle_mock(assessment_context)
+    else:
+        # Use provided constraints or empty
+        raw_bw = request.bloodwork_constraints or db_constraints or {}
+        raw_ls = request.lifestyle_constraints or {}
+        
+        bloodwork_constraints = ResolverRoutingConstraints(
+            blocked_targets=raw_bw.get("blocked_targets", []),
+            caution_targets=raw_bw.get("caution_targets", []),
+            allowed_targets=raw_bw.get("allowed_targets", []),
+            blocked_ingredients=raw_bw.get("blocked_ingredients", []),
+            has_critical_flags=raw_bw.get("has_critical_flags", False),
+            global_flags=raw_bw.get("global_flags", []),
+        )
+        
+        lifestyle_constraints = ResolverRoutingConstraints(
+            blocked_targets=raw_ls.get("blocked_targets", []),
+            caution_targets=raw_ls.get("caution_targets", []),
+            allowed_targets=raw_ls.get("allowed_targets", []),
+            blocked_ingredients=raw_ls.get("blocked_ingredients", []),
+            has_critical_flags=raw_ls.get("has_critical_flags", False),
+            global_flags=raw_ls.get("global_flags", []),
+        )
+    
+    # Build intents
+    if request.use_mocks and (request.raw_goals or request.raw_painpoints):
+        goals_intents = goals_mock(request.raw_goals, request.raw_painpoints)
+        painpoint_intents = empty_protocol_intents()
+    elif request.goals_intents or request.painpoint_intents:
+        # Convert dict to ProtocolIntents
+        goals_intents = empty_protocol_intents()
+        painpoint_intents = empty_protocol_intents()
+        
+        if request.goals_intents:
+            goals_intents = ResolverProtocolIntents(
+                lifestyle=request.goals_intents.get("lifestyle", []),
+                nutrition=request.goals_intents.get("nutrition", []),
+                supplements=[
+                    ProtocolIntentItem(**s) if isinstance(s, dict) else s
+                    for s in request.goals_intents.get("supplements", [])
+                ],
+            )
+        
+        if request.painpoint_intents:
+            painpoint_intents = ResolverProtocolIntents(
+                lifestyle=request.painpoint_intents.get("lifestyle", []),
+                nutrition=request.painpoint_intents.get("nutrition", []),
+                supplements=[
+                    ProtocolIntentItem(**s) if isinstance(s, dict) else s
+                    for s in request.painpoint_intents.get("supplements", [])
+                ],
+            )
+    else:
+        goals_intents = empty_protocol_intents()
+        painpoint_intents = empty_protocol_intents()
+    
+    # Build ResolverInput
+    resolver_input = ResolverInput(
+        assessment_context=assessment_context,
+        bloodwork_constraints=bloodwork_constraints,
+        lifestyle_constraints=lifestyle_constraints,
+        raw_goals=request.raw_goals,
+        raw_painpoints=request.raw_painpoints,
+        goals_intents=goals_intents,
+        painpoint_intents=painpoint_intents,
+    )
+    
+    # Run resolver
+    try:
+        output = resolve_all(resolver_input)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail={"error": "RESOLVER_ERROR", "message": str(e)})
+    
+    # Store in decision_outputs
+    conn = get_db()
+    if conn:
+        try:
+            cur = conn.cursor()
+            cur.execute("""
+                INSERT INTO decision_outputs (run_id, phase, output_json, output_hash, created_at)
+                VALUES (%s, 'resolve', %s, %s, NOW())
+            """, (
+                output.run_id,
+                json.dumps(output.model_dump(), default=str),
+                output.audit.output_hash,
+            ))
+            conn.commit()
+            cur.close()
+            conn.close()
+        except Exception as e:
+            print(f"DB store error: {e}")
+            try: conn.close()
+            except: pass
+    
+    # Return output
+    return {
+        "status": "success",
+        "phase": "resolve",
+        "contract_version": output.contract_version,
+        "protocol_id": output.protocol_id,
+        "run_id": output.run_id,
+        "resolved_constraints": output.resolved_constraints.model_dump(),
+        "resolved_intents": output.resolved_intents.model_dump(),
+        "assessment_context": output.assessment_context.model_dump(),
+        "audit": output.audit.model_dump(),
+        "next_phase": "route",
+        "created_at": created_at,
+    }
 
 
 @app.post("/api/v1/brain/orchestrate/v2", response_model=OrchestrateOutputV2)
@@ -731,16 +969,7 @@ def brain_compose(request: ComposeRequest):
 
 @app.post("/api/v1/brain/route")
 def brain_route(request: RouteRequest):
-    """
-    Route protocol intents to OS modules with supplier availability gating.
-    
-    Supplier Status Logic:
-    - Strict selection: supplier_status IN ('ACTIVE', 'UNKNOWN')
-    - Fallback (if strict finds nothing): includes 'DISCONTINUING_SOON'
-    - INACTIVE modules are NEVER selected
-    
-    If fallback returns DISCONTINUING_SOON, adds reason_code: SUPPLIER_DISCONTINUING_SOON
-    """
+    """Route protocol intents to OS modules with supplier availability gating."""
     created_at = now_iso()
     conn = get_db()
     if not conn:
@@ -755,7 +984,6 @@ def brain_route(request: RouteRequest):
             raise HTTPException(status_code=404, detail=f"No run_id found for protocol_id: {request.protocol_id}")
         run_id = run_row["run_id"]
         
-        # Get gender from orchestrate output
         cur.execute("SELECT COALESCE(d.output_json #>> '{assessment_context,gender}', d.output_json #>> '{assessment_context,sex}') AS gender FROM decision_outputs d WHERE d.run_id = %s AND d.phase IN ('orchestrate_v2', 'orchestrate') ORDER BY d.created_at DESC LIMIT 1", (run_id,))
         gender_row = cur.fetchone()
         gender = gender_row.get("gender") if gender_row else None
@@ -773,7 +1001,6 @@ def brain_route(request: RouteRequest):
             conn.close()
             raise HTTPException(status_code=422, detail={"error": "INVALID_GENDER", "message": f"Gender '{gender}' not recognized. Expected 'male' or 'female'."})
         
-        # Check if supplier_status column exists
         cur.execute("""
             SELECT column_name FROM information_schema.columns 
             WHERE table_name = 'os_modules_v3_1' AND column_name = 'supplier_status'
@@ -813,7 +1040,6 @@ def brain_route(request: RouteRequest):
             supplier_status = None
             
             if has_supplier_status:
-                # STRICT selection: ACTIVE or UNKNOWN only
                 cur.execute("""
                     SELECT module_code, product_name, os_layer, biological_domain, shopify_store, shopify_handle, supplier_status
                     FROM os_modules 
@@ -829,7 +1055,6 @@ def brain_route(request: RouteRequest):
                 """, (os_env, must_patterns, blocked_patterns))
                 row = cur.fetchone()
                 
-                # FALLBACK: If strict found nothing and fallback allowed, try DISCONTINUING_SOON
                 if not row and allow_fallback:
                     cur.execute("""
                         SELECT module_code, product_name, os_layer, biological_domain, shopify_store, shopify_handle, supplier_status
@@ -850,7 +1075,6 @@ def brain_route(request: RouteRequest):
                 if row:
                     supplier_status = row.get("supplier_status")
             else:
-                # Legacy: no supplier_status column, select without filter
                 cur.execute("""
                     SELECT module_code, product_name, os_layer, biological_domain, shopify_store, shopify_handle
                     FROM os_modules 
@@ -879,7 +1103,6 @@ def brain_route(request: RouteRequest):
                 continue
             used_modules.add(module_code)
             
-            # Build reason_codes
             reason_codes = []
             if has_caution_target(intent_spec, caution_targets):
                 reason_codes.append("CAUTION_TARGET")
