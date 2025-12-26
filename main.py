@@ -1,6 +1,6 @@
 """
-GenoMAX2 API Server Entry Point v3.11.0
-Adds Bloodwork Engine v1 endpoints.
+GenoMAX2 API Server Entry Point v3.11.1
+Adds Bloodwork Engine v1 endpoints with error handling.
 
 Use this file for Railway deployment:
   uvicorn main:app --host 0.0.0.0 --port $PORT
@@ -10,8 +10,14 @@ from api_server import app
 from app.brain.painpoints_data import PAINPOINTS_DICTIONARY, LIFESTYLE_SCHEMA
 
 # ===== BLOODWORK ENGINE V1 =====
-from bloodwork_engine.api import register_bloodwork_endpoints
-register_bloodwork_endpoints(app)
+try:
+    from bloodwork_engine.api import register_bloodwork_endpoints
+    register_bloodwork_endpoints(app)
+    print("✅ Bloodwork Engine v1 endpoints registered successfully")
+except Exception as e:
+    print(f"❌ ERROR loading Bloodwork Engine: {type(e).__name__}: {e}")
+    import traceback
+    traceback.print_exc()
 
 
 # ===== PAINPOINTS AND LIFESTYLE SCHEMA ENDPOINTS =====
