@@ -1,0 +1,21 @@
+{
+  "version": "1.0",
+  "scope": "GenoMAX² Bloodwork Engine v1 - Reference Ranges",
+  "lab_profiles": [
+    "GLOBAL_CONSERVATIVE",
+    "IL_HMO_GENERIC",
+    "US_QUEST",
+    "US_LABCORP",
+    "EU_GENERIC"
+  ],
+  "policy": {
+    "lookup_order": ["<LAB_PROFILE>", "GLOBAL_CONSERVATIVE"],
+    "if_missing_range": "MISSING_RANGE (emit REQUIRE_REVIEW; do not infer numeric thresholds)"
+  },
+  "ranges": [],
+  "notes": [
+    "Numeric reference ranges are intentionally omitted from v1.0 because verified lab-specific thresholds were not provided.",
+    "Populate ranges from authoritative sources (lab report reference ranges, official lab reference tables, or an approved clinical dataset).",
+    "Until then, the engine must treat all markers as MISSING_RANGE and emit REQUIRE_REVIEW."
+  ]
+}
