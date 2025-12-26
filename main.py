@@ -1,6 +1,6 @@
 """
-GenoMAX2 API Server Entry Point v3.11.1
-Adds Bloodwork Engine v1 endpoints with error handling.
+GenoMAX2 API Server Entry Point v3.11.2
+Adds Bloodwork Engine v1 endpoints with route debugging.
 
 Use this file for Railway deployment:
   uvicorn main:app --host 0.0.0.0 --port $PORT
@@ -18,6 +18,29 @@ except Exception as e:
     print(f"❌ ERROR loading Bloodwork Engine: {type(e).__name__}: {e}")
     import traceback
     traceback.print_exc()
+
+
+# ===== DEBUG: LIST ALL ROUTES =====
+@app.get("/debug/routes")
+def debug_routes():
+    """List all registered routes for debugging."""
+    routes = []
+    for route in app.routes:
+        if hasattr(route, 'path'):
+            routes.append({
+                "path": route.path,
+                "name": getattr(route, 'name', None),
+                "methods": list(route.methods) if hasattr(route, 'methods') else None
+            })
+    
+    # Filter for bloodwork routes
+    bloodwork_routes = [r for r in routes if 'bloodwork' in r['path'].lower()]
+    
+    return {
+        "total_routes": len(routes),
+        "bloodwork_routes": bloodwork_routes,
+        "all_api_routes": [r for r in routes if r['path'].startswith('/api/')]
+    }
 
 
 # ===== PAINPOINTS AND LIFESTYLE SCHEMA ENDPOINTS =====
