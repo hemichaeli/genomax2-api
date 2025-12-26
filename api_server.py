@@ -1,12 +1,12 @@
 """
 GenoMAX² API Server
 Gender-Optimized Biological Operating System
-Version 3.8.3 - Force JSON Parse Fix
+Version 3.8.4 - SQL Reserved Keyword Fix
 
-v3.8.3:
-- Force json.loads() on ALL JSONB fields from PostgreSQL (psycopg2 returns strings)
-- Add helper function parse_jsonb() for consistent handling
+v3.8.4:
+- Fix SQL reserved keyword: 'do' alias changed to 'd' in route query
 
+v3.8.3: Force json.loads() on ALL JSONB fields from PostgreSQL
 v3.8.2: Fix orchestrate_v2 assessment_context + compose JSON parse
 v3.8.1: Route query optimization (A/B/E pattern)
 v3.8.0: Added /api/v1/brain/route endpoint
@@ -25,7 +25,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import uuid
 
-app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.8.3")
+app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.8.4")
 
 app.add_middleware(
     CORSMiddleware,
@@ -58,7 +58,6 @@ def parse_jsonb(value: Any) -> Any:
             return json.loads(value)
         except json.JSONDecodeError:
             return value
-    # For any other type, try str then json.loads
     try:
         return json.loads(str(value))
     except:
@@ -414,14 +413,11 @@ def build_assessment_context(user_id: str, signal_data: Dict[str, Any]) -> Dict[
 
 def get_blocked_ingredient_classes(routing_constraints: Any) -> set:
     blocked = set()
-    # Handle both list and dict structures for routing_constraints
     if isinstance(routing_constraints, dict):
-        # New format from orchestrate_v2
         for target_id, detail in routing_constraints.get("target_details", {}).items():
             if detail.get("gate_status") == "blocked":
                 blocked.add(target_id)
         return blocked
-    # Legacy list format
     if isinstance(routing_constraints, list):
         for constraint in routing_constraints:
             if isinstance(constraint, dict) and constraint.get("constraint_type") == "blocked":
@@ -501,17 +497,17 @@ def migrate_brain_full():
 
 @app.get("/")
 def root():
-    return {"service": "GenoMAX² API", "version": "3.8.3", "status": "operational"}
+    return {"service": "GenoMAX² API", "version": "3.8.4", "status": "operational"}
 
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "3.8.3"}
+    return {"status": "healthy", "version": "3.8.4"}
 
 
 @app.get("/version")
 def version():
-    return {"api_version": "3.8.3", "brain_version": "1.4.2", "features": ["orchestrate", "orchestrate_v2", "compose", "route", "debug-catalog", "debug-catalog-gaps"]}
+    return {"api_version": "3.8.4", "brain_version": "1.4.2", "features": ["orchestrate", "orchestrate_v2", "compose", "route", "debug-catalog", "debug-catalog-gaps"]}
 
 
 @app.get("/api/v1/brain/health")
@@ -593,7 +589,6 @@ def brain_compose(request: ComposeRequest):
             cur.close()
             conn.close()
             raise HTTPException(status_code=404, detail=f"No orchestrate output for run_id: {request.run_id}")
-        # CRITICAL: Use parse_jsonb helper to handle psycopg2 string returns
         orchestrate_output = parse_jsonb(row["output_json"])
         if not isinstance(orchestrate_output, dict):
             cur.close()
@@ -641,7 +636,8 @@ def brain_route(request: RouteRequest):
             conn.close()
             raise HTTPException(status_code=404, detail=f"No run_id found for protocol_id: {request.protocol_id}")
         run_id = run_row["run_id"]
-        cur.execute("SELECT COALESCE(do.output_json #>> '{assessment_context,gender}', do.output_json #>> '{assessment_context,sex}') AS gender FROM decision_outputs do WHERE do.run_id = %s AND do.phase IN ('orchestrate_v2', 'orchestrate') ORDER BY do.created_at DESC LIMIT 1", (run_id,))
+        # Fixed: 'do' is reserved keyword in PostgreSQL, use 'd' instead
+        cur.execute("SELECT COALESCE(d.output_json #>> '{assessment_context,gender}', d.output_json #>> '{assessment_context,sex}') AS gender FROM decision_outputs d WHERE d.run_id = %s AND d.phase IN ('orchestrate_v2', 'orchestrate') ORDER BY d.created_at DESC LIMIT 1", (run_id,))
         gender_row = cur.fetchone()
         gender = gender_row.get("gender") if gender_row else None
         if not gender:
