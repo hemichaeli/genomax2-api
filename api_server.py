@@ -1,15 +1,17 @@
 """
 GenoMAX² API Server
 Gender-Optimized Biological Operating System
-Version 3.8.4 - SQL Reserved Keyword Fix
+Version 3.9.0 - Supplier Availability Gating
 
-v3.8.4:
-- Fix SQL reserved keyword: 'do' alias changed to 'd' in route query
+v3.9.0:
+- Supplier availability gating: ACTIVE/UNKNOWN/DISCONTINUING_SOON/INACTIVE
+- /route filters by supplier_status (INACTIVE never selected)
+- Controlled fallback to DISCONTINUING_SOON with reason_codes
+- Add /migrate-supplier-status and /debug/supplier-status endpoints
 
+v3.8.4: Fix SQL reserved keyword 'do' -> 'd' alias
 v3.8.3: Force json.loads() on ALL JSONB fields from PostgreSQL
 v3.8.2: Fix orchestrate_v2 assessment_context + compose JSON parse
-v3.8.1: Route query optimization (A/B/E pattern)
-v3.8.0: Added /api/v1/brain/route endpoint
 """
 
 import os
@@ -25,7 +27,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import uuid
 
-app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.8.4")
+app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.9.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -37,6 +39,18 @@ app.add_middleware(
 )
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+
+# Supplier status constants
+SUPPLIER_STATUS_ACTIVE = "ACTIVE"
+SUPPLIER_STATUS_UNKNOWN = "UNKNOWN"
+SUPPLIER_STATUS_DISCONTINUING = "DISCONTINUING_SOON"
+SUPPLIER_STATUS_INACTIVE = "INACTIVE"
+
+# Strict selection: only ACTIVE and UNKNOWN
+SUPPLIER_STATUS_STRICT = [SUPPLIER_STATUS_ACTIVE, SUPPLIER_STATUS_UNKNOWN]
+# Fallback selection: includes DISCONTINUING_SOON
+SUPPLIER_STATUS_FALLBACK = [SUPPLIER_STATUS_ACTIVE, SUPPLIER_STATUS_UNKNOWN, SUPPLIER_STATUS_DISCONTINUING]
+
 
 def get_db():
     try:
@@ -211,6 +225,7 @@ class RouteRequest(BaseModel):
     protocol_id: str
     protocol_intents: Dict[str, Any]
     routing_constraints: Dict[str, Any]
+    allow_discontinuing_fallback: bool = True  # Allow controlled fallback
 
 
 class SKUItem(BaseModel):
@@ -467,6 +482,40 @@ def compose_intents(selected_goals: List[str], routing_constraints: Any, assessm
     return protocol_intents
 
 
+@app.get("/migrate-supplier-status")
+def migrate_supplier_status():
+    """Add supplier_status columns to os_modules_v3_1 for availability gating."""
+    conn = get_db()
+    if not conn:
+        return {"error": "Database connection failed"}
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            ALTER TABLE public.os_modules_v3_1
+              ADD COLUMN IF NOT EXISTS supplier_status TEXT NOT NULL DEFAULT 'UNKNOWN',
+              ADD COLUMN IF NOT EXISTS supplier_status_details TEXT,
+              ADD COLUMN IF NOT EXISTS supplier_last_checked_at TIMESTAMPTZ,
+              ADD COLUMN IF NOT EXISTS supplier_http_status INTEGER,
+              ADD COLUMN IF NOT EXISTS supplier_page_url TEXT;
+            CREATE INDEX IF NOT EXISTS idx_os_modules_v3_1_supplier_status
+            ON public.os_modules_v3_1 (supplier_status);
+        """)
+        conn.commit()
+        # Recreate view to include new columns
+        cur.execute("""
+            CREATE OR REPLACE VIEW public.os_modules AS
+            SELECT * FROM public.os_modules_v3_1;
+        """)
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {"status": "success", "message": "supplier_status columns added to os_modules_v3_1", "columns_added": ["supplier_status", "supplier_status_details", "supplier_last_checked_at", "supplier_http_status", "supplier_page_url"]}
+    except Exception as e:
+        try: conn.close()
+        except: pass
+        return {"error": str(e)}
+
+
 @app.get("/migrate-brain-full")
 def migrate_brain_full():
     conn = get_db()
@@ -497,22 +546,81 @@ def migrate_brain_full():
 
 @app.get("/")
 def root():
-    return {"service": "GenoMAX² API", "version": "3.8.4", "status": "operational"}
+    return {"service": "GenoMAX² API", "version": "3.9.0", "status": "operational"}
 
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "3.8.4"}
+    return {"status": "healthy", "version": "3.9.0"}
 
 
 @app.get("/version")
 def version():
-    return {"api_version": "3.8.4", "brain_version": "1.4.2", "features": ["orchestrate", "orchestrate_v2", "compose", "route", "debug-catalog", "debug-catalog-gaps"]}
+    return {"api_version": "3.9.0", "brain_version": "1.5.0", "features": ["orchestrate", "orchestrate_v2", "compose", "route", "supplier-gating", "debug-catalog", "debug-supplier-status"]}
 
 
 @app.get("/api/v1/brain/health")
 def brain_health():
-    return {"status": "healthy", "service": "brain", "version": "1.4.2"}
+    return {"status": "healthy", "service": "brain", "version": "1.5.0"}
+
+
+@app.get("/debug/supplier-status")
+def debug_supplier_status():
+    """Show supplier status distribution across os_modules."""
+    conn = get_db()
+    if not conn:
+        return {"error": "Database connection failed"}
+    try:
+        cur = conn.cursor()
+        # Check if column exists
+        cur.execute("""
+            SELECT column_name FROM information_schema.columns 
+            WHERE table_name = 'os_modules_v3_1' AND column_name = 'supplier_status'
+        """)
+        if not cur.fetchone():
+            cur.close()
+            conn.close()
+            return {"error": "supplier_status column not found. Run /migrate-supplier-status first."}
+        # Get status distribution
+        cur.execute("""
+            SELECT supplier_status, COUNT(*) as count 
+            FROM os_modules_v3_1 
+            GROUP BY supplier_status 
+            ORDER BY count DESC
+        """)
+        distribution = {row["supplier_status"]: row["count"] for row in cur.fetchall()}
+        # Get inactive modules
+        cur.execute("""
+            SELECT module_code, product_name, os_environment, supplier_status_details, supplier_last_checked_at
+            FROM os_modules_v3_1 
+            WHERE supplier_status = 'INACTIVE'
+            ORDER BY module_code
+        """)
+        inactive = [dict(row) for row in cur.fetchall()]
+        # Get discontinuing modules
+        cur.execute("""
+            SELECT module_code, product_name, os_environment, supplier_status_details, supplier_last_checked_at
+            FROM os_modules_v3_1 
+            WHERE supplier_status = 'DISCONTINUING_SOON'
+            ORDER BY module_code
+        """)
+        discontinuing = [dict(row) for row in cur.fetchall()]
+        cur.close()
+        conn.close()
+        return {
+            "status_distribution": distribution,
+            "inactive_modules": inactive,
+            "discontinuing_modules": discontinuing,
+            "routing_behavior": {
+                "strict_selection": ["ACTIVE", "UNKNOWN"],
+                "fallback_selection": ["ACTIVE", "UNKNOWN", "DISCONTINUING_SOON"],
+                "never_selected": ["INACTIVE"]
+            }
+        }
+    except Exception as e:
+        try: conn.close()
+        except: pass
+        return {"error": str(e)}
 
 
 @app.post("/api/v1/brain/orchestrate/v2", response_model=OrchestrateOutputV2)
@@ -528,7 +636,7 @@ async def brain_orchestrate_v2(request: OrchestrateInputV2) -> OrchestrateOutput
     run_id = str(uuid.uuid4())
     output_data = {"run_id": run_id, "signal_id": signal.signal_id, "routing_constraints": routing_constraints, "selected_goals": request.selected_goals, "assessment_context": request.assessment_context}
     output_hash = compute_hash(output_data)
-    chain_entry = {"stage": "brain_orchestrate_v2", "engine": "brain_1.4.2", "timestamp": created_at, "input_hashes": [signal.audit.output_hash], "output_hash": output_hash}
+    chain_entry = {"stage": "brain_orchestrate_v2", "engine": "brain_1.5.0", "timestamp": created_at, "input_hashes": [signal.audit.output_hash], "output_hash": output_hash}
     conn = get_db()
     if conn:
         try:
@@ -623,6 +731,16 @@ def brain_compose(request: ComposeRequest):
 
 @app.post("/api/v1/brain/route")
 def brain_route(request: RouteRequest):
+    """
+    Route protocol intents to OS modules with supplier availability gating.
+    
+    Supplier Status Logic:
+    - Strict selection: supplier_status IN ('ACTIVE', 'UNKNOWN')
+    - Fallback (if strict finds nothing): includes 'DISCONTINUING_SOON'
+    - INACTIVE modules are NEVER selected
+    
+    If fallback returns DISCONTINUING_SOON, adds reason_code: SUPPLIER_DISCONTINUING_SOON
+    """
     created_at = now_iso()
     conn = get_db()
     if not conn:
@@ -636,7 +754,8 @@ def brain_route(request: RouteRequest):
             conn.close()
             raise HTTPException(status_code=404, detail=f"No run_id found for protocol_id: {request.protocol_id}")
         run_id = run_row["run_id"]
-        # Fixed: 'do' is reserved keyword in PostgreSQL, use 'd' instead
+        
+        # Get gender from orchestrate output
         cur.execute("SELECT COALESCE(d.output_json #>> '{assessment_context,gender}', d.output_json #>> '{assessment_context,sex}') AS gender FROM decision_outputs d WHERE d.run_id = %s AND d.phase IN ('orchestrate_v2', 'orchestrate') ORDER BY d.created_at DESC LIMIT 1", (run_id,))
         gender_row = cur.fetchone()
         gender = gender_row.get("gender") if gender_row else None
@@ -653,47 +772,159 @@ def brain_route(request: RouteRequest):
             cur.close()
             conn.close()
             raise HTTPException(status_code=422, detail={"error": "INVALID_GENDER", "message": f"Gender '{gender}' not recognized. Expected 'male' or 'female'."})
+        
+        # Check if supplier_status column exists
+        cur.execute("""
+            SELECT column_name FROM information_schema.columns 
+            WHERE table_name = 'os_modules_v3_1' AND column_name = 'supplier_status'
+        """)
+        has_supplier_status = cur.fetchone() is not None
+        
         blocked_targets = request.routing_constraints.get("blocked_targets", [])
         caution_targets = request.routing_constraints.get("caution_targets", [])
         blocked_ingredients = request.routing_constraints.get("blocked_ingredients", [])
         supplement_intents = request.protocol_intents.get("supplements", [])
+        allow_fallback = request.allow_discontinuing_fallback
+        
         sku_items = []
         skipped_intents = []
         used_modules = set()
+        
         for intent in supplement_intents:
             intent_id = intent.get("intent_id")
             target_id = intent.get("target_id", intent_id)
             intent_spec = INTENT_CATALOG.get(intent_id)
+            
             if not intent_spec:
                 skipped_intents.append({"intent_id": intent_id, "reason": "INTENT_NOT_IN_CATALOG", "reason_codes": ["UNKNOWN_INTENT"]})
                 continue
+            
             if is_blocked_by_target(intent_spec, blocked_targets):
                 blocking = [t for t in intent_spec.get("blocked_by_targets", []) if t in blocked_targets]
                 skipped_intents.append({"intent_id": intent_id, "reason": "BLOCKED_BY_TARGET", "reason_codes": ["BLOCKED_TARGET"], "details": {"blocked_by": blocking}})
                 continue
+            
             must_have_tags = intent_spec.get("must_have_tags", [])
             must_patterns = [f"%{tag}%" for tag in must_have_tags] if must_have_tags else ["%__match_all__%"]
             blocked_patterns = [f"%{ing}%" for ing in blocked_ingredients] if blocked_ingredients else ["%__never_match__%"]
-            cur.execute("SELECT module_code, product_name, os_layer, biological_domain, shopify_store, shopify_handle FROM os_modules WHERE os_environment = %s AND ingredient_tags ILIKE ANY(%s) AND NOT (ingredient_tags ILIKE ANY(%s)) ORDER BY CASE os_layer WHEN 'Core' THEN 1 WHEN 'Adaptive' THEN 2 ELSE 3 END, biological_domain, module_code LIMIT 1", (os_env, must_patterns, blocked_patterns))
-            row = cur.fetchone()
+            
+            row = None
+            used_fallback = False
+            supplier_status = None
+            
+            if has_supplier_status:
+                # STRICT selection: ACTIVE or UNKNOWN only
+                cur.execute("""
+                    SELECT module_code, product_name, os_layer, biological_domain, shopify_store, shopify_handle, supplier_status
+                    FROM os_modules 
+                    WHERE os_environment = %s 
+                    AND ingredient_tags ILIKE ANY(%s) 
+                    AND NOT (ingredient_tags ILIKE ANY(%s))
+                    AND supplier_status IN ('ACTIVE', 'UNKNOWN')
+                    ORDER BY 
+                        CASE supplier_status WHEN 'ACTIVE' THEN 1 WHEN 'UNKNOWN' THEN 2 ELSE 3 END,
+                        CASE os_layer WHEN 'Core' THEN 1 WHEN 'Adaptive' THEN 2 ELSE 3 END, 
+                        biological_domain, module_code 
+                    LIMIT 1
+                """, (os_env, must_patterns, blocked_patterns))
+                row = cur.fetchone()
+                
+                # FALLBACK: If strict found nothing and fallback allowed, try DISCONTINUING_SOON
+                if not row and allow_fallback:
+                    cur.execute("""
+                        SELECT module_code, product_name, os_layer, biological_domain, shopify_store, shopify_handle, supplier_status
+                        FROM os_modules 
+                        WHERE os_environment = %s 
+                        AND ingredient_tags ILIKE ANY(%s) 
+                        AND NOT (ingredient_tags ILIKE ANY(%s))
+                        AND supplier_status = 'DISCONTINUING_SOON'
+                        ORDER BY 
+                            CASE os_layer WHEN 'Core' THEN 1 WHEN 'Adaptive' THEN 2 ELSE 3 END, 
+                            biological_domain, module_code 
+                        LIMIT 1
+                    """, (os_env, must_patterns, blocked_patterns))
+                    row = cur.fetchone()
+                    if row:
+                        used_fallback = True
+                
+                if row:
+                    supplier_status = row.get("supplier_status")
+            else:
+                # Legacy: no supplier_status column, select without filter
+                cur.execute("""
+                    SELECT module_code, product_name, os_layer, biological_domain, shopify_store, shopify_handle
+                    FROM os_modules 
+                    WHERE os_environment = %s 
+                    AND ingredient_tags ILIKE ANY(%s) 
+                    AND NOT (ingredient_tags ILIKE ANY(%s))
+                    ORDER BY 
+                        CASE os_layer WHEN 'Core' THEN 1 WHEN 'Adaptive' THEN 2 ELSE 3 END, 
+                        biological_domain, module_code 
+                    LIMIT 1
+                """, (os_env, must_patterns, blocked_patterns))
+                row = cur.fetchone()
+            
             if not row:
-                skipped_intents.append({"intent_id": intent_id, "reason": "NO_MATCHING_MODULE", "reason_codes": ["NO_MODULE_FOUND"], "details": {"must_have_tags": must_have_tags, "os_environment": os_env}})
+                skip_reason = "NO_AVAILABLE_MODULE" if has_supplier_status else "NO_MATCHING_MODULE"
+                skipped_intents.append({
+                    "intent_id": intent_id, 
+                    "reason": skip_reason, 
+                    "reason_codes": ["NO_MODULE_FOUND", "SUPPLIER_UNAVAILABLE"] if has_supplier_status else ["NO_MODULE_FOUND"], 
+                    "details": {"must_have_tags": must_have_tags, "os_environment": os_env, "supplier_filter_applied": has_supplier_status}
+                })
                 continue
+            
             module_code = row["module_code"]
             if module_code in used_modules:
                 continue
             used_modules.add(module_code)
+            
+            # Build reason_codes
             reason_codes = []
             if has_caution_target(intent_spec, caution_targets):
                 reason_codes.append("CAUTION_TARGET")
-            sku_items.append({"sku": module_code, "intent_id": intent_id, "target_id": target_id, "shopify_store": row["shopify_store"] or "", "shopify_handle": row["shopify_handle"] or "", "reason_codes": reason_codes})
+            if used_fallback or supplier_status == SUPPLIER_STATUS_DISCONTINUING:
+                reason_codes.append("SUPPLIER_DISCONTINUING_SOON")
+            
+            sku_items.append({
+                "sku": module_code, 
+                "intent_id": intent_id, 
+                "target_id": target_id, 
+                "shopify_store": row["shopify_store"] or "", 
+                "shopify_handle": row["shopify_handle"] or "", 
+                "reason_codes": reason_codes
+            })
+        
         output_data = {"protocol_id": request.protocol_id, "sku_plan": {"items": sku_items}, "skipped_intents": skipped_intents}
         output_hash = compute_hash(output_data)
         cur.execute("INSERT INTO decision_outputs (run_id, phase, output_json, output_hash) VALUES (%s, 'route', %s, %s)", (run_id, json.dumps(output_data, default=str), output_hash))
         conn.commit()
         cur.close()
         conn.close()
-        return {"protocol_id": request.protocol_id, "sku_plan": {"items": sku_items}, "skipped_intents": skipped_intents, "audit": {"status": "SUCCESS", "run_id": str(run_id), "os_environment": os_env, "gender_source": "decision_outputs.orchestrate", "intents_processed": len(supplement_intents), "modules_routed": len(sku_items), "intents_skipped": len(skipped_intents), "constraints_applied": {"blocked_targets": blocked_targets, "caution_targets": caution_targets, "blocked_ingredients": blocked_ingredients}, "created_at": created_at, "output_hash": output_hash}}
+        
+        return {
+            "protocol_id": request.protocol_id, 
+            "sku_plan": {"items": sku_items}, 
+            "skipped_intents": skipped_intents, 
+            "audit": {
+                "status": "SUCCESS", 
+                "run_id": str(run_id), 
+                "os_environment": os_env, 
+                "gender_source": "decision_outputs.orchestrate", 
+                "intents_processed": len(supplement_intents), 
+                "modules_routed": len(sku_items), 
+                "intents_skipped": len(skipped_intents), 
+                "supplier_gating_enabled": has_supplier_status,
+                "fallback_allowed": allow_fallback,
+                "constraints_applied": {
+                    "blocked_targets": blocked_targets, 
+                    "caution_targets": caution_targets, 
+                    "blocked_ingredients": blocked_ingredients
+                }, 
+                "created_at": created_at, 
+                "output_hash": output_hash
+            }
+        }
     except HTTPException:
         raise
     except Exception as e:
