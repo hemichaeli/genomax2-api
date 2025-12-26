@@ -1,0 +1,235 @@
+{
+  "version": "1.0",
+  "description": "GenoMAX² Lifestyle Ruleset - Behavioral patterns that modify intent priorities",
+  "schema": {
+    "sleep_hours": {
+      "type": "number",
+      "unit": "hours",
+      "description": "Average nightly sleep duration"
+    },
+    "sleep_quality": {
+      "type": "number",
+      "scale": "1-10",
+      "description": "Self-rated sleep quality"
+    },
+    "stress_level": {
+      "type": "number",
+      "scale": "1-10",
+      "description": "Self-rated stress level (higher = more)"
+    },
+    "activity_level": {
+      "type": "string",
+      "enum": ["sedentary", "light", "moderate", "high"],
+      "description": "Physical activity level"
+    },
+    "caffeine_intake": {
+      "type": "string",
+      "enum": ["none", "low", "medium", "high"],
+      "description": "Daily caffeine intake"
+    },
+    "alcohol_intake": {
+      "type": "string",
+      "enum": ["none", "low", "medium", "high"],
+      "description": "Weekly alcohol consumption"
+    },
+    "work_schedule": {
+      "type": "string",
+      "enum": ["day", "night", "rotating"],
+      "description": "Typical work shift"
+    },
+    "meals_per_day": {
+      "type": "number",
+      "description": "Meals eaten per day"
+    },
+    "sugar_intake": {
+      "type": "string",
+      "enum": ["low", "medium", "high"],
+      "description": "Daily added sugar intake level"
+    },
+    "smoking": {
+      "type": "boolean",
+      "description": "Current smoker status"
+    }
+  },
+  "rules": [
+    {
+      "id": "poor_sleep_duration",
+      "input_conditions": {
+        "sleep_hours": {"max": 6}
+      },
+      "effects": {
+        "intent_modifiers": {
+          "improve_sleep": 0.5,
+          "stress_management": 0.2
+        },
+        "confidence_penalty": 0.0
+      },
+      "notes": "Less than 6 hours of sleep triggers sleep-related intent boost"
+    },
+    {
+      "id": "poor_sleep_quality",
+      "input_conditions": {
+        "sleep_quality": {"max": 4}
+      },
+      "effects": {
+        "intent_modifiers": {
+          "improve_sleep": 0.4,
+          "stress_management": 0.2,
+          "recovery_support": 0.1
+        },
+        "confidence_penalty": 0.0
+      },
+      "notes": "Low sleep quality rating boosts sleep and recovery intents"
+    },
+    {
+      "id": "high_caffeine",
+      "input_conditions": {
+        "caffeine_intake": {"equals": "high"}
+      },
+      "effects": {
+        "intent_modifiers": {
+          "improve_sleep": -0.5,
+          "stress_management": 0.3
+        },
+        "confidence_penalty": 0.0
+      },
+      "notes": "High caffeine disrupts sleep; reduce sleep intent, boost stress management"
+    },
+    {
+      "id": "sedentary_lifestyle",
+      "input_conditions": {
+        "activity_level": {"equals": "sedentary"}
+      },
+      "effects": {
+        "intent_modifiers": {
+          "exercise": 0.5,
+          "increase_energy": 0.3,
+          "cardiovascular_health": 0.2
+        },
+        "confidence_penalty": 0.0
+      },
+      "notes": "Sedentary lifestyle boosts exercise and energy intents"
+    },
+    {
+      "id": "high_stress",
+      "input_conditions": {
+        "stress_level": {"min": 8}
+      },
+      "effects": {
+        "intent_modifiers": {
+          "stress_management": 0.6,
+          "relaxation_techniques": 0.3,
+          "improve_sleep": 0.1
+        },
+        "confidence_penalty": 0.1
+      },
+      "notes": "High stress score significantly boosts stress-related intents"
+    },
+    {
+      "id": "night_shift",
+      "input_conditions": {
+        "work_schedule": {"equals": "night"}
+      },
+      "effects": {
+        "intent_modifiers": {
+          "improve_sleep": 0.7,
+          "circadian_rhythm": 0.3
+        },
+        "confidence_penalty": 0.0
+      },
+      "notes": "Night shift workers need extra circadian and sleep support"
+    },
+    {
+      "id": "rotating_shift",
+      "input_conditions": {
+        "work_schedule": {"equals": "rotating"}
+      },
+      "effects": {
+        "intent_modifiers": {
+          "improve_sleep": 0.5,
+          "circadian_rhythm": 0.4,
+          "stress_management": 0.2
+        },
+        "confidence_penalty": 0.05
+      },
+      "notes": "Rotating shifts disrupt circadian rhythm even more than fixed night shifts"
+    },
+    {
+      "id": "high_alcohol",
+      "input_conditions": {
+        "alcohol_intake": {"equals": "high"}
+      },
+      "effects": {
+        "intent_modifiers": {
+          "reduce_alcohol": 0.7,
+          "improve_sleep": -0.3
+        },
+        "confidence_penalty": 0.2
+      },
+      "notes": "High alcohol intake impairs sleep quality and warrants reduction recommendation"
+    },
+    {
+      "id": "irregular_meals",
+      "input_conditions": {
+        "meals_per_day": {"max": 2}
+      },
+      "effects": {
+        "intent_modifiers": {
+          "blood_sugar_management": 0.5,
+          "nutrition": 0.3
+        },
+        "confidence_penalty": 0.0
+      },
+      "notes": "Fewer than 2 meals per day indicates blood sugar and nutrition concerns"
+    },
+    {
+      "id": "high_sugar",
+      "input_conditions": {
+        "sugar_intake": {"equals": "high"}
+      },
+      "effects": {
+        "intent_modifiers": {
+          "blood_sugar_management": 0.7,
+          "nutrition": 0.3
+        },
+        "confidence_penalty": 0.0
+      },
+      "notes": "High sugar intake prioritizes blood sugar management"
+    },
+    {
+      "id": "smoking_active",
+      "input_conditions": {
+        "smoking": {"equals": true}
+      },
+      "effects": {
+        "intent_modifiers": {
+          "quit_smoking": 1.0,
+          "cardiovascular_health": 0.3
+        },
+        "confidence_penalty": 0.2
+      },
+      "notes": "Active smoking triggers quit_smoking intent and cardiovascular concern"
+    },
+    {
+      "id": "no_exercise",
+      "input_conditions": {
+        "activity_level": {"equals": "sedentary"}
+      },
+      "effects": {
+        "intent_modifiers": {
+          "exercise": 0.6,
+          "increase_energy": 0.4
+        },
+        "confidence_penalty": 0.0
+      },
+      "notes": "Complete sedentary lifestyle strongly boosts exercise intent"
+    }
+  ],
+  "global_constraints": {
+    "max_modifier_value": 1.0,
+    "min_modifier_value": -1.0,
+    "max_confidence_penalty": 0.3,
+    "lifestyle_cannot_create_intents": true,
+    "lifestyle_cannot_override_blood_blocks": true
+  }
+}
