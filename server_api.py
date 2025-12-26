@@ -1,5 +1,5 @@
 """
-GenoMAXÂ² API Server
+GenoMAX² API Server
 Gender-Optimized Biological Operating System
 """
 
@@ -14,27 +14,32 @@ import asyncpg
 # App Configuration
 # ============================================
 app = FastAPI(
-    title="GenoMAXÂ² API",
+    title="GenoMAX² API",
     description="Gender-Optimized Biological Operating System",
-    version="3.1.0"
+    version="3.2.0"
 )
 
 # ============================================
-# CORS Configuration - CRITICAL FOR VERCEL
+# CORS Configuration - Allow all origins for brain UI
 # ============================================
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://genomax2-frontend.vercel.app",
-        "https://genomax2-frontend-git-main-hemis-projects-6782105b.vercel.app",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-    ],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
     expose_headers=["*"],
 )
+
+# ============================================
+# Include Brain Router
+# ============================================
+try:
+    from app.brain import brain_router
+    app.include_router(brain_router)
+    print("✅ Brain router loaded successfully")
+except ImportError as e:
+    print(f"⚠️ Brain router not available: {e}")
 
 # ============================================
 # Database Connection
@@ -76,9 +81,10 @@ async def health():
 @app.get("/version")
 async def version():
     return {
-        "version": "3.1.0",
+        "version": "3.2.0",
         "engine_version": "2.0",
-        "logic_version": "1.5"
+        "logic_version": "1.5",
+        "brain_version": "1.2.0"
     }
 
 # ============================================
