@@ -1,0 +1,245 @@
+{
+  "version": "1.0",
+  "description": "GenoMAX² Painpoints Dictionary - Maps user symptoms to biological targets and actionable intents",
+  "painpoints": {
+    "fatigue": {
+      "label": "Fatigue",
+      "mapped_targets": {
+        "metabolism": 0.3,
+        "hormones": 0.3,
+        "adrenal": 0.2,
+        "nutrition": 0.2
+      },
+      "mapped_intents": {
+        "increase_energy": 0.5,
+        "improve_sleep": 0.3,
+        "stress_management": 0.2
+      },
+      "max_priority_cap": 0.85,
+      "notes": "Persistent fatigue often signals underlying metabolic or hormonal imbalance."
+    },
+    "sleep_issues": {
+      "label": "Sleep Issues",
+      "mapped_targets": {
+        "circadian_rhythm": 0.4,
+        "melatonin": 0.2,
+        "stress": 0.2,
+        "lifestyle": 0.2
+      },
+      "mapped_intents": {
+        "improve_sleep": 0.6,
+        "stress_management": 0.2,
+        "sleep_hygiene": 0.2
+      },
+      "max_priority_cap": 0.85,
+      "notes": "Sleep problems often stem from stress, irregular schedules or stimulant use."
+    },
+    "hair_loss": {
+      "label": "Hair Loss",
+      "mapped_targets": {
+        "hormones": 0.3,
+        "nutrition": 0.3,
+        "stress": 0.2,
+        "immune": 0.2
+      },
+      "mapped_intents": {
+        "nutritional_support": 0.4,
+        "hormonal_balance": 0.4,
+        "stress_management": 0.2
+      },
+      "max_priority_cap": 0.85,
+      "notes": "Hair loss can signal hormonal or nutritional deficiencies and chronic stress."
+    },
+    "low_libido": {
+      "label": "Low Libido",
+      "mapped_targets": {
+        "hormones": 0.4,
+        "circulation": 0.2,
+        "stress": 0.2,
+        "energy": 0.2
+      },
+      "mapped_intents": {
+        "hormonal_balance": 0.5,
+        "stress_management": 0.3,
+        "improve_energy": 0.2
+      },
+      "max_priority_cap": 0.85,
+      "notes": "Reduced libido is often linked to hormonal changes, stress, fatigue and weight gain."
+    },
+    "weight_gain": {
+      "label": "Weight Gain",
+      "mapped_targets": {
+        "metabolism": 0.3,
+        "hormones": 0.3,
+        "stress": 0.2,
+        "nutrition": 0.2
+      },
+      "mapped_intents": {
+        "weight_management": 0.5,
+        "improve_sleep": 0.2,
+        "stress_management": 0.3
+      },
+      "max_priority_cap": 0.85,
+      "notes": "Unexplained weight gain can result from hormonal changes and cortisol-related stress."
+    },
+    "weight_loss": {
+      "label": "Weight Loss",
+      "mapped_targets": {
+        "metabolism": 0.3,
+        "hormones": 0.2,
+        "nutrition": 0.3,
+        "digestion": 0.2
+      },
+      "mapped_intents": {
+        "weight_management": 0.5,
+        "nutritional_support": 0.3,
+        "medical_evaluation": 0.2
+      },
+      "max_priority_cap": 0.85,
+      "notes": "Unintentional weight loss may indicate metabolic or digestive issues and often warrants evaluation."
+    },
+    "focus_issues": {
+      "label": "Difficulty Focusing",
+      "mapped_targets": {
+        "sleep": 0.3,
+        "nutrition": 0.2,
+        "hormones": 0.2,
+        "stress": 0.3
+      },
+      "mapped_intents": {
+        "cognitive_support": 0.4,
+        "improve_sleep": 0.3,
+        "stress_management": 0.3
+      },
+      "max_priority_cap": 0.85,
+      "notes": "Brain fog and focus issues are often related to poor sleep, stress, hormonal changes and blood sugar swings."
+    },
+    "stress": {
+      "label": "High Stress",
+      "mapped_targets": {
+        "cortisol": 0.4,
+        "nervous_system": 0.3,
+        "sleep": 0.2,
+        "immune": 0.1
+      },
+      "mapped_intents": {
+        "stress_management": 0.6,
+        "relaxation_techniques": 0.3,
+        "improve_sleep": 0.1
+      },
+      "max_priority_cap": 0.85,
+      "notes": "Chronic stress elevates cortisol, causing weight gain, fatigue, acne and other issues."
+    },
+    "skin_issues": {
+      "label": "Skin Issues",
+      "mapped_targets": {
+        "inflammation": 0.3,
+        "hormones": 0.2,
+        "nutrition": 0.2,
+        "stress": 0.3
+      },
+      "mapped_intents": {
+        "anti_inflammatory_diet": 0.4,
+        "stress_management": 0.4,
+        "skincare": 0.2
+      },
+      "max_priority_cap": 0.85,
+      "notes": "Skin health can reflect stress and hormones (cortisol spikes oil production and acne)."
+    },
+    "digestive_issues": {
+      "label": "Digestive Issues",
+      "mapped_targets": {
+        "gut_health": 0.4,
+        "nutrition": 0.3,
+        "stress": 0.2,
+        "inflammation": 0.1
+      },
+      "mapped_intents": {
+        "gut_health_support": 0.5,
+        "nutritional_support": 0.3,
+        "stress_management": 0.2
+      },
+      "max_priority_cap": 0.85,
+      "notes": "Stress and diet strongly affect digestion via the brain-gut axis."
+    },
+    "joint_pain": {
+      "label": "Joint / Muscle Pain",
+      "mapped_targets": {
+        "inflammation": 0.4,
+        "stress": 0.3,
+        "musculoskeletal": 0.3
+      },
+      "mapped_intents": {
+        "anti_inflammatory_support": 0.5,
+        "stress_management": 0.3,
+        "exercise": 0.2
+      },
+      "max_priority_cap": 0.85,
+      "notes": "Chronic stress triggers cortisol-driven inflammation that can worsen joint pain."
+    },
+    "headaches": {
+      "label": "Headaches",
+      "mapped_targets": {
+        "stress": 0.3,
+        "hydration": 0.2,
+        "nutrition": 0.2,
+        "sleep": 0.3
+      },
+      "mapped_intents": {
+        "stress_management": 0.4,
+        "improve_sleep": 0.3,
+        "hydrate": 0.3
+      },
+      "max_priority_cap": 0.85,
+      "notes": "Headaches often stem from stress, dehydration, poor sleep or dietary triggers."
+    },
+    "mood_swings": {
+      "label": "Mood Swings / Anxiety",
+      "mapped_targets": {
+        "hormones": 0.3,
+        "stress": 0.3,
+        "neurotransmitters": 0.2,
+        "nutrition": 0.2
+      },
+      "mapped_intents": {
+        "stress_management": 0.4,
+        "emotional_support": 0.4,
+        "nutrition": 0.2
+      },
+      "max_priority_cap": 0.85,
+      "notes": "Mood changes and anxiety can arise from hormonal shifts, inflammation or nutrient deficiencies."
+    },
+    "blood_sugar_fluctuations": {
+      "label": "Blood Sugar Fluctuations",
+      "mapped_targets": {
+        "metabolism": 0.4,
+        "pancreas": 0.3,
+        "nutrition": 0.2,
+        "stress": 0.1
+      },
+      "mapped_intents": {
+        "blood_sugar_management": 0.5,
+        "nutrition": 0.3,
+        "energy_stabilization": 0.2
+      },
+      "max_priority_cap": 0.85,
+      "notes": "Cravings and energy crashes often reflect poor diet or metabolic imbalance."
+    },
+    "poor_recovery": {
+      "label": "Poor Recovery",
+      "mapped_targets": {
+        "inflammation": 0.3,
+        "nutrition": 0.3,
+        "sleep": 0.2,
+        "hormones": 0.2
+      },
+      "mapped_intents": {
+        "recovery_support": 0.5,
+        "improve_sleep": 0.3,
+        "anti_inflammatory_support": 0.2
+      },
+      "max_priority_cap": 0.85,
+      "notes": "Slow recovery from exercise or illness can indicate nutritional gaps or hormonal imbalances."
+    }
+  }
+}
