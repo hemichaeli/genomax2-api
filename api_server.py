@@ -1,7 +1,14 @@
 """
 GenoMAX² API Server
 Gender-Optimized Biological Operating System
-Version 3.10.0 - Brain Resolver Integration
+Version 3.10.2 - Brain Resolver Integration + Painpoints/Lifestyle Schema
+
+v3.10.2:
+- Fix railway.json to use main.py entry point
+- Add /api/v1/brain/painpoints and /api/v1/brain/lifestyle-schema endpoints
+
+v3.10.1:
+- Add painpoints and lifestyle-schema endpoints via main.py
 
 v3.10.0:
 - Add /api/v1/brain/resolve endpoint (Contract v1.0)
@@ -43,7 +50,7 @@ from app.brain.contracts import (
 from app.brain.resolver import resolve_all, compute_hash as resolver_compute_hash
 from app.brain.mocks import bloodwork_mock, lifestyle_mock, goals_mock
 
-app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.10.0")
+app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.10.2")
 
 app.add_middleware(
     CORSMiddleware,
@@ -586,17 +593,17 @@ def migrate_brain_full():
 
 @app.get("/")
 def root():
-    return {"service": "GenoMAX² API", "version": "3.10.0", "status": "operational"}
+    return {"service": "GenoMAX² API", "version": "3.10.2", "status": "operational"}
 
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "3.10.0"}
+    return {"status": "healthy", "version": "3.10.2"}
 
 
 @app.get("/version")
 def version():
-    return {"api_version": "3.10.0", "brain_version": "1.5.0", "resolver_version": "1.0.0", "contract_version": CONTRACT_VERSION, "features": ["orchestrate", "orchestrate_v2", "compose", "route", "resolve", "supplier-gating", "debug-catalog", "debug-supplier-status"]}
+    return {"api_version": "3.10.2", "brain_version": "1.5.0", "resolver_version": "1.0.0", "contract_version": CONTRACT_VERSION, "features": ["orchestrate", "orchestrate_v2", "compose", "route", "resolve", "supplier-gating", "debug-catalog", "debug-supplier-status", "painpoints", "lifestyle-schema"]}
 
 
 @app.get("/api/v1/brain/health")
