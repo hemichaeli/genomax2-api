@@ -1,12 +1,13 @@
 """
 GenoMAX² API Server
 Gender-Optimized Biological Operating System
-Version 3.8.2 - Assessment Context + JSON Parse Fix
+Version 3.8.3 - Force JSON Parse Fix
 
-v3.8.2:
-- Fix orchestrate_v2: save assessment_context to decision_outputs (required for /route)
-- Fix compose: parse output_json if returned as string from DB
+v3.8.3:
+- Force json.loads() on ALL JSONB fields from PostgreSQL (psycopg2 returns strings)
+- Add helper function parse_jsonb() for consistent handling
 
+v3.8.2: Fix orchestrate_v2 assessment_context + compose JSON parse
 v3.8.1: Route query optimization (A/B/E pattern)
 v3.8.0: Added /api/v1/brain/route endpoint
 """
@@ -24,7 +25,7 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import uuid
 
-app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.8.2")
+app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.8.3")
 
 app.add_middleware(
     CORSMiddleware,
@@ -44,6 +45,24 @@ def get_db():
     except Exception as e:
         print(f"Database connection error: {e}")
         return None
+
+
+def parse_jsonb(value: Any) -> Any:
+    """Parse JSONB value from PostgreSQL. psycopg2 may return string or dict."""
+    if value is None:
+        return None
+    if isinstance(value, dict) or isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+    # For any other type, try str then json.loads
+    try:
+        return json.loads(str(value))
+    except:
+        return value
 
 
 class GateStatus(str, Enum):
@@ -393,11 +412,20 @@ def build_assessment_context(user_id: str, signal_data: Dict[str, Any]) -> Dict[
     return {"user_id": user_id, "gender": gender, "test_date": signal_data.get("test_date"), "lab_source": signal_data.get("lab_source"), "markers_analyzed": len(markers), "summary": {"deficient_count": len(deficient), "suboptimal_count": len(suboptimal), "optimal_count": len(optimal), "elevated_count": len(elevated)}, "deficient": deficient, "suboptimal": suboptimal, "optimal": optimal, "elevated": elevated}
 
 
-def get_blocked_ingredient_classes(routing_constraints: List[Dict]) -> set:
+def get_blocked_ingredient_classes(routing_constraints: Any) -> set:
     blocked = set()
-    for constraint in routing_constraints:
-        if constraint.get("constraint_type") == "blocked":
-            blocked.add(constraint.get("ingredient_class"))
+    # Handle both list and dict structures for routing_constraints
+    if isinstance(routing_constraints, dict):
+        # New format from orchestrate_v2
+        for target_id, detail in routing_constraints.get("target_details", {}).items():
+            if detail.get("gate_status") == "blocked":
+                blocked.add(target_id)
+        return blocked
+    # Legacy list format
+    if isinstance(routing_constraints, list):
+        for constraint in routing_constraints:
+            if isinstance(constraint, dict) and constraint.get("constraint_type") == "blocked":
+                blocked.add(constraint.get("ingredient_class"))
     return blocked
 
 
@@ -421,7 +449,7 @@ def calculate_priority(base_priority: float, assessment_context: Dict, intent_id
     return round(priority, 2)
 
 
-def compose_intents(selected_goals: List[str], routing_constraints: List[Dict], assessment_context: Dict) -> Dict[str, List[Dict]]:
+def compose_intents(selected_goals: List[str], routing_constraints: Any, assessment_context: Dict) -> Dict[str, List[Dict]]:
     blocked_classes = get_blocked_ingredient_classes(routing_constraints)
     protocol_intents = {"lifestyle": [], "nutrition": [], "supplements": []}
     seen_intents = set()
@@ -473,22 +501,22 @@ def migrate_brain_full():
 
 @app.get("/")
 def root():
-    return {"service": "GenoMAX² API", "version": "3.8.2", "status": "operational"}
+    return {"service": "GenoMAX² API", "version": "3.8.3", "status": "operational"}
 
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "3.8.2"}
+    return {"status": "healthy", "version": "3.8.3"}
 
 
 @app.get("/version")
 def version():
-    return {"api_version": "3.8.2", "brain_version": "1.4.1", "features": ["orchestrate", "orchestrate_v2", "compose", "route", "debug-catalog", "debug-catalog-gaps"]}
+    return {"api_version": "3.8.3", "brain_version": "1.4.2", "features": ["orchestrate", "orchestrate_v2", "compose", "route", "debug-catalog", "debug-catalog-gaps"]}
 
 
 @app.get("/api/v1/brain/health")
 def brain_health():
-    return {"status": "healthy", "service": "brain", "version": "1.4.1"}
+    return {"status": "healthy", "service": "brain", "version": "1.4.2"}
 
 
 @app.post("/api/v1/brain/orchestrate/v2", response_model=OrchestrateOutputV2)
@@ -504,7 +532,7 @@ async def brain_orchestrate_v2(request: OrchestrateInputV2) -> OrchestrateOutput
     run_id = str(uuid.uuid4())
     output_data = {"run_id": run_id, "signal_id": signal.signal_id, "routing_constraints": routing_constraints, "selected_goals": request.selected_goals, "assessment_context": request.assessment_context}
     output_hash = compute_hash(output_data)
-    chain_entry = {"stage": "brain_orchestrate_v2", "engine": "brain_1.4.1", "timestamp": created_at, "input_hashes": [signal.audit.output_hash], "output_hash": output_hash}
+    chain_entry = {"stage": "brain_orchestrate_v2", "engine": "brain_1.4.2", "timestamp": created_at, "input_hashes": [signal.audit.output_hash], "output_hash": output_hash}
     conn = get_db()
     if conn:
         try:
@@ -565,9 +593,12 @@ def brain_compose(request: ComposeRequest):
             cur.close()
             conn.close()
             raise HTTPException(status_code=404, detail=f"No orchestrate output for run_id: {request.run_id}")
-        orchestrate_output = row["output_json"]
-        if isinstance(orchestrate_output, str):
-            orchestrate_output = json.loads(orchestrate_output)
+        # CRITICAL: Use parse_jsonb helper to handle psycopg2 string returns
+        orchestrate_output = parse_jsonb(row["output_json"])
+        if not isinstance(orchestrate_output, dict):
+            cur.close()
+            conn.close()
+            raise HTTPException(status_code=500, detail=f"orchestrate_output parse failed, got type: {type(orchestrate_output).__name__}")
         orchestrate_hash = row["output_hash"]
         cur.execute("SELECT user_id FROM brain_runs WHERE id = %s", (request.run_id,))
         run_row = cur.fetchone()
@@ -576,10 +607,10 @@ def brain_compose(request: ComposeRequest):
             conn.close()
             raise HTTPException(status_code=404, detail=f"No brain run for run_id: {request.run_id}")
         user_id = str(run_row["user_id"])
-        routing_constraints = orchestrate_output.get("routing_constraints", [])
+        routing_constraints = orchestrate_output.get("routing_constraints", {})
         assessment_context = orchestrate_output.get("assessment_context", {})
         protocol_intents = compose_intents(request.selected_goals, routing_constraints, assessment_context)
-        compose_output = {"protocol_id": protocol_id, "run_id": request.run_id, "selected_goals": request.selected_goals, "protocol_intents": protocol_intents, "constraints_applied": len([c for c in routing_constraints if isinstance(c, dict) and c.get("constraint_type") == "blocked"]), "intents_generated": {k: len(v) for k, v in protocol_intents.items()}}
+        compose_output = {"protocol_id": protocol_id, "run_id": request.run_id, "selected_goals": request.selected_goals, "protocol_intents": protocol_intents, "routing_constraints": routing_constraints, "assessment_context": assessment_context, "constraints_applied": 0, "intents_generated": {k: len(v) for k, v in protocol_intents.items()}}
         output_hash = compute_hash(compose_output)
         cur.execute("INSERT INTO decision_outputs (run_id, phase, output_json, output_hash) VALUES (%s, %s, %s, %s)", (request.run_id, "compose", json.dumps(compose_output), output_hash))
         cur.execute("INSERT INTO protocol_runs (id, user_id, run_id, phase, request_json, output_json, output_hash, status) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)", (protocol_id, user_id, request.run_id, "compose", json.dumps({"run_id": request.run_id, "selected_goals": request.selected_goals}), json.dumps(compose_output), output_hash, "completed"))
