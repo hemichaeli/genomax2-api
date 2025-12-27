@@ -1,6 +1,12 @@
 {
   "version": "1.0",
-  "scope": "GenoMAX² Bloodwork Engine v1 - Reference Ranges",
+  "scope": "GenoMAX² Bloodwork Engine v1 - Reference Ranges (Metabolic + Safety Gates)",
+  "philosophy": {
+    "principle": "Blood does not negotiate",
+    "optimal_vs_normal": "GenoMAX optimal ranges represent functional optimal values, NOT standard lab reference ranges which are based on population percentiles",
+    "safety_first": "Decision limits trigger safety gates that override all other routing logic",
+    "deterministic": "Same input + same ranges = identical output"
+  },
   "lab_profiles": [
     "GLOBAL_CONSERVATIVE",
     "IL_HMO_GENERIC",
@@ -10,12 +16,336 @@
   ],
   "policy": {
     "lookup_order": ["<LAB_PROFILE>", "GLOBAL_CONSERVATIVE"],
-    "if_missing_range": "MISSING_RANGE (emit REQUIRE_REVIEW; do not infer numeric thresholds)"
+    "if_missing_range": "MISSING_RANGE (emit REQUIRE_REVIEW; do not infer numeric thresholds)",
+    "safety_precedence": "decision_limits override genomax_optimal_range for gating"
   },
-  "ranges": [],
-  "notes": [
-    "Numeric reference ranges are intentionally omitted from v1.0 because verified lab-specific thresholds were not provided.",
-    "Populate ranges from authoritative sources (lab report reference ranges, official lab reference tables, or an approved clinical dataset).",
-    "Until then, the engine must treat all markers as MISSING_RANGE and emit REQUIRE_REVIEW."
-  ]
+  "ranges": [
+    {
+      "marker_code": "ferritin",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "male",
+      "canonical_unit": "ng/mL",
+      "low": 50,
+      "high": 200,
+      "critical_low": 12,
+      "critical_high": 500,
+      "decision_limits": {
+        "iron_block_threshold": 300,
+        "iron_caution_threshold": 200
+      },
+      "notes": "High ferritin blocks iron supplementation. Critical high may indicate hemochromatosis or inflammation."
+    },
+    {
+      "marker_code": "ferritin",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "female",
+      "canonical_unit": "ng/mL",
+      "low": 30,
+      "high": 150,
+      "critical_low": 12,
+      "critical_high": 300,
+      "decision_limits": {
+        "iron_block_threshold": 200,
+        "iron_caution_threshold": 150
+      },
+      "notes": "Lower optimal range for females. Menstruating women often have lower ferritin."
+    },
+    {
+      "marker_code": "vitamin_d_25oh",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "ng/mL",
+      "low": 40,
+      "high": 80,
+      "critical_low": 10,
+      "critical_high": 100,
+      "decision_limits": {
+        "deficiency_threshold": 20,
+        "insufficiency_threshold": 30,
+        "toxicity_caution_threshold": 80,
+        "toxicity_threshold": 100
+      },
+      "notes": "Optimal 40-60 ng/mL per Endocrine Society. Lab normal (30-100) is too wide. Toxicity rare below 150."
+    },
+    {
+      "marker_code": "calcium_serum",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "mg/dL",
+      "low": 8.6,
+      "high": 10.2,
+      "critical_low": 7.0,
+      "critical_high": 11.5,
+      "decision_limits": {
+        "vitamin_d_caution_threshold": 10.5,
+        "hypercalcemia_flag": 10.5
+      },
+      "notes": "High calcium triggers vitamin D caution. Consider PTH if elevated."
+    },
+    {
+      "marker_code": "hs_crp",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "mg/L",
+      "low": 0,
+      "high": 1.0,
+      "critical_low": null,
+      "critical_high": 10.0,
+      "decision_limits": {
+        "acute_inflammation_threshold": 3.0,
+        "severe_inflammation_threshold": 10.0,
+        "chronic_risk_threshold": 1.0
+      },
+      "notes": "CRP >3 indicates acute inflammation - defer iron interpretation. CRP >10 suggests active infection/injury."
+    },
+    {
+      "marker_code": "fasting_glucose",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "mg/dL",
+      "low": 70,
+      "high": 95,
+      "critical_low": 55,
+      "critical_high": 200,
+      "decision_limits": {
+        "prediabetic_threshold": 100,
+        "diabetic_threshold": 126,
+        "hypoglycemia_threshold": 70
+      },
+      "notes": "Optimal fasting glucose 70-90 mg/dL. 100-125 is prediabetic range per ADA."
+    },
+    {
+      "marker_code": "hba1c",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "%",
+      "low": 4.0,
+      "high": 5.4,
+      "critical_low": null,
+      "critical_high": 9.0,
+      "decision_limits": {
+        "prediabetic_threshold": 5.7,
+        "diabetic_threshold": 6.5,
+        "poorly_controlled_threshold": 8.0
+      },
+      "notes": "Optimal <5.4%. Prediabetes 5.7-6.4%. Diabetes >=6.5% per ADA."
+    },
+    {
+      "marker_code": "creatinine",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "male",
+      "canonical_unit": "mg/dL",
+      "low": 0.7,
+      "high": 1.2,
+      "critical_low": 0.4,
+      "critical_high": 2.5,
+      "decision_limits": {
+        "renal_caution_threshold": 1.3,
+        "renal_concern_threshold": 1.5
+      },
+      "notes": "Elevated creatinine triggers renal caution. Must interpret with eGFR."
+    },
+    {
+      "marker_code": "creatinine",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "female",
+      "canonical_unit": "mg/dL",
+      "low": 0.5,
+      "high": 1.0,
+      "critical_low": 0.3,
+      "critical_high": 2.0,
+      "decision_limits": {
+        "renal_caution_threshold": 1.1,
+        "renal_concern_threshold": 1.3
+      },
+      "notes": "Lower reference for females due to muscle mass differences."
+    },
+    {
+      "marker_code": "egfr",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "mL/min/1.73m2",
+      "low": 90,
+      "high": null,
+      "critical_low": 30,
+      "critical_high": null,
+      "decision_limits": {
+        "renal_caution_threshold": 60,
+        "ckd_stage3_threshold": 60,
+        "ckd_stage4_threshold": 30,
+        "ckd_stage5_threshold": 15
+      },
+      "notes": "eGFR <60 triggers renal caution. <30 is severe CKD. No upper limit - higher is better."
+    },
+    {
+      "marker_code": "alt",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "male",
+      "canonical_unit": "U/L",
+      "low": 7,
+      "high": 40,
+      "critical_low": null,
+      "critical_high": 200,
+      "decision_limits": {
+        "hepatic_caution_threshold": 50,
+        "hepatic_concern_threshold": 80,
+        "hepatotoxicity_flag": 120
+      },
+      "notes": "Elevated ALT triggers hepatic caution. Check AST ratio. Screen for NAFLD if elevated."
+    },
+    {
+      "marker_code": "alt",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "female",
+      "canonical_unit": "U/L",
+      "low": 7,
+      "high": 30,
+      "critical_low": null,
+      "critical_high": 150,
+      "decision_limits": {
+        "hepatic_caution_threshold": 40,
+        "hepatic_concern_threshold": 60,
+        "hepatotoxicity_flag": 100
+      },
+      "notes": "Lower threshold for females. Some studies suggest optimal <25 U/L."
+    },
+    {
+      "marker_code": "ast",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "male",
+      "canonical_unit": "U/L",
+      "low": 10,
+      "high": 40,
+      "critical_low": null,
+      "critical_high": 200,
+      "decision_limits": {
+        "hepatic_caution_threshold": 50,
+        "hepatic_concern_threshold": 80,
+        "hepatotoxicity_flag": 120
+      },
+      "notes": "AST less specific to liver than ALT. AST:ALT >2 suggests alcoholic liver disease."
+    },
+    {
+      "marker_code": "ast",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "female",
+      "canonical_unit": "U/L",
+      "low": 10,
+      "high": 32,
+      "critical_low": null,
+      "critical_high": 150,
+      "decision_limits": {
+        "hepatic_caution_threshold": 40,
+        "hepatic_concern_threshold": 60,
+        "hepatotoxicity_flag": 100
+      },
+      "notes": "Lower threshold for females."
+    },
+    {
+      "marker_code": "magnesium_serum",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "mg/dL",
+      "low": 2.0,
+      "high": 2.5,
+      "critical_low": 1.2,
+      "critical_high": 3.5,
+      "decision_limits": {
+        "deficiency_threshold": 1.8,
+        "insufficiency_threshold": 2.0
+      },
+      "notes": "Serum Mg reflects only 1% of total body Mg. Optimal >2.0 mg/dL. RBC Mg more accurate."
+    },
+    {
+      "marker_code": "hemoglobin",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "male",
+      "canonical_unit": "g/dL",
+      "low": 14.0,
+      "high": 17.5,
+      "critical_low": 10.0,
+      "critical_high": 20.0,
+      "decision_limits": {
+        "anemia_threshold": 13.0,
+        "polycythemia_caution": 18.0
+      },
+      "notes": "Low Hb indicates anemia - check ferritin, B12, folate. High may indicate polycythemia or dehydration."
+    },
+    {
+      "marker_code": "hemoglobin",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "female",
+      "canonical_unit": "g/dL",
+      "low": 12.0,
+      "high": 15.5,
+      "critical_low": 8.0,
+      "critical_high": 18.0,
+      "decision_limits": {
+        "anemia_threshold": 11.0,
+        "polycythemia_caution": 16.5
+      },
+      "notes": "Lower threshold for females. Pregnant women have different ranges (not covered in v1.0)."
+    },
+    {
+      "marker_code": "total_testosterone",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "male",
+      "canonical_unit": "ng/dL",
+      "low": 400,
+      "high": 900,
+      "critical_low": 200,
+      "critical_high": 1200,
+      "decision_limits": {
+        "low_t_clinical_threshold": 300,
+        "low_t_subclinical_threshold": 400,
+        "high_t_caution": 1000
+      },
+      "notes": "Optimal 500-800 ng/dL for most men. <300 is clinical hypogonadism per AUA."
+    }
+  ],
+  "safety_gates": {
+    "iron_block": {
+      "description": "Block iron supplementation when ferritin is elevated",
+      "trigger": "ferritin > iron_block_threshold",
+      "exception": "hs_crp > acute_inflammation_threshold (defer interpretation)",
+      "routing_constraint": "BLOCK_IRON"
+    },
+    "vitamin_d_caution": {
+      "description": "Caution on vitamin D when calcium is elevated",
+      "trigger": "calcium_serum > vitamin_d_caution_threshold",
+      "routing_constraint": "CAUTION_VITAMIN_D"
+    },
+    "hepatic_caution": {
+      "description": "Caution on hepatotoxic supplements when liver enzymes elevated",
+      "trigger": "alt > hepatic_caution_threshold OR ast > hepatic_caution_threshold",
+      "routing_constraint": "CAUTION_HEPATOTOXIC"
+    },
+    "renal_caution": {
+      "description": "Caution on renally-cleared supplements when kidney function impaired",
+      "trigger": "egfr < renal_caution_threshold OR creatinine > renal_caution_threshold",
+      "routing_constraint": "CAUTION_RENAL"
+    },
+    "acute_inflammation": {
+      "description": "Flag acute inflammation - defer iron interpretation",
+      "trigger": "hs_crp > acute_inflammation_threshold",
+      "routing_constraint": "FLAG_ACUTE_INFLAMMATION"
+    }
+  },
+  "audit": {
+    "created": "2025-12-27",
+    "created_by": "GenoMAX² Bloodwork Engine v1.0",
+    "evidence_sources": [
+      "American Diabetes Association Standards of Care 2024",
+      "Endocrine Society Clinical Practice Guidelines",
+      "KDIGO CKD Classification 2012",
+      "American Urological Association Testosterone Guidelines",
+      "Clinical laboratory reference ranges (Quest, LabCorp)",
+      "Functional medicine optimal ranges literature"
+    ],
+    "revision_notes": [
+      "v1.0: Initial release with 13 core biomarkers",
+      "Conservative ranges prioritize safety over optimization",
+      "Sex-specific ranges for: ferritin, creatinine, alt, ast, hemoglobin, testosterone"
+    ]
+  }
 }
