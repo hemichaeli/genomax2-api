@@ -41,6 +41,7 @@ class ProcessedMarkerResponse(BaseModel):
     status: str
     range_status: str
     reference_range: Optional[Dict[str, Optional[float]]]
+    decision_limits: Optional[Dict[str, Optional[float]]]
     lab_profile_used: Optional[str]
     fallback_used: bool
     conversion_applied: bool
@@ -49,14 +50,30 @@ class ProcessedMarkerResponse(BaseModel):
     log_entries: List[str]
 
 
+class SafetyGateResponse(BaseModel):
+    """Response for a triggered safety gate."""
+    gate_id: str
+    description: str
+    trigger_marker: str
+    trigger_value: float
+    threshold: float
+    routing_constraint: str
+    exception_active: bool
+    exception_reason: Optional[str]
+
+
 class ProcessMarkersResponse(BaseModel):
     """Response from processing markers."""
     processed_at: str
     lab_profile: str
     markers: List[ProcessedMarkerResponse]
     routing_constraints: List[str]
+    safety_gates: List[SafetyGateResponse]
     require_review: bool
     summary: Dict[str, int]
+    ruleset_version: str
+    input_hash: str
+    output_hash: str
 
 
 # ============================================================
@@ -160,10 +177,12 @@ def register_bloodwork_endpoints(app):
         marker_code: Optional[str] = None
     ):
         """
-        List reference ranges (read-only).
+        List reference ranges.
         
-        Note: In v1.0, reference ranges are intentionally empty.
-        All markers will return MISSING_RANGE until verified ranges are added.
+        v1.0 includes ranges for all 13 core biomarkers:
+        - ferritin, vitamin_d_25oh, calcium_serum, hs_crp
+        - fasting_glucose, hba1c, creatinine, egfr
+        - alt, ast, magnesium_serum, hemoglobin, total_testosterone
         
         Optional filters:
         - lab_profile: Filter by specific lab profile
@@ -185,11 +204,36 @@ def register_bloodwork_endpoints(app):
         return {
             "version": ranges_data.get("version"),
             "scope": ranges_data.get("scope"),
+            "philosophy": ranges_data.get("philosophy"),
             "policy": ranges_data.get("policy"),
-            "notes": ranges_data.get("notes", []),
             "lab_profiles": ranges_data.get("lab_profiles", []),
             "range_count": len(ranges),
-            "ranges": ranges
+            "ranges": ranges,
+            "safety_gates": ranges_data.get("safety_gates", {})
+        }
+    
+    # ---------------------------------------------------------
+    # GET /api/v1/bloodwork/safety-gates
+    # ---------------------------------------------------------
+    @app.get("/api/v1/bloodwork/safety-gates", tags=["Bloodwork Engine"])
+    def list_safety_gates():
+        """
+        List all defined safety gates.
+        
+        Safety gates are cross-marker constraints that block or caution
+        certain supplement categories based on biomarker values.
+        
+        Gates in v1.0:
+        - iron_block: Block iron when ferritin high (unless CRP acute)
+        - vitamin_d_caution: Caution vitamin D when calcium high
+        - hepatic_caution: Caution hepatotoxic when ALT/AST high
+        - renal_caution: Caution renal-cleared when eGFR low / creatinine high
+        - acute_inflammation: Flag when hs-CRP indicates acute inflammation
+        """
+        loader = get_loader()
+        return {
+            "version": loader.reference_ranges.get("version"),
+            "safety_gates": loader.get_safety_gates()
         }
     
     # ---------------------------------------------------------
@@ -204,10 +248,16 @@ def register_bloodwork_endpoints(app):
         1. Validates markers against the registry (unknown -> UNKNOWN status)
         2. Converts units to canonical units (with logging)
         3. Looks up reference ranges (lab_profile -> GLOBAL_CONSERVATIVE fallback)
-        4. Returns processed markers with flags and routing constraints
+        4. Evaluates decision limits and flags breaches
+        5. Triggers safety gates based on cross-marker analysis
+        6. Returns processed markers with flags and routing constraints
         
-        Note: In v1.0, all markers will have MISSING_RANGE status until
-        verified reference ranges are added to the system.
+        Safety gates evaluated:
+        - BLOCK_IRON: Ferritin above iron_block_threshold
+        - CAUTION_VITAMIN_D: Calcium above vitamin_d_caution_threshold
+        - CAUTION_HEPATOTOXIC: ALT or AST above hepatic_caution_threshold
+        - CAUTION_RENAL: eGFR below or creatinine above renal_caution_threshold
+        - FLAG_ACUTE_INFLAMMATION: hs-CRP above acute_inflammation_threshold
         """
         engine = get_engine(lab_profile=request.lab_profile)
         
@@ -235,9 +285,10 @@ def register_bloodwork_endpoints(app):
                     canonical_value=m.canonical_value,
                     original_unit=m.original_unit,
                     canonical_unit=m.canonical_unit,
-                    status=m.status.value,
-                    range_status=m.range_status.value,
+                    status=m.status.value if hasattr(m.status, 'value') else m.status,
+                    range_status=m.range_status.value if hasattr(m.range_status, 'value') else m.range_status,
                     reference_range=m.reference_range,
+                    decision_limits=m.decision_limits,
                     lab_profile_used=m.lab_profile_used,
                     fallback_used=m.fallback_used,
                     conversion_applied=m.conversion_applied,
@@ -248,8 +299,24 @@ def register_bloodwork_endpoints(app):
                 for m in result.markers
             ],
             routing_constraints=result.routing_constraints,
+            safety_gates=[
+                SafetyGateResponse(
+                    gate_id=g.gate_id,
+                    description=g.description,
+                    trigger_marker=g.trigger_marker,
+                    trigger_value=g.trigger_value,
+                    threshold=g.threshold,
+                    routing_constraint=g.routing_constraint,
+                    exception_active=g.exception_active,
+                    exception_reason=g.exception_reason
+                )
+                for g in result.safety_gates
+            ],
             require_review=result.require_review,
-            summary=result.summary
+            summary=result.summary,
+            ruleset_version=result.ruleset_version,
+            input_hash=result.input_hash,
+            output_hash=result.output_hash
         )
     
     # ---------------------------------------------------------
@@ -274,12 +341,17 @@ def register_bloodwork_endpoints(app):
             },
             "reference_ranges": {
                 "version": ranges.get("version"),
-                "range_count": len(ranges.get("ranges", [])),
+                "range_count": loader.range_count,
                 "loaded": True,
-                "note": "v1.0 has no numeric ranges - all markers return MISSING_RANGE"
+                "ranges_active": loader.range_count > 0
+            },
+            "safety_gates": {
+                "defined": len(loader.get_safety_gates()),
+                "gates": list(loader.get_safety_gates().keys())
             },
             "lab_profiles": loader.lab_profiles,
-            "policy": ranges.get("policy", {})
+            "policy": ranges.get("policy", {}),
+            "ruleset_version": loader.ruleset_version
         }
     
     return app
