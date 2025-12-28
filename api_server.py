@@ -1,7 +1,16 @@
 """
 GenoMAX² API Server
 Gender-Optimized Biological Operating System
-Version 3.10.2 - Brain Resolver Integration + Painpoints/Lifestyle Schema
+Version 3.12.0 - Catalog Governance Integration
+
+v3.12.0:
+- Integrate Catalog Governance admin endpoints (Issue #5)
+- /api/v1/admin/catalog/coverage - Coverage report
+- /api/v1/admin/catalog/missing-metadata - Missing metadata report
+- /api/v1/admin/catalog/unknown-ingredients - Unknown ingredients report
+- /api/v1/admin/catalog/validate - Full validation results
+- /api/v1/admin/catalog/health - Module health check
+- Admin endpoints require X-Admin-API-Key header
 
 v3.10.2:
 - Fix railway.json to use main.py entry point
@@ -50,7 +59,10 @@ from app.brain.contracts import (
 from app.brain.resolver import resolve_all, compute_hash as resolver_compute_hash
 from app.brain.mocks import bloodwork_mock, lifestyle_mock, goals_mock
 
-app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.10.2")
+# Catalog Governance imports (NEW in v3.12.0)
+from app.catalog.admin import router as catalog_router
+
+app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.12.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -60,6 +72,9 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["*"],
 )
+
+# Register Catalog Governance admin router (NEW in v3.12.0)
+app.include_router(catalog_router)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -593,17 +608,36 @@ def migrate_brain_full():
 
 @app.get("/")
 def root():
-    return {"service": "GenoMAX² API", "version": "3.10.2", "status": "operational"}
+    return {"service": "GenoMAX² API", "version": "3.12.0", "status": "operational"}
 
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "3.10.2"}
+    return {"status": "healthy", "version": "3.12.0"}
 
 
 @app.get("/version")
 def version():
-    return {"api_version": "3.10.2", "brain_version": "1.5.0", "resolver_version": "1.0.0", "contract_version": CONTRACT_VERSION, "features": ["orchestrate", "orchestrate_v2", "compose", "route", "resolve", "supplier-gating", "debug-catalog", "debug-supplier-status", "painpoints", "lifestyle-schema"]}
+    return {
+        "api_version": "3.12.0",
+        "brain_version": "1.5.0",
+        "resolver_version": "1.0.0",
+        "catalog_version": "catalog_governance_v1",
+        "contract_version": CONTRACT_VERSION,
+        "features": [
+            "orchestrate",
+            "orchestrate_v2",
+            "compose",
+            "route",
+            "resolve",
+            "supplier-gating",
+            "debug-catalog",
+            "debug-supplier-status",
+            "painpoints",
+            "lifestyle-schema",
+            "catalog-governance"
+        ]
+    }
 
 
 @app.get("/api/v1/brain/health")
