@@ -4,6 +4,8 @@ GenoMAX² Bloodwork Engine v1.0 - API Endpoints
 FastAPI endpoints for bloodwork processing and data access.
 """
 
+import os
+from pathlib import Path
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 from dataclasses import asdict
@@ -88,7 +90,7 @@ def register_bloodwork_endpoints(app):
         from bloodwork_engine.api import register_bloodwork_endpoints
         register_bloodwork_endpoints(app)
     """
-    from bloodwork_engine.engine import get_engine, get_loader
+    from bloodwork_engine.engine import get_engine, get_loader, BloodworkDataLoader
     
     # ---------------------------------------------------------
     # GET /api/v1/bloodwork/lab-profiles
@@ -326,10 +328,17 @@ def register_bloodwork_endpoints(app):
     def bloodwork_engine_status():
         """
         Get Bloodwork Engine status and configuration.
+        Includes diagnostic info for troubleshooting deployment issues.
         """
         loader = get_loader()
         registry = loader.marker_registry
         ranges = loader.reference_ranges
+        
+        # Diagnostic: check file paths
+        engine_file = Path(__file__).resolve()
+        data_dir = engine_file.parent / "data"
+        registry_path = data_dir / "marker_registry_v1_0.json"
+        ranges_path = data_dir / "reference_ranges_v1_0.json"
         
         return {
             "engine_version": "1.0",
@@ -351,6 +360,41 @@ def register_bloodwork_endpoints(app):
             },
             "lab_profiles": loader.lab_profiles,
             "policy": ranges.get("policy", {}),
+            "ruleset_version": loader.ruleset_version,
+            "diagnostics": {
+                "engine_file": str(engine_file),
+                "data_dir": str(data_dir),
+                "data_dir_exists": data_dir.exists(),
+                "registry_file": str(registry_path),
+                "registry_exists": registry_path.exists(),
+                "registry_size_bytes": registry_path.stat().st_size if registry_path.exists() else 0,
+                "ranges_file": str(ranges_path),
+                "ranges_exists": ranges_path.exists(),
+                "ranges_size_bytes": ranges_path.stat().st_size if ranges_path.exists() else 0,
+                "cwd": os.getcwd(),
+                "singleton_loaded": BloodworkDataLoader._loaded
+            }
+        }
+    
+    # ---------------------------------------------------------
+    # POST /api/v1/bloodwork/reload (ADMIN)
+    # ---------------------------------------------------------
+    @app.post("/api/v1/bloodwork/reload", tags=["Bloodwork Engine"])
+    def reload_bloodwork_data():
+        """
+        Force reload of bloodwork data files.
+        Use this if data files were updated but singleton cache is stale.
+        """
+        # Reset the singleton
+        BloodworkDataLoader.reset()
+        
+        # Re-initialize
+        loader = get_loader()
+        
+        return {
+            "status": "reloaded",
+            "marker_count": len(loader.allowed_marker_codes),
+            "range_count": loader.range_count,
             "ruleset_version": loader.ruleset_version
         }
     
