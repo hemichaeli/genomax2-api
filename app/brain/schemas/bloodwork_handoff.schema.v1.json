@@ -1,0 +1,231 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "bloodwork_handoff.schema.v1",
+  "title": "BloodworkHandoffV1",
+  "description": "Canonical handoff object from Bloodwork Engine to Brain Orchestrator. Blood does not negotiate.",
+  "type": "object",
+  "required": ["handoff_version", "source", "input", "output", "audit"],
+  "properties": {
+    "handoff_version": {
+      "type": "string",
+      "const": "bloodwork_handoff.v1",
+      "description": "Schema version identifier"
+    },
+    "source": {
+      "type": "object",
+      "required": ["service", "endpoint", "engine_version"],
+      "properties": {
+        "service": {
+          "type": "string",
+          "const": "bloodwork_engine",
+          "description": "Source service identifier"
+        },
+        "base_url": {
+          "type": "string",
+          "format": "uri",
+          "description": "Base URL of the bloodwork engine"
+        },
+        "endpoint": {
+          "type": "string",
+          "description": "API endpoint path"
+        },
+        "engine_version": {
+          "type": "string",
+          "pattern": "^\\d+\\.\\d+(\\.\\d+)?$",
+          "description": "Semantic version of the engine"
+        }
+      },
+      "additionalProperties": false
+    },
+    "input": {
+      "type": "object",
+      "required": ["lab_profile", "markers"],
+      "properties": {
+        "lab_profile": {
+          "type": "string",
+          "description": "Lab profile used for reference ranges"
+        },
+        "sex": {
+          "type": ["string", "null"],
+          "enum": ["male", "female", null],
+          "description": "Biological sex for sex-specific ranges"
+        },
+        "age": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 150,
+          "description": "Age in years"
+        },
+        "markers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["code", "value", "unit"],
+            "properties": {
+              "code": {
+                "type": "string",
+                "description": "Marker code or alias"
+              },
+              "value": {
+                "type": "number",
+                "description": "Numeric value"
+              },
+              "unit": {
+                "type": "string",
+                "description": "Unit of measurement"
+              }
+            },
+            "additionalProperties": false
+          },
+          "minItems": 1,
+          "description": "Array of submitted markers"
+        }
+      },
+      "additionalProperties": false
+    },
+    "output": {
+      "type": "object",
+      "required": ["routing_constraints"],
+      "properties": {
+        "routing_constraints": {
+          "type": "object",
+          "required": ["blocked_ingredients", "blocked_categories", "caution_flags", "requirements", "reason_codes"],
+          "properties": {
+            "blocked_ingredients": {
+              "type": "array",
+              "items": {"type": "string"},
+              "uniqueItems": true,
+              "description": "Ingredients that MUST NOT be recommended"
+            },
+            "blocked_categories": {
+              "type": "array",
+              "items": {"type": "string"},
+              "uniqueItems": true,
+              "description": "Supplement categories that MUST NOT be recommended"
+            },
+            "caution_flags": {
+              "type": "array",
+              "items": {"type": "string"},
+              "uniqueItems": true,
+              "description": "Ingredients requiring caution/reduced dosing"
+            },
+            "requirements": {
+              "type": "array",
+              "items": {"type": "string"},
+              "uniqueItems": true,
+              "description": "Ingredients that SHOULD be recommended"
+            },
+            "reason_codes": {
+              "type": "array",
+              "items": {"type": "string"},
+              "uniqueItems": true,
+              "description": "Machine-readable reason codes for constraints"
+            }
+          },
+          "additionalProperties": false
+        },
+        "signal_flags": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Additional signal flags (e.g., BLOODWORK_INCOMPLETE_PANEL)"
+        },
+        "unknown_biomarkers": {
+          "type": "array",
+          "items": {"type": "string"},
+          "description": "Biomarker codes not recognized by the engine"
+        },
+        "processed_markers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["canonical_code", "canonical_value", "canonical_unit", "status", "range_status"],
+            "properties": {
+              "original_code": {"type": "string"},
+              "canonical_code": {"type": ["string", "null"]},
+              "original_value": {"type": "number"},
+              "canonical_value": {"type": "number"},
+              "original_unit": {"type": "string"},
+              "canonical_unit": {"type": ["string", "null"]},
+              "status": {"type": "string"},
+              "range_status": {"type": "string"},
+              "flags": {
+                "type": "array",
+                "items": {"type": "string"}
+              }
+            }
+          },
+          "description": "Detailed processed marker data"
+        },
+        "safety_gates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["gate_id", "trigger_marker", "routing_constraint"],
+            "properties": {
+              "gate_id": {"type": "string"},
+              "description": {"type": "string"},
+              "trigger_marker": {"type": "string"},
+              "trigger_value": {"type": "number"},
+              "threshold": {"type": "number"},
+              "routing_constraint": {"type": "string"},
+              "exception_active": {"type": "boolean"},
+              "exception_reason": {"type": ["string", "null"]}
+            }
+          },
+          "description": "Triggered safety gates with details"
+        },
+        "summary": {
+          "type": "object",
+          "properties": {
+            "total_markers": {"type": "integer"},
+            "valid_markers": {"type": "integer"},
+            "unknown_markers": {"type": "integer"},
+            "in_range": {"type": "integer"},
+            "out_of_range": {"type": "integer"}
+          },
+          "description": "Summary statistics"
+        },
+        "require_review": {
+          "type": "boolean",
+          "description": "Flag indicating if manual review is recommended"
+        }
+      },
+      "additionalProperties": false
+    },
+    "audit": {
+      "type": "object",
+      "required": ["input_hash", "output_hash", "ruleset_version", "processed_at"],
+      "properties": {
+        "input_hash": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "description": "SHA256 hash of canonical input"
+        },
+        "output_hash": {
+          "type": "string",
+          "pattern": "^sha256:[a-f0-9]{64}$",
+          "description": "SHA256 hash of canonical output"
+        },
+        "ruleset_version": {
+          "type": "string",
+          "description": "Combined version of registry and ranges"
+        },
+        "marker_registry_version": {
+          "type": "string",
+          "description": "Version of marker registry used"
+        },
+        "reference_ranges_version": {
+          "type": "string",
+          "description": "Version of reference ranges used"
+        },
+        "processed_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO-8601 timestamp of processing"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}
