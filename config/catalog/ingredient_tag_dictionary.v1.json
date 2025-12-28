@@ -1,0 +1,415 @@
+{
+  "_metadata": {
+    "version": "ingredient_tag_dictionary_v1",
+    "description": "Canonical mapping from raw ingredient names to standardized tags",
+    "rules": [
+      "No fuzzy matching in v1 - exact match only (case-insensitive)",
+      "Unknown ingredients are tracked but do not auto-block",
+      "Missing ingredient_tags (empty) DOES auto-block"
+    ],
+    "last_updated": "2025-12-28",
+    "source": "GENOMAX_FINAL_140.csv + manual additions"
+  },
+  
+  "canonical_tags": {
+    "vitamin_d3": {
+      "aliases": ["vitamin d3", "vitamin d", "cholecalciferol", "d3", "vitamin d3 2000 iu", "vitamin d3 2000iu"],
+      "category": "vitamin",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": []
+    },
+    "vitamin_k2": {
+      "aliases": ["vitamin k2", "mk-7", "menaquinone", "k2", "bone heart support", "bone & heart support"],
+      "category": "vitamin",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": ["anticoagulant_interaction"]
+    },
+    "vitamin_b12": {
+      "aliases": ["vitamin b12", "methylcobalamin", "cobalamin", "b12"],
+      "category": "vitamin",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": []
+    },
+    "vitamin_b6": {
+      "aliases": ["vitamin b6", "pyridoxine", "p5p", "pyridoxal-5-phosphate", "b6"],
+      "category": "vitamin",
+      "evidence_tier": "TIER_2_CONTEXTUAL",
+      "risk_tags": ["neuropathy_high_dose"]
+    },
+    "vitamin_c": {
+      "aliases": ["vitamin c", "ascorbic acid", "ascorbate", "c"],
+      "category": "vitamin",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": []
+    },
+    "vitamin_e": {
+      "aliases": ["vitamin e", "tocopherol", "mixed tocopherols", "alpha tocopherol"],
+      "category": "vitamin",
+      "evidence_tier": "TIER_2_CONTEXTUAL",
+      "risk_tags": []
+    },
+    "folate": {
+      "aliases": ["folate", "folic acid", "5-mthf", "methylfolate", "l-methylfolate"],
+      "category": "vitamin",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": []
+    },
+    "magnesium": {
+      "aliases": ["magnesium", "magnesium glycinate", "mag glycinate", "magnesium citrate", "magnesium oxide"],
+      "category": "mineral",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": []
+    },
+    "zinc": {
+      "aliases": ["zinc", "zinc picolinate", "zinc citrate", "zinc gluconate"],
+      "category": "mineral",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": ["copper_depletion"]
+    },
+    "selenium": {
+      "aliases": ["selenium", "selenomethionine", "sodium selenite"],
+      "category": "mineral",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": ["narrow_therapeutic_window"]
+    },
+    "iron": {
+      "aliases": ["iron", "ferrous bisglycinate", "ferrous sulfate", "iron bisglycinate", "iron strips"],
+      "category": "mineral",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": ["iron_overload_risk", "requires_blood_check"]
+    },
+    "calcium": {
+      "aliases": ["calcium", "calcium citrate", "calcium carbonate"],
+      "category": "mineral",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": ["calcification_risk"]
+    },
+    "iodine": {
+      "aliases": ["iodine", "potassium iodide", "kelp"],
+      "category": "mineral",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": ["thyroid_sensitive"]
+    },
+    "chromium": {
+      "aliases": ["chromium", "chromium picolinate"],
+      "category": "mineral",
+      "evidence_tier": "TIER_2_CONTEXTUAL",
+      "risk_tags": []
+    },
+    "potassium": {
+      "aliases": ["potassium", "potassium citrate", "potassium chloride"],
+      "category": "mineral",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": ["hyperkalemia_risk"]
+    },
+    "ashwagandha": {
+      "aliases": ["ashwagandha", "withania somnifera", "ksm-66", "sensoril"],
+      "category": "adaptogen",
+      "evidence_tier": "BLOCKED",
+      "risk_tags": ["hepatotoxic", "blocked_ingredient"]
+    },
+    "rhodiola": {
+      "aliases": ["rhodiola", "rhodiola rosea", "golden root"],
+      "category": "adaptogen",
+      "evidence_tier": "TIER_2_CONTEXTUAL",
+      "risk_tags": []
+    },
+    "panax_ginseng": {
+      "aliases": ["panax ginseng", "korean ginseng", "ginseng", "ginkgo biloba ginseng", "ginkgo biloba + ginseng"],
+      "category": "adaptogen",
+      "evidence_tier": "TIER_2_CONTEXTUAL",
+      "risk_tags": []
+    },
+    "maca": {
+      "aliases": ["maca", "maca root", "maca plus", "lepidium meyenii"],
+      "category": "adaptogen",
+      "evidence_tier": "TIER_2_CONTEXTUAL",
+      "risk_tags": []
+    },
+    "turmeric": {
+      "aliases": ["turmeric", "curcumin", "turmeric curcumin", "platinum turmeric", "turmeric gummies"],
+      "category": "anti_inflammatory",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": []
+    },
+    "ginkgo": {
+      "aliases": ["ginkgo", "ginkgo biloba"],
+      "category": "nootropic",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": ["bleeding_risk"]
+    },
+    "green_tea": {
+      "aliases": ["green tea", "green tea extract", "egcg", "matcha", "ceremonial matcha"],
+      "category": "metabolic",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": ["hepatotoxic_high_dose"]
+    },
+    "milk_thistle": {
+      "aliases": ["milk thistle", "silymarin"],
+      "category": "liver",
+      "evidence_tier": "TIER_2_CONTEXTUAL",
+      "risk_tags": []
+    },
+    "berberine": {
+      "aliases": ["berberine"],
+      "category": "metabolic",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": []
+    },
+    "l_theanine": {
+      "aliases": ["l-theanine", "theanine"],
+      "category": "nootropic",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": []
+    },
+    "l_citrulline": {
+      "aliases": ["l-citrulline", "citrulline", "citrulline malate"],
+      "category": "performance",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": []
+    },
+    "l_carnitine": {
+      "aliases": ["l-carnitine", "carnitine", "acetyl-l-carnitine", "alcar"],
+      "category": "metabolic",
+      "evidence_tier": "TIER_2_CONTEXTUAL",
+      "risk_tags": []
+    },
+    "creatine": {
+      "aliases": ["creatine", "creatine monohydrate"],
+      "category": "performance",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": []
+    },
+    "beta_alanine": {
+      "aliases": ["beta-alanine", "beta alanine"],
+      "category": "performance",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": ["paresthesia"]
+    },
+    "nac": {
+      "aliases": ["nac", "n-acetyl cysteine", "n-acetylcysteine"],
+      "category": "antioxidant",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": []
+    },
+    "coq10": {
+      "aliases": ["coq10", "ubiquinone", "ubiquinol", "coenzyme q10", "coq10 ubiquinone"],
+      "category": "mitochondrial",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": []
+    },
+    "resveratrol": {
+      "aliases": ["resveratrol", "trans-resveratrol", "resveratrol 50%"],
+      "category": "longevity",
+      "evidence_tier": "TIER_2_CONTEXTUAL",
+      "risk_tags": []
+    },
+    "alpha_lipoic_acid": {
+      "aliases": ["alpha lipoic acid", "ala", "r-ala", "alpha energy"],
+      "category": "metabolic",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": []
+    },
+    "omega3": {
+      "aliases": ["omega-3", "omega 3", "fish oil", "epa", "dha", "epa dha", "omega-3 epa dha"],
+      "category": "essential_fatty_acid",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": ["bleeding_risk"]
+    },
+    "collagen": {
+      "aliases": ["collagen", "collagen peptides", "hydrolyzed collagen", "grass-fed collagen", "beauty collagen", "collagen creamer"],
+      "category": "beauty",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": []
+    },
+    "probiotics": {
+      "aliases": ["probiotics", "probiotic", "lactobacillus", "bifidobacterium", "probiotic 20 billion", "probiotic 40 billion"],
+      "category": "gut",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": []
+    },
+    "lions_mane": {
+      "aliases": ["lion's mane", "lions mane", "hericium erinaceus"],
+      "category": "mushroom",
+      "evidence_tier": "TIER_2_CONTEXTUAL",
+      "risk_tags": []
+    },
+    "chaga": {
+      "aliases": ["chaga", "chaga mushroom", "inonotus obliquus"],
+      "category": "mushroom",
+      "evidence_tier": "TIER_2_CONTEXTUAL",
+      "risk_tags": []
+    },
+    "cordyceps": {
+      "aliases": ["cordyceps", "cordyceps militaris", "cs-4"],
+      "category": "mushroom",
+      "evidence_tier": "TIER_3_EXPLORATORY",
+      "risk_tags": []
+    },
+    "reishi": {
+      "aliases": ["reishi", "ganoderma lucidum"],
+      "category": "mushroom",
+      "evidence_tier": "TIER_2_CONTEXTUAL",
+      "risk_tags": []
+    },
+    "melatonin": {
+      "aliases": ["melatonin"],
+      "category": "sleep",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": []
+    },
+    "glycine": {
+      "aliases": ["glycine"],
+      "category": "sleep",
+      "evidence_tier": "TIER_2_CONTEXTUAL",
+      "risk_tags": []
+    },
+    "5_htp": {
+      "aliases": ["5-htp", "5htp", "5 htp", "hydroxytryptophan"],
+      "category": "mood",
+      "evidence_tier": "TIER_2_CONTEXTUAL",
+      "risk_tags": ["serotonin_syndrome_risk"]
+    },
+    "nad_plus": {
+      "aliases": ["nad+", "nad plus", "nicotinamide riboside", "nr", "nmn"],
+      "category": "longevity",
+      "evidence_tier": "TIER_2_CONTEXTUAL",
+      "risk_tags": []
+    },
+    "bcaa": {
+      "aliases": ["bcaa", "branched chain amino acids", "leucine", "isoleucine", "valine"],
+      "category": "performance",
+      "evidence_tier": "TIER_2_CONTEXTUAL",
+      "risk_tags": []
+    },
+    "glutamine": {
+      "aliases": ["glutamine", "l-glutamine"],
+      "category": "gut",
+      "evidence_tier": "TIER_2_CONTEXTUAL",
+      "risk_tags": []
+    },
+    "biotin": {
+      "aliases": ["biotin", "vitamin b7"],
+      "category": "beauty",
+      "evidence_tier": "TIER_2_CONTEXTUAL",
+      "risk_tags": []
+    },
+    "hyaluronic_acid": {
+      "aliases": ["hyaluronic acid", "ha", "sodium hyaluronate"],
+      "category": "beauty",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": []
+    },
+    "digestive_enzymes": {
+      "aliases": ["digestive enzyme", "digestive enzymes", "protease", "amylase", "lipase"],
+      "category": "digestive",
+      "evidence_tier": "TIER_2_CONTEXTUAL",
+      "risk_tags": []
+    },
+    "apple_cider_vinegar": {
+      "aliases": ["apple cider vinegar", "acv"],
+      "category": "digestive",
+      "evidence_tier": "TIER_3_EXPLORATORY",
+      "risk_tags": []
+    },
+    "sea_moss": {
+      "aliases": ["sea moss", "irish moss", "chondrus crispus"],
+      "category": "superfood",
+      "evidence_tier": "TIER_3_EXPLORATORY",
+      "risk_tags": ["iodine_sensitive"]
+    },
+    "moringa": {
+      "aliases": ["moringa", "moringa oleifera", "moringa pure"],
+      "category": "superfood",
+      "evidence_tier": "TIER_3_EXPLORATORY",
+      "risk_tags": []
+    },
+    "beetroot": {
+      "aliases": ["beetroot", "beet root", "beet powder", "nitric oxide"],
+      "category": "performance",
+      "evidence_tier": "TIER_2_CONTEXTUAL",
+      "risk_tags": []
+    },
+    "saw_palmetto": {
+      "aliases": ["saw palmetto", "serenoa repens"],
+      "category": "hormonal",
+      "evidence_tier": "TIER_2_CONTEXTUAL",
+      "risk_tags": []
+    },
+    "tribulus": {
+      "aliases": ["tribulus", "tribulus terrestris"],
+      "category": "hormonal",
+      "evidence_tier": "TIER_2_CONTEXTUAL",
+      "risk_tags": []
+    },
+    "dhea": {
+      "aliases": ["dhea", "dehydroepiandrosterone"],
+      "category": "hormonal",
+      "evidence_tier": "TIER_2_CONTEXTUAL",
+      "risk_tags": ["hormone_sensitive"]
+    },
+    "caffeine": {
+      "aliases": ["caffeine", "coffee", "mushroom coffee"],
+      "category": "stimulant",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": ["stimulant"]
+    },
+    "keto_bhb": {
+      "aliases": ["keto bhb", "bhb", "beta-hydroxybutyrate", "keto-5"],
+      "category": "metabolic",
+      "evidence_tier": "TIER_3_EXPLORATORY",
+      "risk_tags": []
+    },
+    "whey_protein": {
+      "aliases": ["whey protein", "whey isolate", "whey protein isolate", "protein powder"],
+      "category": "protein",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": []
+    },
+    "plant_protein": {
+      "aliases": ["plant protein", "pea protein", "rice protein", "vegan protein"],
+      "category": "protein",
+      "evidence_tier": "TIER_1_OS_CORE",
+      "risk_tags": []
+    },
+    "methylene_blue": {
+      "aliases": ["methylene blue"],
+      "category": "nootropic",
+      "evidence_tier": "TIER_3_EXPLORATORY",
+      "risk_tags": ["serotonin_syndrome_risk", "requires_supervision"]
+    }
+  },
+  
+  "category_mappings": {
+    "Vitamins & Minerals": ["vitamin", "mineral"],
+    "Digestive Support": ["digestive", "gut"],
+    "Brain & Cognitive": ["nootropic", "cognitive"],
+    "Sleep & Relaxation": ["sleep", "relaxation"],
+    "Specialty Supplements": ["specialty"],
+    "Mushroom Products": ["mushroom", "adaptogen"],
+    "Sexual & Reproductive Wellness": ["hormonal", "reproductive"],
+    "Skin, Hair & Nail Health": ["beauty", "collagen"],
+    "Bone, Joint & Cartilage": ["joint", "bone"],
+    "Weight Management": ["metabolic", "weight"],
+    "Post-Workout Recovery": ["performance", "recovery"],
+    "Pre-Workout Supplements": ["performance", "energy"],
+    "Intra-Workout Supplements": ["performance", "hydration"],
+    "Proteins": ["protein"],
+    "Greens & Superfoods": ["superfood", "greens"],
+    "Fish Oil & Omega Fatty Acids": ["essential_fatty_acid"],
+    "Coffee & Tea": ["beverage", "energy"],
+    "Bee Products": ["superfood"],
+    "Facial Care": ["topical", "beauty"],
+    "Hair Care": ["topical", "beauty"],
+    "Body Care": ["topical"],
+    "Eye, Ear & Nose": ["specialty"]
+  },
+  
+  "blocked_ingredients": {
+    "ashwagandha": {
+      "reason": "HEPATOTOXICITY_RISK",
+      "evidence": "Case reports of liver injury, GenoMAX safety-first policy",
+      "permanent": true
+    }
+  }
+}
