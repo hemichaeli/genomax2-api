@@ -1,7 +1,16 @@
 """
 GenoMAX² API Server
 Gender-Optimized Biological Operating System
-Version 3.12.0 - Catalog Governance Integration
+Version 3.13.0 - Routing Layer Integration
+
+v3.13.0:
+- Integrate Routing Layer endpoints (Issue #6)
+- /api/v1/routing/health - Module health check
+- /api/v1/routing/apply - Apply routing constraints to SKUs
+- /api/v1/routing/filter-gender - Filter by gender target
+- /api/v1/routing/requirements-coverage - Coverage analysis
+- /api/v1/routing/test-blocking - Debug blocking rules
+- Routing Layer: PURE, ELIMINATIVE, DUMB, DETERMINISTIC
 
 v3.12.0:
 - Integrate Catalog Governance admin endpoints (Issue #5)
@@ -59,10 +68,13 @@ from app.brain.contracts import (
 from app.brain.resolver import resolve_all, compute_hash as resolver_compute_hash
 from app.brain.mocks import bloodwork_mock, lifestyle_mock, goals_mock
 
-# Catalog Governance imports (NEW in v3.12.0)
+# Catalog Governance imports (v3.12.0)
 from app.catalog.admin import router as catalog_router
 
-app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.12.0")
+# Routing Layer imports (NEW in v3.13.0)
+from app.routing.admin import router as routing_router
+
+app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.13.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -73,8 +85,11 @@ app.add_middleware(
     expose_headers=["*"],
 )
 
-# Register Catalog Governance admin router (NEW in v3.12.0)
+# Register Catalog Governance admin router (v3.12.0)
 app.include_router(catalog_router)
+
+# Register Routing Layer router (NEW in v3.13.0)
+app.include_router(routing_router)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -608,21 +623,22 @@ def migrate_brain_full():
 
 @app.get("/")
 def root():
-    return {"service": "GenoMAX² API", "version": "3.12.0", "status": "operational"}
+    return {"service": "GenoMAX² API", "version": "3.13.0", "status": "operational"}
 
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "3.12.0"}
+    return {"status": "healthy", "version": "3.13.0"}
 
 
 @app.get("/version")
 def version():
     return {
-        "api_version": "3.12.0",
+        "api_version": "3.13.0",
         "brain_version": "1.5.0",
         "resolver_version": "1.0.0",
         "catalog_version": "catalog_governance_v1",
+        "routing_version": "routing_layer_v1",
         "contract_version": CONTRACT_VERSION,
         "features": [
             "orchestrate",
@@ -635,7 +651,8 @@ def version():
             "debug-supplier-status",
             "painpoints",
             "lifestyle-schema",
-            "catalog-governance"
+            "catalog-governance",
+            "routing-layer"
         ]
     }
 
