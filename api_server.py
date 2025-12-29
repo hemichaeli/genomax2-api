@@ -1,7 +1,15 @@
 """
 GenoMAX² API Server
 Gender-Optimized Biological Operating System
-Version 3.13.0 - Routing Layer Integration
+Version 3.14.0 - Matching Layer Integration
+
+v3.14.0:
+- Integrate Matching Layer endpoints (Issue #7)
+- /api/v1/matching/health - Module health check
+- /api/v1/matching/resolve - Main matching endpoint (intents → SKUs)
+- /api/v1/matching/resolve/summary - Frontend-friendly format
+- /api/v1/matching/test-match - Debug with mock data
+- Matching Layer: DETERMINISTIC, TRANSPARENT, GENDER-AWARE
 
 v3.13.0:
 - Integrate Routing Layer endpoints (Issue #6)
@@ -71,10 +79,13 @@ from app.brain.mocks import bloodwork_mock, lifestyle_mock, goals_mock
 # Catalog Governance imports (v3.12.0)
 from app.catalog.admin import router as catalog_router
 
-# Routing Layer imports (NEW in v3.13.0)
+# Routing Layer imports (v3.13.0)
 from app.routing.admin import router as routing_router
 
-app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.13.0")
+# Matching Layer imports (NEW in v3.14.0)
+from app.matching.admin import router as matching_router
+
+app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.14.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -88,8 +99,11 @@ app.add_middleware(
 # Register Catalog Governance admin router (v3.12.0)
 app.include_router(catalog_router)
 
-# Register Routing Layer router (NEW in v3.13.0)
+# Register Routing Layer router (v3.13.0)
 app.include_router(routing_router)
+
+# Register Matching Layer router (NEW in v3.14.0)
+app.include_router(matching_router)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -623,22 +637,23 @@ def migrate_brain_full():
 
 @app.get("/")
 def root():
-    return {"service": "GenoMAX² API", "version": "3.13.0", "status": "operational"}
+    return {"service": "GenoMAX² API", "version": "3.14.0", "status": "operational"}
 
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "3.13.0"}
+    return {"status": "healthy", "version": "3.14.0"}
 
 
 @app.get("/version")
 def version():
     return {
-        "api_version": "3.13.0",
+        "api_version": "3.14.0",
         "brain_version": "1.5.0",
         "resolver_version": "1.0.0",
         "catalog_version": "catalog_governance_v1",
         "routing_version": "routing_layer_v1",
+        "matching_version": "matching_layer_v1",
         "contract_version": CONTRACT_VERSION,
         "features": [
             "orchestrate",
@@ -652,7 +667,8 @@ def version():
             "painpoints",
             "lifestyle-schema",
             "catalog-governance",
-            "routing-layer"
+            "routing-layer",
+            "matching-layer"
         ]
     }
 
@@ -717,7 +733,7 @@ def debug_supplier_status():
         return {"error": str(e)}
 
 
-# ===== BRAIN RESOLVE ENDPOINT (NEW) =====
+# ===== BRAIN RESOLVE ENDPOINT =====
 
 @app.post("/api/v1/brain/resolve")
 def brain_resolve(request: ResolveRequest):
@@ -729,19 +745,10 @@ def brain_resolve(request: ResolveRequest):
     - Goals/Painpoints Engine -> ProtocolIntents
     
     Output is deterministic: same inputs = same outputs.
-    
-    Modes:
-    1. Direct input: Provide assessment_context directly
-    2. DB lookup: Provide protocol_id to load from decision_outputs
-    3. Mixed: Load from DB, override with request fields
     """
     created_at = now_iso()
-    
-    # Determine protocol_id and run_id
     protocol_id = request.protocol_id or str(uuid.uuid4())
     run_id = request.run_id
-    
-    # Try to load from DB if protocol_id or run_id provided
     db_context = None
     db_constraints = None
     
@@ -749,15 +756,11 @@ def brain_resolve(request: ResolveRequest):
     if conn and (request.protocol_id or request.run_id):
         try:
             cur = conn.cursor()
-            
-            # Find run_id from protocol_id if needed
             if request.protocol_id and not run_id:
                 cur.execute("SELECT run_id FROM protocol_runs WHERE id = %s LIMIT 1", (request.protocol_id,))
                 row = cur.fetchone()
                 if row:
                     run_id = str(row["run_id"])
-            
-            # Load orchestrate output
             if run_id:
                 cur.execute("""
                     SELECT output_json FROM decision_outputs 
@@ -769,7 +772,6 @@ def brain_resolve(request: ResolveRequest):
                     orchestrate_output = parse_jsonb(row["output_json"])
                     db_context = orchestrate_output.get("assessment_context", {})
                     db_constraints = orchestrate_output.get("routing_constraints", {})
-            
             cur.close()
         except Exception as e:
             print(f"DB load error: {e}")
@@ -777,10 +779,7 @@ def brain_resolve(request: ResolveRequest):
             try: conn.close()
             except: pass
     
-    # Build assessment context
     raw_context = request.assessment_context or db_context or {}
-    
-    # Ensure required fields
     if not raw_context.get("protocol_id"):
         raw_context["protocol_id"] = protocol_id
     if not raw_context.get("run_id"):
@@ -788,7 +787,6 @@ def brain_resolve(request: ResolveRequest):
     if not raw_context.get("gender"):
         raise HTTPException(status_code=422, detail={"error": "MISSING_GENDER", "message": "assessment_context.gender is required"})
     
-    # Build AssessmentContext
     try:
         assessment_context = ResolverAssessmentContext(
             protocol_id=raw_context.get("protocol_id"),
@@ -805,16 +803,12 @@ def brain_resolve(request: ResolveRequest):
     except Exception as e:
         raise HTTPException(status_code=422, detail={"error": "INVALID_ASSESSMENT_CONTEXT", "message": str(e)})
     
-    # Build constraints
     if request.use_mocks:
-        # Use mock engines
         bloodwork_constraints = bloodwork_mock(assessment_context)
         lifestyle_constraints = lifestyle_mock(assessment_context)
     else:
-        # Use provided constraints or empty
         raw_bw = request.bloodwork_constraints or db_constraints or {}
         raw_ls = request.lifestyle_constraints or {}
-        
         bloodwork_constraints = ResolverRoutingConstraints(
             blocked_targets=raw_bw.get("blocked_targets", []),
             caution_targets=raw_bw.get("caution_targets", []),
@@ -823,7 +817,6 @@ def brain_resolve(request: ResolveRequest):
             has_critical_flags=raw_bw.get("has_critical_flags", False),
             global_flags=raw_bw.get("global_flags", []),
         )
-        
         lifestyle_constraints = ResolverRoutingConstraints(
             blocked_targets=raw_ls.get("blocked_targets", []),
             caution_targets=raw_ls.get("caution_targets", []),
@@ -833,39 +826,28 @@ def brain_resolve(request: ResolveRequest):
             global_flags=raw_ls.get("global_flags", []),
         )
     
-    # Build intents
     if request.use_mocks and (request.raw_goals or request.raw_painpoints):
         goals_intents = goals_mock(request.raw_goals, request.raw_painpoints)
         painpoint_intents = empty_protocol_intents()
     elif request.goals_intents or request.painpoint_intents:
-        # Convert dict to ProtocolIntents
         goals_intents = empty_protocol_intents()
         painpoint_intents = empty_protocol_intents()
-        
         if request.goals_intents:
             goals_intents = ResolverProtocolIntents(
                 lifestyle=request.goals_intents.get("lifestyle", []),
                 nutrition=request.goals_intents.get("nutrition", []),
-                supplements=[
-                    ProtocolIntentItem(**s) if isinstance(s, dict) else s
-                    for s in request.goals_intents.get("supplements", [])
-                ],
+                supplements=[ProtocolIntentItem(**s) if isinstance(s, dict) else s for s in request.goals_intents.get("supplements", [])],
             )
-        
         if request.painpoint_intents:
             painpoint_intents = ResolverProtocolIntents(
                 lifestyle=request.painpoint_intents.get("lifestyle", []),
                 nutrition=request.painpoint_intents.get("nutrition", []),
-                supplements=[
-                    ProtocolIntentItem(**s) if isinstance(s, dict) else s
-                    for s in request.painpoint_intents.get("supplements", [])
-                ],
+                supplements=[ProtocolIntentItem(**s) if isinstance(s, dict) else s for s in request.painpoint_intents.get("supplements", [])],
             )
     else:
         goals_intents = empty_protocol_intents()
         painpoint_intents = empty_protocol_intents()
     
-    # Build ResolverInput
     resolver_input = ResolverInput(
         assessment_context=assessment_context,
         bloodwork_constraints=bloodwork_constraints,
@@ -876,13 +858,11 @@ def brain_resolve(request: ResolveRequest):
         painpoint_intents=painpoint_intents,
     )
     
-    # Run resolver
     try:
         output = resolve_all(resolver_input)
     except Exception as e:
         raise HTTPException(status_code=500, detail={"error": "RESOLVER_ERROR", "message": str(e)})
     
-    # Store in decision_outputs
     conn = get_db()
     if conn:
         try:
@@ -890,11 +870,7 @@ def brain_resolve(request: ResolveRequest):
             cur.execute("""
                 INSERT INTO decision_outputs (run_id, phase, output_json, output_hash, created_at)
                 VALUES (%s, 'resolve', %s, %s, NOW())
-            """, (
-                output.run_id,
-                json.dumps(output.model_dump(), default=str),
-                output.audit.output_hash,
-            ))
+            """, (output.run_id, json.dumps(output.model_dump(), default=str), output.audit.output_hash))
             conn.commit()
             cur.close()
             conn.close()
@@ -903,7 +879,6 @@ def brain_resolve(request: ResolveRequest):
             try: conn.close()
             except: pass
     
-    # Return output
     return {
         "status": "success",
         "phase": "resolve",
@@ -997,7 +972,7 @@ def brain_compose(request: ComposeRequest):
         if not isinstance(orchestrate_output, dict):
             cur.close()
             conn.close()
-            raise HTTPException(status_code=500, detail=f"orchestrate_output parse failed, got type: {type(orchestrate_output).__name__}")
+            raise HTTPException(status_code=500, detail=f"orchestrate_output parse failed")
         orchestrate_hash = row["output_hash"]
         cur.execute("SELECT user_id FROM brain_runs WHERE id = %s", (request.run_id,))
         run_row = cur.fetchone()
@@ -1041,7 +1016,6 @@ def brain_route(request: RouteRequest):
             conn.close()
             raise HTTPException(status_code=404, detail=f"No run_id found for protocol_id: {request.protocol_id}")
         run_id = run_row["run_id"]
-        
         cur.execute("SELECT COALESCE(d.output_json #>> '{assessment_context,gender}', d.output_json #>> '{assessment_context,sex}') AS gender FROM decision_outputs d WHERE d.run_id = %s AND d.phase IN ('orchestrate_v2', 'orchestrate') ORDER BY d.created_at DESC LIMIT 1", (run_id,))
         gender_row = cur.fetchone()
         gender = gender_row.get("gender") if gender_row else None
@@ -1057,155 +1031,68 @@ def brain_route(request: RouteRequest):
         else:
             cur.close()
             conn.close()
-            raise HTTPException(status_code=422, detail={"error": "INVALID_GENDER", "message": f"Gender '{gender}' not recognized. Expected 'male' or 'female'."})
-        
-        cur.execute("""
-            SELECT column_name FROM information_schema.columns 
-            WHERE table_name = 'os_modules_v3_1' AND column_name = 'supplier_status'
-        """)
+            raise HTTPException(status_code=422, detail={"error": "INVALID_GENDER", "message": f"Gender '{gender}' not recognized."})
+        cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'os_modules_v3_1' AND column_name = 'supplier_status'")
         has_supplier_status = cur.fetchone() is not None
-        
         blocked_targets = request.routing_constraints.get("blocked_targets", [])
         caution_targets = request.routing_constraints.get("caution_targets", [])
         blocked_ingredients = request.routing_constraints.get("blocked_ingredients", [])
         supplement_intents = request.protocol_intents.get("supplements", [])
         allow_fallback = request.allow_discontinuing_fallback
-        
         sku_items = []
         skipped_intents = []
         used_modules = set()
-        
         for intent in supplement_intents:
             intent_id = intent.get("intent_id")
             target_id = intent.get("target_id", intent_id)
             intent_spec = INTENT_CATALOG.get(intent_id)
-            
             if not intent_spec:
                 skipped_intents.append({"intent_id": intent_id, "reason": "INTENT_NOT_IN_CATALOG", "reason_codes": ["UNKNOWN_INTENT"]})
                 continue
-            
             if is_blocked_by_target(intent_spec, blocked_targets):
                 blocking = [t for t in intent_spec.get("blocked_by_targets", []) if t in blocked_targets]
                 skipped_intents.append({"intent_id": intent_id, "reason": "BLOCKED_BY_TARGET", "reason_codes": ["BLOCKED_TARGET"], "details": {"blocked_by": blocking}})
                 continue
-            
             must_have_tags = intent_spec.get("must_have_tags", [])
             must_patterns = [f"%{tag}%" for tag in must_have_tags] if must_have_tags else ["%__match_all__%"]
             blocked_patterns = [f"%{ing}%" for ing in blocked_ingredients] if blocked_ingredients else ["%__never_match__%"]
-            
             row = None
             used_fallback = False
             supplier_status = None
-            
             if has_supplier_status:
-                cur.execute("""
-                    SELECT module_code, product_name, os_layer, biological_domain, shopify_store, shopify_handle, supplier_status
-                    FROM os_modules 
-                    WHERE os_environment = %s 
-                    AND ingredient_tags ILIKE ANY(%s) 
-                    AND NOT (ingredient_tags ILIKE ANY(%s))
-                    AND supplier_status IN ('ACTIVE', 'UNKNOWN')
-                    ORDER BY 
-                        CASE supplier_status WHEN 'ACTIVE' THEN 1 WHEN 'UNKNOWN' THEN 2 ELSE 3 END,
-                        CASE os_layer WHEN 'Core' THEN 1 WHEN 'Adaptive' THEN 2 ELSE 3 END, 
-                        biological_domain, module_code 
-                    LIMIT 1
-                """, (os_env, must_patterns, blocked_patterns))
+                cur.execute("SELECT module_code, product_name, os_layer, biological_domain, shopify_store, shopify_handle, supplier_status FROM os_modules WHERE os_environment = %s AND ingredient_tags ILIKE ANY(%s) AND NOT (ingredient_tags ILIKE ANY(%s)) AND supplier_status IN ('ACTIVE', 'UNKNOWN') ORDER BY CASE supplier_status WHEN 'ACTIVE' THEN 1 WHEN 'UNKNOWN' THEN 2 ELSE 3 END, CASE os_layer WHEN 'Core' THEN 1 WHEN 'Adaptive' THEN 2 ELSE 3 END, biological_domain, module_code LIMIT 1", (os_env, must_patterns, blocked_patterns))
                 row = cur.fetchone()
-                
                 if not row and allow_fallback:
-                    cur.execute("""
-                        SELECT module_code, product_name, os_layer, biological_domain, shopify_store, shopify_handle, supplier_status
-                        FROM os_modules 
-                        WHERE os_environment = %s 
-                        AND ingredient_tags ILIKE ANY(%s) 
-                        AND NOT (ingredient_tags ILIKE ANY(%s))
-                        AND supplier_status = 'DISCONTINUING_SOON'
-                        ORDER BY 
-                            CASE os_layer WHEN 'Core' THEN 1 WHEN 'Adaptive' THEN 2 ELSE 3 END, 
-                            biological_domain, module_code 
-                        LIMIT 1
-                    """, (os_env, must_patterns, blocked_patterns))
+                    cur.execute("SELECT module_code, product_name, os_layer, biological_domain, shopify_store, shopify_handle, supplier_status FROM os_modules WHERE os_environment = %s AND ingredient_tags ILIKE ANY(%s) AND NOT (ingredient_tags ILIKE ANY(%s)) AND supplier_status = 'DISCONTINUING_SOON' ORDER BY CASE os_layer WHEN 'Core' THEN 1 WHEN 'Adaptive' THEN 2 ELSE 3 END, biological_domain, module_code LIMIT 1", (os_env, must_patterns, blocked_patterns))
                     row = cur.fetchone()
                     if row:
                         used_fallback = True
-                
                 if row:
                     supplier_status = row.get("supplier_status")
             else:
-                cur.execute("""
-                    SELECT module_code, product_name, os_layer, biological_domain, shopify_store, shopify_handle
-                    FROM os_modules 
-                    WHERE os_environment = %s 
-                    AND ingredient_tags ILIKE ANY(%s) 
-                    AND NOT (ingredient_tags ILIKE ANY(%s))
-                    ORDER BY 
-                        CASE os_layer WHEN 'Core' THEN 1 WHEN 'Adaptive' THEN 2 ELSE 3 END, 
-                        biological_domain, module_code 
-                    LIMIT 1
-                """, (os_env, must_patterns, blocked_patterns))
+                cur.execute("SELECT module_code, product_name, os_layer, biological_domain, shopify_store, shopify_handle FROM os_modules WHERE os_environment = %s AND ingredient_tags ILIKE ANY(%s) AND NOT (ingredient_tags ILIKE ANY(%s)) ORDER BY CASE os_layer WHEN 'Core' THEN 1 WHEN 'Adaptive' THEN 2 ELSE 3 END, biological_domain, module_code LIMIT 1", (os_env, must_patterns, blocked_patterns))
                 row = cur.fetchone()
-            
             if not row:
                 skip_reason = "NO_AVAILABLE_MODULE" if has_supplier_status else "NO_MATCHING_MODULE"
-                skipped_intents.append({
-                    "intent_id": intent_id, 
-                    "reason": skip_reason, 
-                    "reason_codes": ["NO_MODULE_FOUND", "SUPPLIER_UNAVAILABLE"] if has_supplier_status else ["NO_MODULE_FOUND"], 
-                    "details": {"must_have_tags": must_have_tags, "os_environment": os_env, "supplier_filter_applied": has_supplier_status}
-                })
+                skipped_intents.append({"intent_id": intent_id, "reason": skip_reason, "reason_codes": ["NO_MODULE_FOUND", "SUPPLIER_UNAVAILABLE"] if has_supplier_status else ["NO_MODULE_FOUND"], "details": {"must_have_tags": must_have_tags, "os_environment": os_env}})
                 continue
-            
             module_code = row["module_code"]
             if module_code in used_modules:
                 continue
             used_modules.add(module_code)
-            
             reason_codes = []
             if has_caution_target(intent_spec, caution_targets):
                 reason_codes.append("CAUTION_TARGET")
             if used_fallback or supplier_status == SUPPLIER_STATUS_DISCONTINUING:
                 reason_codes.append("SUPPLIER_DISCONTINUING_SOON")
-            
-            sku_items.append({
-                "sku": module_code, 
-                "intent_id": intent_id, 
-                "target_id": target_id, 
-                "shopify_store": row["shopify_store"] or "", 
-                "shopify_handle": row["shopify_handle"] or "", 
-                "reason_codes": reason_codes
-            })
-        
+            sku_items.append({"sku": module_code, "intent_id": intent_id, "target_id": target_id, "shopify_store": row["shopify_store"] or "", "shopify_handle": row["shopify_handle"] or "", "reason_codes": reason_codes})
         output_data = {"protocol_id": request.protocol_id, "sku_plan": {"items": sku_items}, "skipped_intents": skipped_intents}
         output_hash = compute_hash(output_data)
         cur.execute("INSERT INTO decision_outputs (run_id, phase, output_json, output_hash) VALUES (%s, 'route', %s, %s)", (run_id, json.dumps(output_data, default=str), output_hash))
         conn.commit()
         cur.close()
         conn.close()
-        
-        return {
-            "protocol_id": request.protocol_id, 
-            "sku_plan": {"items": sku_items}, 
-            "skipped_intents": skipped_intents, 
-            "audit": {
-                "status": "SUCCESS", 
-                "run_id": str(run_id), 
-                "os_environment": os_env, 
-                "gender_source": "decision_outputs.orchestrate", 
-                "intents_processed": len(supplement_intents), 
-                "modules_routed": len(sku_items), 
-                "intents_skipped": len(skipped_intents), 
-                "supplier_gating_enabled": has_supplier_status,
-                "fallback_allowed": allow_fallback,
-                "constraints_applied": {
-                    "blocked_targets": blocked_targets, 
-                    "caution_targets": caution_targets, 
-                    "blocked_ingredients": blocked_ingredients
-                }, 
-                "created_at": created_at, 
-                "output_hash": output_hash
-            }
-        }
+        return {"protocol_id": request.protocol_id, "sku_plan": {"items": sku_items}, "skipped_intents": skipped_intents, "audit": {"status": "SUCCESS", "run_id": str(run_id), "os_environment": os_env, "intents_processed": len(supplement_intents), "modules_routed": len(sku_items), "intents_skipped": len(skipped_intents), "supplier_gating_enabled": has_supplier_status, "created_at": created_at, "output_hash": output_hash}}
     except HTTPException:
         raise
     except Exception as e:
@@ -1260,7 +1147,7 @@ def check_catalog():
         unlinked = cur.fetchone()["count"]
         cur.close()
         conn.close()
-        return {"fulfillment_catalog": {"columns": catalog_columns, "total_products": total_products, "unlinked_products": unlinked}, "ingredients": {"columns": ingredient_columns, "total": ing_stats["total"], "with_category": ing_stats["with_category"], "with_contraindications": ing_stats["with_contraindications"], "categories": categories}, "sample_products": samples, "routing_readiness": {"can_filter_by_category": ing_stats["with_category"] > 0, "can_filter_by_contraindications": ing_stats["with_contraindications"] > 0, "coverage_percent": round((ing_stats["with_category"] / ing_stats["total"]) * 100, 1) if ing_stats["total"] > 0 else 0}}
+        return {"fulfillment_catalog": {"columns": catalog_columns, "total_products": total_products, "unlinked_products": unlinked}, "ingredients": {"columns": ingredient_columns, "total": ing_stats["total"], "with_category": ing_stats["with_category"], "with_contraindications": ing_stats["with_contraindications"], "categories": categories}, "sample_products": samples, "routing_readiness": {"can_filter_by_category": ing_stats["with_category"] > 0, "coverage_percent": round((ing_stats["with_category"] / ing_stats["total"]) * 100, 1) if ing_stats["total"] > 0 else 0}}
     except Exception as e:
         try: conn.close()
         except: pass
@@ -1278,17 +1165,13 @@ def catalog_gaps():
         unlinked_products = [dict(row) for row in cur.fetchall()]
         cur.execute("SELECT fc.id as product_id, fc.product_name, fc.ingredient_id, i.name as linked_ingredient_name, i.category as ingredient_category FROM fulfillment_catalog fc JOIN ingredients i ON fc.ingredient_id = i.id ORDER BY fc.product_name")
         linked_products = [dict(row) for row in cur.fetchall()]
-        cur.execute("SELECT fc.id as product_id, fc.product_name, i.name as linked_ingredient_name, i.category FROM fulfillment_catalog fc JOIN ingredients i ON fc.ingredient_id = i.id WHERE LOWER(fc.product_name) NOT LIKE '%' || LOWER(SPLIT_PART(i.name, ' ', 1)) || '%' ORDER BY fc.product_name")
-        potential_mismatches = [dict(row) for row in cur.fetchall()]
-        cur.execute("SELECT i.id, i.name, i.category FROM ingredients i LEFT JOIN fulfillment_catalog fc ON fc.ingredient_id = i.id WHERE fc.id IS NULL ORDER BY i.name")
-        orphan_ingredients = [dict(row) for row in cur.fetchall()]
         cur.execute("SELECT COUNT(*) FROM fulfillment_catalog")
         total_products = cur.fetchone()["count"]
         cur.execute("SELECT COUNT(*) FROM ingredients")
         total_ingredients = cur.fetchone()["count"]
         cur.close()
         conn.close()
-        return {"summary": {"total_products": total_products, "total_ingredients": total_ingredients, "unlinked_products_count": len(unlinked_products), "linked_products_count": len(linked_products), "potential_mismatches_count": len(potential_mismatches), "orphan_ingredients_count": len(orphan_ingredients)}, "unlinked_products": unlinked_products, "linked_products": linked_products, "potential_mismatches": potential_mismatches, "orphan_ingredients": orphan_ingredients}
+        return {"summary": {"total_products": total_products, "total_ingredients": total_ingredients, "unlinked_products_count": len(unlinked_products), "linked_products_count": len(linked_products)}, "unlinked_products": unlinked_products, "linked_products": linked_products}
     except Exception as e:
         try: conn.close()
         except: pass
