@@ -1,0 +1,41 @@
+name: Apply v3.13.0 Patch
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "patch" to confirm'
+        required: true
+        default: ''
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.confirm == 'patch'
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Run patch script
+        run: python3 patch_api_server_v3.13.0.py
+      
+      - name: Commit changes
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add api_server.py
+          git commit -m "feat(routing): Integrate routing layer into API server v3.13.0 (Issue #6)
+
+          Applied via patch_api_server_v3.13.0.py:
+          - Routing Layer endpoints integrated
+          - Version updated to 3.13.0
+          - routing_version added to /version
+          - 'routing-layer' feature added
+          
+          Closes #6"
+          git push
