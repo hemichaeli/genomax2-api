@@ -1,7 +1,19 @@
 """
 GenoMAX² API Server
 Gender-Optimized Biological Operating System
-Version 3.15.1 - Painpoints & Lifestyle Schema Endpoints (Issue #2)
+Version 3.16.0 - Telemetry Admin Router Integration (Issue #9)
+
+v3.16.0:
+- Register Telemetry Admin router (Issue #9)
+- Add GET /api/v1/admin/telemetry/health endpoint
+- Add GET /api/v1/admin/telemetry/summary endpoint
+- Add GET /api/v1/admin/telemetry/top-issues endpoint
+- Add GET /api/v1/admin/telemetry/run/{run_id} endpoint
+- Add GET /api/v1/admin/telemetry/trends endpoint
+- Add POST /api/v1/admin/telemetry/setup endpoint
+- Add POST /api/v1/admin/telemetry/rollup/run endpoint
+- Add "telemetry" to features list
+- Required: ADMIN_API_KEY env var for authentication
 
 v3.15.1:
 - Add GET /api/v1/brain/painpoints endpoint
@@ -71,7 +83,10 @@ from app.matching.admin import router as matching_router
 # Explainability Layer imports (v3.15.0)
 from app.explainability.admin import router as explainability_router
 
-app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.15.1")
+# Telemetry Admin imports (v3.16.0 - Issue #9)
+from app.telemetry.admin import router as telemetry_router
+
+app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.16.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -93,6 +108,9 @@ app.include_router(matching_router)
 
 # Register Explainability Layer router (v3.15.0)
 app.include_router(explainability_router)
+
+# Register Telemetry Admin router (v3.16.0 - Issue #9)
+app.include_router(telemetry_router)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -550,26 +568,27 @@ def compose_intents(selected_goals: List[str], routing_constraints: Any, assessm
 
 @app.get("/")
 def root():
-    return {"service": "GenoMAX² API", "version": "3.15.1", "status": "operational"}
+    return {"service": "GenoMAX² API", "version": "3.16.0", "status": "operational"}
 
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "3.15.1"}
+    return {"status": "healthy", "version": "3.16.0"}
 
 
 @app.get("/version")
 def version():
     return {
-        "api_version": "3.15.1",
+        "api_version": "3.16.0",
         "brain_version": "1.5.0",
         "resolver_version": "1.0.0",
         "catalog_version": "catalog_governance_v1",
         "routing_version": "routing_layer_v1",
         "matching_version": "matching_layer_v1",
         "explainability_version": "explainability_v1",
+        "telemetry_version": "telemetry_admin_v1",
         "contract_version": CONTRACT_VERSION,
-        "features": ["orchestrate", "orchestrate_v2", "compose", "route", "resolve", "supplier-gating", "catalog-governance", "routing-layer", "matching-layer", "explainability", "painpoints", "lifestyle-schema"]
+        "features": ["orchestrate", "orchestrate_v2", "compose", "route", "resolve", "supplier-gating", "catalog-governance", "routing-layer", "matching-layer", "explainability", "painpoints", "lifestyle-schema", "telemetry"]
     }
 
 
