@@ -1,34 +1,29 @@
 """
 GenoMAX² API Server
 Gender-Optimized Biological Operating System
-Version 3.16.0 - Telemetry Admin Router Integration (Issue #9)
+Version 3.17.0 - Telemetry Pipeline Instrumentation (Issue #9 Stage 2)
+
+v3.17.0:
+- Instrument Brain endpoints with TelemetryEmitter (Issue #9 Stage 2)
+- Add telemetry emission to /api/v1/brain/resolve
+- Add telemetry emission to /api/v1/brain/orchestrate/v2
+- Add telemetry emission to /api/v1/brain/orchestrate
+- Add telemetry emission to /api/v1/brain/compose
+- Add telemetry emission to /api/v1/brain/route
+- Every Brain run now writes to telemetry_runs table
+- Events emitted for: ROUTING_BLOCK, MATCHING_UNMATCHED_INTENT, LOW_CONFIDENCE
+- No PII: only counts, codes, age_bucket, sex
 
 v3.16.0:
 - Register Telemetry Admin router (Issue #9)
-- Add GET /api/v1/admin/telemetry/health endpoint
-- Add GET /api/v1/admin/telemetry/summary endpoint
-- Add GET /api/v1/admin/telemetry/top-issues endpoint
-- Add GET /api/v1/admin/telemetry/run/{run_id} endpoint
-- Add GET /api/v1/admin/telemetry/trends endpoint
-- Add POST /api/v1/admin/telemetry/setup endpoint
-- Add POST /api/v1/admin/telemetry/rollup/run endpoint
-- Add "telemetry" to features list
-- Required: ADMIN_API_KEY env var for authentication
+- Add telemetry admin endpoints
 
 v3.15.1:
 - Add GET /api/v1/brain/painpoints endpoint
 - Add GET /api/v1/brain/lifestyle-schema endpoint  
-- Import painpoints_data from app.brain.painpoints_data
-- Add "painpoints", "lifestyle-schema" to features list
 
 v3.15.0:
 - Integrate Explainability Layer endpoints (Issue #8)
-- POST /api/v1/explainability/explain - Full explainability generation
-- GET /api/v1/explainability/disclaimers - Locked disclaimer copy
-- POST /api/v1/explainability/confidence - Confidence calculation
-- GET /api/v1/explainability/test - Test with mock data
-- POST /api/v1/explainability/summary - Lightweight summary
-- Principle: The Brain decides. The UX explains. Never the reverse.
 
 v3.14.0:
 - Integrate Matching Layer endpoints (Issue #7)
@@ -86,7 +81,10 @@ from app.explainability.admin import router as explainability_router
 # Telemetry Admin imports (v3.16.0 - Issue #9)
 from app.telemetry.admin import router as telemetry_router
 
-app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.16.0")
+# Telemetry Emitter imports (v3.17.0 - Issue #9 Stage 2)
+from app.telemetry import get_emitter, derive_run_summary, derive_events
+
+app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.17.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -113,6 +111,9 @@ app.include_router(explainability_router)
 app.include_router(telemetry_router)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+
+# Initialize telemetry emitter (v3.17.0)
+_telemetry = get_emitter()
 
 SUPPLIER_STATUS_ACTIVE = "ACTIVE"
 SUPPLIER_STATUS_UNKNOWN = "UNKNOWN"
@@ -564,31 +565,91 @@ def compose_intents(selected_goals: List[str], routing_constraints: Any, assessm
     return protocol_intents
 
 
+# ===== TELEMETRY HELPERS (v3.17.0) =====
+
+def _emit_telemetry_for_phase(
+    run_id: str,
+    phase: str,
+    request_dict: Dict[str, Any],
+    response_dict: Dict[str, Any],
+    has_bloodwork: bool = False,
+):
+    """
+    Emit telemetry for a Brain phase.
+    Called at end of successful request handlers.
+    Telemetry errors never break requests (fail-safe).
+    """
+    try:
+        # Derive summary from request/response
+        summary = derive_run_summary(request_dict, response_dict, phase)
+        
+        # Extract sex and age from assessment context
+        ctx = response_dict.get("assessment_context") or request_dict.get("assessment_context") or {}
+        if hasattr(ctx, "model_dump"):
+            ctx = ctx.model_dump()
+        sex = ctx.get("sex") or ctx.get("gender")
+        age = ctx.get("age")
+        
+        # Start telemetry run
+        _telemetry.start_run(
+            run_id=run_id,
+            sex=sex,
+            age=age,
+            has_bloodwork=has_bloodwork or summary.has_bloodwork,
+            api_version="3.17.0",
+        )
+        
+        # Complete run with aggregates
+        _telemetry.complete_run(
+            run_id=run_id,
+            intents_count=summary.intents_count,
+            matched_items_count=summary.matched_items_count,
+            unmatched_intents_count=summary.unmatched_intents_count,
+            blocked_skus_count=summary.blocked_skus_count,
+            auto_blocked_skus_count=summary.auto_blocked_skus_count,
+            caution_flags_count=summary.caution_flags_count,
+            confidence_level=summary.confidence_level,
+        )
+        
+        # Derive and emit events
+        events = derive_events(response_dict, phase)
+        for event in events:
+            if event.event_type == "ROUTING_BLOCK":
+                _telemetry.emit_routing_block(run_id, event.code, event.count)
+            elif event.event_type == "MATCHING_UNMATCHED_INTENT":
+                _telemetry.emit_unmatched_intent(run_id, event.code, event.count)
+            elif event.event_type == "LOW_CONFIDENCE":
+                _telemetry.emit_low_confidence(run_id, event.code, event.count)
+    except Exception as e:
+        # Telemetry must never break the request
+        print(f"[Telemetry] Emission error in {phase}: {e}")
+
+
 # ===== ENDPOINTS =====
 
 @app.get("/")
 def root():
-    return {"service": "GenoMAX² API", "version": "3.16.0", "status": "operational"}
+    return {"service": "GenoMAX² API", "version": "3.17.0", "status": "operational"}
 
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "3.16.0"}
+    return {"status": "healthy", "version": "3.17.0"}
 
 
 @app.get("/version")
 def version():
     return {
-        "api_version": "3.16.0",
+        "api_version": "3.17.0",
         "brain_version": "1.5.0",
         "resolver_version": "1.0.0",
         "catalog_version": "catalog_governance_v1",
         "routing_version": "routing_layer_v1",
         "matching_version": "matching_layer_v1",
         "explainability_version": "explainability_v1",
-        "telemetry_version": "telemetry_admin_v1",
+        "telemetry_version": "telemetry_instrumented_v1",
         "contract_version": CONTRACT_VERSION,
-        "features": ["orchestrate", "orchestrate_v2", "compose", "route", "resolve", "supplier-gating", "catalog-governance", "routing-layer", "matching-layer", "explainability", "painpoints", "lifestyle-schema", "telemetry"]
+        "features": ["orchestrate", "orchestrate_v2", "compose", "route", "resolve", "supplier-gating", "catalog-governance", "routing-layer", "matching-layer", "explainability", "painpoints", "lifestyle-schema", "telemetry", "telemetry-instrumented"]
     }
 
 
@@ -601,10 +662,6 @@ def brain_health():
 
 @app.get("/api/v1/brain/painpoints")
 def get_painpoints():
-    """
-    Return the painpoints dictionary for frontend consumption.
-    Maps user-reported symptoms to supplement intents with priority scores.
-    """
     return {
         "status": "success",
         "version": "1.0.0",
@@ -615,10 +672,6 @@ def get_painpoints():
 
 @app.get("/api/v1/brain/lifestyle-schema")
 def get_lifestyle_schema():
-    """
-    Return the lifestyle assessment schema for frontend form generation.
-    Defines questions for sleep, stress, activity, diet factors.
-    """
     return {
         "status": "success",
         "version": "1.0.0",
@@ -725,9 +778,13 @@ def brain_resolve(request: ResolveRequest):
         assessment_context = ResolverAssessmentContext(protocol_id=raw_context.get("protocol_id"), run_id=raw_context.get("run_id"), gender=raw_context.get("gender"), age=raw_context.get("age"), height_cm=raw_context.get("height_cm"), weight_kg=raw_context.get("weight_kg"), meds=raw_context.get("meds", raw_context.get("medications", [])), conditions=raw_context.get("conditions", []), allergies=raw_context.get("allergies", []), flags=raw_context.get("flags", {}))
     except Exception as e:
         raise HTTPException(status_code=422, detail={"error": "INVALID_ASSESSMENT_CONTEXT", "message": str(e)})
+    
+    has_bloodwork = bool(request.bloodwork_constraints)
+    
     if request.use_mocks:
         bloodwork_constraints = bloodwork_mock(assessment_context)
         lifestyle_constraints = lifestyle_mock(assessment_context)
+        has_bloodwork = True  # Mocks simulate bloodwork
     else:
         raw_bw = request.bloodwork_constraints or db_constraints or {}
         raw_ls = request.lifestyle_constraints or {}
@@ -763,7 +820,32 @@ def brain_resolve(request: ResolveRequest):
             print(f"DB store error: {e}")
             try: conn.close()
             except: pass
-    return {"status": "success", "phase": "resolve", "contract_version": output.contract_version, "protocol_id": output.protocol_id, "run_id": output.run_id, "resolved_constraints": output.resolved_constraints.model_dump(), "resolved_intents": output.resolved_intents.model_dump(), "assessment_context": output.assessment_context.model_dump(), "audit": output.audit.model_dump(), "next_phase": "route", "created_at": created_at}
+    
+    # Build response
+    response_dict = {
+        "status": "success",
+        "phase": "resolve",
+        "contract_version": output.contract_version,
+        "protocol_id": output.protocol_id,
+        "run_id": output.run_id,
+        "resolved_constraints": output.resolved_constraints.model_dump(),
+        "resolved_intents": output.resolved_intents.model_dump(),
+        "assessment_context": output.assessment_context.model_dump(),
+        "audit": output.audit.model_dump(),
+        "next_phase": "route",
+        "created_at": created_at
+    }
+    
+    # Emit telemetry (v3.17.0)
+    _emit_telemetry_for_phase(
+        run_id=output.run_id,
+        phase="resolve",
+        request_dict=request.model_dump(),
+        response_dict=response_dict,
+        has_bloodwork=has_bloodwork,
+    )
+    
+    return response_dict
 
 
 @app.post("/api/v1/brain/orchestrate/v2", response_model=OrchestrateOutputV2)
@@ -793,7 +875,31 @@ async def brain_orchestrate_v2(request: OrchestrateInputV2) -> OrchestrateOutput
         except:
             try: conn.close()
             except: pass
-    return OrchestrateOutputV2(run_id=run_id, signal_id=signal.signal_id, signal_hash=signal.audit.output_hash, hash_verified=hash_verified, routing_constraints=routing_constraints, blocked_targets=routing_constraints["blocked_targets"], caution_targets=routing_constraints["caution_targets"], assessment_context=request.assessment_context, selected_goals=request.selected_goals, chain_of_custody=[chain_entry], next_phase="compose")
+    
+    response = OrchestrateOutputV2(
+        run_id=run_id,
+        signal_id=signal.signal_id,
+        signal_hash=signal.audit.output_hash,
+        hash_verified=hash_verified,
+        routing_constraints=routing_constraints,
+        blocked_targets=routing_constraints["blocked_targets"],
+        caution_targets=routing_constraints["caution_targets"],
+        assessment_context=request.assessment_context,
+        selected_goals=request.selected_goals,
+        chain_of_custody=[chain_entry],
+        next_phase="compose"
+    )
+    
+    # Emit telemetry (v3.17.0)
+    _emit_telemetry_for_phase(
+        run_id=run_id,
+        phase="orchestrate_v2",
+        request_dict={"bloodwork_signal": True, "selected_goals": request.selected_goals, "assessment_context": request.assessment_context},
+        response_dict=response.model_dump(),
+        has_bloodwork=True,
+    )
+    
+    return response
 
 
 @app.post("/api/v1/brain/orchestrate")
@@ -822,7 +928,29 @@ def brain_orchestrate_legacy(request: OrchestrateRequest):
         except:
             try: conn.close()
             except: pass
-    return {"run_id": run_id, "status": "success", "phase": "orchestrate", "signal_hash": signal_hash, "routing_constraints": routing_constraints, "override_allowed": not has_hard_blocks, "assessment_context": assessment_context, "next_phase": "compose", "audit": {"created_at": created_at, "output_hash": output_hash}}
+    
+    response_dict = {
+        "run_id": run_id,
+        "status": "success",
+        "phase": "orchestrate",
+        "signal_hash": signal_hash,
+        "routing_constraints": routing_constraints,
+        "override_allowed": not has_hard_blocks,
+        "assessment_context": assessment_context,
+        "next_phase": "compose",
+        "audit": {"created_at": created_at, "output_hash": output_hash}
+    }
+    
+    # Emit telemetry (v3.17.0)
+    _emit_telemetry_for_phase(
+        run_id=run_id,
+        phase="orchestrate",
+        request_dict={"user_id": request.user_id, "signal_data": {"markers_count": len(markers)}},
+        response_dict=response_dict,
+        has_bloodwork=bool(markers),
+    )
+    
+    return response_dict
 
 
 @app.post("/api/v1/brain/compose")
@@ -865,7 +993,28 @@ def brain_compose(request: ComposeRequest):
         try: conn.close()
         except: pass
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
-    return {"protocol_id": protocol_id, "status": "success", "phase": "compose", "run_id": request.run_id, "selected_goals": request.selected_goals, "protocol_intents": protocol_intents, "summary": {"constraints_applied": compose_output["constraints_applied"], "intents_generated": compose_output["intents_generated"]}, "next_phase": "route", "audit": {"created_at": created_at, "input_hashes": [orchestrate_hash], "output_hash": output_hash}}
+    
+    response_dict = {
+        "protocol_id": protocol_id,
+        "status": "success",
+        "phase": "compose",
+        "run_id": request.run_id,
+        "selected_goals": request.selected_goals,
+        "protocol_intents": protocol_intents,
+        "summary": {"constraints_applied": compose_output["constraints_applied"], "intents_generated": compose_output["intents_generated"]},
+        "next_phase": "route",
+        "audit": {"created_at": created_at, "input_hashes": [orchestrate_hash], "output_hash": output_hash}
+    }
+    
+    # Emit telemetry (v3.17.0)
+    _emit_telemetry_for_phase(
+        run_id=request.run_id,
+        phase="compose",
+        request_dict={"run_id": request.run_id, "selected_goals": request.selected_goals},
+        response_dict=response_dict,
+    )
+    
+    return response_dict
 
 
 @app.post("/api/v1/brain/route")
@@ -935,7 +1084,23 @@ def brain_route(request: RouteRequest):
         conn.commit()
         cur.close()
         conn.close()
-        return {"protocol_id": request.protocol_id, "sku_plan": {"items": sku_items}, "skipped_intents": skipped_intents, "audit": {"status": "SUCCESS", "run_id": str(run_id), "os_environment": os_env, "created_at": created_at, "output_hash": output_hash}}
+        
+        response_dict = {
+            "protocol_id": request.protocol_id,
+            "sku_plan": {"items": sku_items},
+            "skipped_intents": skipped_intents,
+            "audit": {"status": "SUCCESS", "run_id": str(run_id), "os_environment": os_env, "created_at": created_at, "output_hash": output_hash}
+        }
+        
+        # Emit telemetry (v3.17.0)
+        _emit_telemetry_for_phase(
+            run_id=str(run_id),
+            phase="route",
+            request_dict={"protocol_id": request.protocol_id, "intents_count": len(supplement_intents)},
+            response_dict=response_dict,
+        )
+        
+        return response_dict
     except HTTPException:
         raise
     except Exception as e:
