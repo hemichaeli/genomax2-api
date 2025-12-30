@@ -17,7 +17,14 @@ from .models import (
     AgeBucket,
     ConfidenceLevel,
 )
-from .emitter import TelemetryEmitter
+from .emitter import TelemetryEmitter, get_emitter
+from .derive import (
+    derive_run_summary,
+    derive_events,
+    derive_error_event,
+    RunSummary,
+    EventRecord,
+)
 from .admin import router as telemetry_router
 
 __all__ = [
@@ -27,5 +34,11 @@ __all__ = [
     "AgeBucket",
     "ConfidenceLevel",
     "TelemetryEmitter",
+    "get_emitter",
+    "derive_run_summary",
+    "derive_events",
+    "derive_error_event",
+    "RunSummary",
+    "EventRecord",
     "telemetry_router",
 ]
