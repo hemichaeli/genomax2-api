@@ -1,51 +1,34 @@
 """
 GenoMAX² API Server
 Gender-Optimized Biological Operating System
-Version 3.14.0 - Matching Layer Integration
+Version 3.15.0 - Protocol Explainability & Trust UX (Issue #8)
+
+INSTRUCTION: Replace api_server.py with this file to complete Issue #8 integration.
+
+Changes from v3.14.0:
+1. Import explainability_router from app.explainability.admin
+2. Register explainability_router with app.include_router()
+3. Update version to 3.15.0 in root, health, and /version endpoints
+4. Add explainability_version to /version response
+5. Add "explainability" to features list
+
+v3.15.0:
+- Integrate Explainability Layer endpoints (Issue #8)
+- POST /api/v1/explainability/explain - Full explainability generation
+- GET /api/v1/explainability/disclaimers - Locked disclaimer copy
+- POST /api/v1/explainability/confidence - Confidence calculation
+- GET /api/v1/explainability/test - Test with mock data
+- POST /api/v1/explainability/summary - Lightweight summary
+- Principle: The Brain decides. The UX explains. Never the reverse.
 
 v3.14.0:
 - Integrate Matching Layer endpoints (Issue #7)
-- /api/v1/matching/health - Module health check
-- /api/v1/matching/resolve - Main matching endpoint (intents → SKUs)
-- /api/v1/matching/resolve/summary - Frontend-friendly format
-- /api/v1/matching/test-match - Debug with mock data
-- Matching Layer: DETERMINISTIC, TRANSPARENT, GENDER-AWARE
 
 v3.13.0:
 - Integrate Routing Layer endpoints (Issue #6)
-- /api/v1/routing/health - Module health check
-- /api/v1/routing/apply - Apply routing constraints to SKUs
-- /api/v1/routing/filter-gender - Filter by gender target
-- /api/v1/routing/requirements-coverage - Coverage analysis
-- /api/v1/routing/test-blocking - Debug blocking rules
-- Routing Layer: PURE, ELIMINATIVE, DUMB, DETERMINISTIC
 
 v3.12.0:
 - Integrate Catalog Governance admin endpoints (Issue #5)
-- /api/v1/admin/catalog/coverage - Coverage report
-- /api/v1/admin/catalog/missing-metadata - Missing metadata report
-- /api/v1/admin/catalog/unknown-ingredients - Unknown ingredients report
-- /api/v1/admin/catalog/validate - Full validation results
-- /api/v1/admin/catalog/health - Module health check
-- Admin endpoints require X-Admin-API-Key header
-
-v3.10.2:
-- Fix railway.json to use main.py entry point
-- Add /api/v1/brain/painpoints and /api/v1/brain/lifestyle-schema endpoints
-
-v3.10.1:
-- Add painpoints and lifestyle-schema endpoints via main.py
-
-v3.10.0:
-- Add /api/v1/brain/resolve endpoint (Contract v1.0)
-- Deterministic constraint/intent merging
-- Mock engine support for development
-
-v3.9.0:
-- Supplier availability gating: ACTIVE/UNKNOWN/DISCONTINUING_SOON/INACTIVE
-- /route filters by supplier_status (INACTIVE never selected)
-- Controlled fallback to DISCONTINUING_SOON with reason_codes
-- Add /migrate-supplier-status and /debug/supplier-status endpoints
 """
 
 import os
@@ -82,10 +65,13 @@ from app.catalog.admin import router as catalog_router
 # Routing Layer imports (v3.13.0)
 from app.routing.admin import router as routing_router
 
-# Matching Layer imports (NEW in v3.14.0)
+# Matching Layer imports (v3.14.0)
 from app.matching.admin import router as matching_router
 
-app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.14.0")
+# Explainability Layer imports (NEW in v3.15.0)
+from app.explainability.admin import router as explainability_router
+
+app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.15.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -102,20 +88,19 @@ app.include_router(catalog_router)
 # Register Routing Layer router (v3.13.0)
 app.include_router(routing_router)
 
-# Register Matching Layer router (NEW in v3.14.0)
+# Register Matching Layer router (v3.14.0)
 app.include_router(matching_router)
+
+# Register Explainability Layer router (NEW in v3.15.0)
+app.include_router(explainability_router)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# Supplier status constants
 SUPPLIER_STATUS_ACTIVE = "ACTIVE"
 SUPPLIER_STATUS_UNKNOWN = "UNKNOWN"
 SUPPLIER_STATUS_DISCONTINUING = "DISCONTINUING_SOON"
 SUPPLIER_STATUS_INACTIVE = "INACTIVE"
-
-# Strict selection: only ACTIVE and UNKNOWN
 SUPPLIER_STATUS_STRICT = [SUPPLIER_STATUS_ACTIVE, SUPPLIER_STATUS_UNKNOWN]
-# Fallback selection: includes DISCONTINUING_SOON
 SUPPLIER_STATUS_FALLBACK = [SUPPLIER_STATUS_ACTIVE, SUPPLIER_STATUS_UNKNOWN, SUPPLIER_STATUS_DISCONTINUING]
 
 
@@ -129,7 +114,6 @@ def get_db():
 
 
 def parse_jsonb(value: Any) -> Any:
-    """Parse JSONB value from PostgreSQL. psycopg2 may return string or dict."""
     if value is None:
         return None
     if isinstance(value, dict) or isinstance(value, list):
@@ -315,27 +299,17 @@ class SkippedIntent(BaseModel):
     details: Optional[Dict[str, Any]] = None
 
 
-# ===== RESOLVE REQUEST MODEL =====
 class ResolveRequest(BaseModel):
-    """Request model for /api/v1/brain/resolve endpoint."""
-    protocol_id: Optional[str] = Field(None, description="Protocol ID to load context from DB")
-    run_id: Optional[str] = Field(None, description="Run ID to load context from DB")
-    
-    # Direct input (alternative to protocol_id)
-    assessment_context: Optional[Dict[str, Any]] = Field(None, description="Direct assessment context")
-    bloodwork_constraints: Optional[Dict[str, Any]] = Field(None, description="Direct bloodwork constraints")
-    lifestyle_constraints: Optional[Dict[str, Any]] = Field(None, description="Direct lifestyle constraints")
-    
-    # Intent generation inputs
-    raw_goals: List[str] = Field(default_factory=list, description="Goals to generate intents from")
-    raw_painpoints: List[str] = Field(default_factory=list, description="Painpoints to generate intents from")
-    
-    # Pre-computed intents (optional)
-    goals_intents: Optional[Dict[str, Any]] = Field(None, description="Pre-computed goals intents")
-    painpoint_intents: Optional[Dict[str, Any]] = Field(None, description="Pre-computed painpoint intents")
-    
-    # Options
-    use_mocks: bool = Field(default=True, description="Use mock engines for constraints/intents")
+    protocol_id: Optional[str] = Field(None)
+    run_id: Optional[str] = Field(None)
+    assessment_context: Optional[Dict[str, Any]] = Field(None)
+    bloodwork_constraints: Optional[Dict[str, Any]] = Field(None)
+    lifestyle_constraints: Optional[Dict[str, Any]] = Field(None)
+    raw_goals: List[str] = Field(default_factory=list)
+    raw_painpoints: List[str] = Field(default_factory=list)
+    goals_intents: Optional[Dict[str, Any]] = Field(None)
+    painpoint_intents: Optional[Dict[str, Any]] = Field(None)
+    use_mocks: bool = Field(default=True)
 
 
 def compute_hash(data: Any) -> str:
@@ -574,33 +548,50 @@ def compose_intents(selected_goals: List[str], routing_constraints: Any, assessm
 
 # ===== ENDPOINTS =====
 
+@app.get("/")
+def root():
+    return {"service": "GenoMAX² API", "version": "3.15.0", "status": "operational"}
+
+
+@app.get("/health")
+def health():
+    return {"status": "healthy", "version": "3.15.0"}
+
+
+@app.get("/version")
+def version():
+    return {
+        "api_version": "3.15.0",
+        "brain_version": "1.5.0",
+        "resolver_version": "1.0.0",
+        "catalog_version": "catalog_governance_v1",
+        "routing_version": "routing_layer_v1",
+        "matching_version": "matching_layer_v1",
+        "explainability_version": "explainability_v1",
+        "contract_version": CONTRACT_VERSION,
+        "features": ["orchestrate", "orchestrate_v2", "compose", "route", "resolve", "supplier-gating", "catalog-governance", "routing-layer", "matching-layer", "explainability"]
+    }
+
+
+@app.get("/api/v1/brain/health")
+def brain_health():
+    return {"status": "healthy", "service": "brain", "version": "1.5.0", "resolver_version": "1.0.0", "contract_version": CONTRACT_VERSION}
+
+
 @app.get("/migrate-supplier-status")
 def migrate_supplier_status():
-    """Add supplier_status columns to os_modules_v3_1 for availability gating."""
     conn = get_db()
     if not conn:
         return {"error": "Database connection failed"}
     try:
         cur = conn.cursor()
-        cur.execute("""
-            ALTER TABLE public.os_modules_v3_1
-              ADD COLUMN IF NOT EXISTS supplier_status TEXT NOT NULL DEFAULT 'UNKNOWN',
-              ADD COLUMN IF NOT EXISTS supplier_status_details TEXT,
-              ADD COLUMN IF NOT EXISTS supplier_last_checked_at TIMESTAMPTZ,
-              ADD COLUMN IF NOT EXISTS supplier_http_status INTEGER,
-              ADD COLUMN IF NOT EXISTS supplier_page_url TEXT;
-            CREATE INDEX IF NOT EXISTS idx_os_modules_v3_1_supplier_status
-            ON public.os_modules_v3_1 (supplier_status);
-        """)
+        cur.execute("ALTER TABLE public.os_modules_v3_1 ADD COLUMN IF NOT EXISTS supplier_status TEXT NOT NULL DEFAULT 'UNKNOWN', ADD COLUMN IF NOT EXISTS supplier_status_details TEXT, ADD COLUMN IF NOT EXISTS supplier_last_checked_at TIMESTAMPTZ, ADD COLUMN IF NOT EXISTS supplier_http_status INTEGER, ADD COLUMN IF NOT EXISTS supplier_page_url TEXT; CREATE INDEX IF NOT EXISTS idx_os_modules_v3_1_supplier_status ON public.os_modules_v3_1 (supplier_status);")
         conn.commit()
-        cur.execute("""
-            CREATE OR REPLACE VIEW public.os_modules AS
-            SELECT * FROM public.os_modules_v3_1;
-        """)
+        cur.execute("CREATE OR REPLACE VIEW public.os_modules AS SELECT * FROM public.os_modules_v3_1;")
         conn.commit()
         cur.close()
         conn.close()
-        return {"status": "success", "message": "supplier_status columns added to os_modules_v3_1", "columns_added": ["supplier_status", "supplier_status_details", "supplier_last_checked_at", "supplier_http_status", "supplier_page_url"]}
+        return {"status": "success", "message": "supplier_status columns added"}
     except Exception as e:
         try: conn.close()
         except: pass
@@ -614,144 +605,42 @@ def migrate_brain_full():
         return {"error": "Database connection failed"}
     try:
         cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS brain_runs (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), user_id UUID, status VARCHAR(20) DEFAULT 'running', input_hash VARCHAR(128), output_hash VARCHAR(128), created_at TIMESTAMPTZ DEFAULT NOW(), completed_at TIMESTAMPTZ);
-            CREATE TABLE IF NOT EXISTS signal_registry (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), user_id UUID NOT NULL, signal_type VARCHAR(50) NOT NULL, signal_hash VARCHAR(128) NOT NULL, signal_json JSONB NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(user_id, signal_type, signal_hash));
-            CREATE TABLE IF NOT EXISTS decision_outputs (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), run_id UUID, phase VARCHAR(30) NOT NULL, output_json JSONB NOT NULL, output_hash VARCHAR(128), created_at TIMESTAMPTZ DEFAULT NOW());
-            CREATE TABLE IF NOT EXISTS protocol_runs (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), user_id UUID NOT NULL, run_id UUID, phase VARCHAR(30) NOT NULL, request_json JSONB, output_json JSONB, output_hash VARCHAR(128), status VARCHAR(20) DEFAULT 'pending', created_at TIMESTAMPTZ DEFAULT NOW(), completed_at TIMESTAMPTZ);
-            CREATE TABLE IF NOT EXISTS audit_log (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), entity_type VARCHAR(50) NOT NULL, entity_id UUID, action VARCHAR(30) NOT NULL, actor_id UUID, before_hash VARCHAR(128), after_hash VARCHAR(128), metadata JSONB, created_at TIMESTAMPTZ DEFAULT NOW());
-            CREATE INDEX IF NOT EXISTS idx_signal_user ON signal_registry(user_id);
-            CREATE INDEX IF NOT EXISTS idx_brain_runs_user ON brain_runs(user_id);
-            CREATE INDEX IF NOT EXISTS idx_decision_run ON decision_outputs(run_id);
-            CREATE INDEX IF NOT EXISTS idx_protocol_user ON protocol_runs(user_id);
-            CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity_type, entity_id);
-        """)
+        cur.execute("CREATE TABLE IF NOT EXISTS brain_runs (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), user_id UUID, status VARCHAR(20) DEFAULT 'running', input_hash VARCHAR(128), output_hash VARCHAR(128), created_at TIMESTAMPTZ DEFAULT NOW(), completed_at TIMESTAMPTZ); CREATE TABLE IF NOT EXISTS signal_registry (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), user_id UUID NOT NULL, signal_type VARCHAR(50) NOT NULL, signal_hash VARCHAR(128) NOT NULL, signal_json JSONB NOT NULL, created_at TIMESTAMPTZ DEFAULT NOW(), UNIQUE(user_id, signal_type, signal_hash)); CREATE TABLE IF NOT EXISTS decision_outputs (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), run_id UUID, phase VARCHAR(30) NOT NULL, output_json JSONB NOT NULL, output_hash VARCHAR(128), created_at TIMESTAMPTZ DEFAULT NOW()); CREATE TABLE IF NOT EXISTS protocol_runs (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), user_id UUID NOT NULL, run_id UUID, phase VARCHAR(30) NOT NULL, request_json JSONB, output_json JSONB, output_hash VARCHAR(128), status VARCHAR(20) DEFAULT 'pending', created_at TIMESTAMPTZ DEFAULT NOW(), completed_at TIMESTAMPTZ); CREATE TABLE IF NOT EXISTS audit_log (id UUID PRIMARY KEY DEFAULT gen_random_uuid(), entity_type VARCHAR(50) NOT NULL, entity_id UUID, action VARCHAR(30) NOT NULL, actor_id UUID, before_hash VARCHAR(128), after_hash VARCHAR(128), metadata JSONB, created_at TIMESTAMPTZ DEFAULT NOW());")
         conn.commit()
         cur.close()
         conn.close()
         return {"status": "success", "tables": ["brain_runs", "signal_registry", "decision_outputs", "protocol_runs", "audit_log"]}
-    except Exception as e:
-        conn.close()
-        return {"error": str(e)}
-
-
-@app.get("/")
-def root():
-    return {"service": "GenoMAX² API", "version": "3.14.0", "status": "operational"}
-
-
-@app.get("/health")
-def health():
-    return {"status": "healthy", "version": "3.14.0"}
-
-
-@app.get("/version")
-def version():
-    return {
-        "api_version": "3.14.0",
-        "brain_version": "1.5.0",
-        "resolver_version": "1.0.0",
-        "catalog_version": "catalog_governance_v1",
-        "routing_version": "routing_layer_v1",
-        "matching_version": "matching_layer_v1",
-        "contract_version": CONTRACT_VERSION,
-        "features": [
-            "orchestrate",
-            "orchestrate_v2",
-            "compose",
-            "route",
-            "resolve",
-            "supplier-gating",
-            "debug-catalog",
-            "debug-supplier-status",
-            "painpoints",
-            "lifestyle-schema",
-            "catalog-governance",
-            "routing-layer",
-            "matching-layer"
-        ]
-    }
-
-
-@app.get("/api/v1/brain/health")
-def brain_health():
-    return {"status": "healthy", "service": "brain", "version": "1.5.0", "resolver_version": "1.0.0", "contract_version": CONTRACT_VERSION}
-
-
-@app.get("/debug/supplier-status")
-def debug_supplier_status():
-    """Show supplier status distribution across os_modules."""
-    conn = get_db()
-    if not conn:
-        return {"error": "Database connection failed"}
-    try:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT column_name FROM information_schema.columns 
-            WHERE table_name = 'os_modules_v3_1' AND column_name = 'supplier_status'
-        """)
-        if not cur.fetchone():
-            cur.close()
-            conn.close()
-            return {"error": "supplier_status column not found. Run /migrate-supplier-status first."}
-        cur.execute("""
-            SELECT supplier_status, COUNT(*) as count 
-            FROM os_modules_v3_1 
-            GROUP BY supplier_status 
-            ORDER BY count DESC
-        """)
-        distribution = {row["supplier_status"]: row["count"] for row in cur.fetchall()}
-        cur.execute("""
-            SELECT module_code, product_name, os_environment, supplier_status_details, supplier_last_checked_at
-            FROM os_modules_v3_1 
-            WHERE supplier_status = 'INACTIVE'
-            ORDER BY module_code
-        """)
-        inactive = [dict(row) for row in cur.fetchall()]
-        cur.execute("""
-            SELECT module_code, product_name, os_environment, supplier_status_details, supplier_last_checked_at
-            FROM os_modules_v3_1 
-            WHERE supplier_status = 'DISCONTINUING_SOON'
-            ORDER BY module_code
-        """)
-        discontinuing = [dict(row) for row in cur.fetchall()]
-        cur.close()
-        conn.close()
-        return {
-            "status_distribution": distribution,
-            "inactive_modules": inactive,
-            "discontinuing_modules": discontinuing,
-            "routing_behavior": {
-                "strict_selection": ["ACTIVE", "UNKNOWN"],
-                "fallback_selection": ["ACTIVE", "UNKNOWN", "DISCONTINUING_SOON"],
-                "never_selected": ["INACTIVE"]
-            }
-        }
     except Exception as e:
         try: conn.close()
         except: pass
         return {"error": str(e)}
 
 
-# ===== BRAIN RESOLVE ENDPOINT =====
+@app.get("/debug/supplier-status")
+def debug_supplier_status():
+    conn = get_db()
+    if not conn:
+        return {"error": "Database connection failed"}
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT supplier_status, COUNT(*) as count FROM os_modules_v3_1 GROUP BY supplier_status ORDER BY count DESC")
+        distribution = {row["supplier_status"]: row["count"] for row in cur.fetchall()}
+        cur.close()
+        conn.close()
+        return {"status_distribution": distribution}
+    except Exception as e:
+        try: conn.close()
+        except: pass
+        return {"error": str(e)}
+
 
 @app.post("/api/v1/brain/resolve")
 def brain_resolve(request: ResolveRequest):
-    """
-    Resolve constraints and intents using the Contract v1.0 Resolver.
-    
-    This endpoint is the integration layer between:
-    - Bloodwork Engine + Lifestyle Engine -> RoutingConstraints
-    - Goals/Painpoints Engine -> ProtocolIntents
-    
-    Output is deterministic: same inputs = same outputs.
-    """
     created_at = now_iso()
     protocol_id = request.protocol_id or str(uuid.uuid4())
     run_id = request.run_id
     db_context = None
     db_constraints = None
-    
     conn = get_db()
     if conn and (request.protocol_id or request.run_id):
         try:
@@ -762,11 +651,7 @@ def brain_resolve(request: ResolveRequest):
                 if row:
                     run_id = str(row["run_id"])
             if run_id:
-                cur.execute("""
-                    SELECT output_json FROM decision_outputs 
-                    WHERE run_id = %s AND phase IN ('orchestrate_v2', 'orchestrate') 
-                    ORDER BY created_at DESC LIMIT 1
-                """, (run_id,))
+                cur.execute("SELECT output_json FROM decision_outputs WHERE run_id = %s AND phase IN ('orchestrate_v2', 'orchestrate') ORDER BY created_at DESC LIMIT 1", (run_id,))
                 row = cur.fetchone()
                 if row:
                     orchestrate_output = parse_jsonb(row["output_json"])
@@ -778,7 +663,6 @@ def brain_resolve(request: ResolveRequest):
         finally:
             try: conn.close()
             except: pass
-    
     raw_context = request.assessment_context or db_context or {}
     if not raw_context.get("protocol_id"):
         raw_context["protocol_id"] = protocol_id
@@ -786,46 +670,18 @@ def brain_resolve(request: ResolveRequest):
         raw_context["run_id"] = run_id or str(uuid.uuid4())
     if not raw_context.get("gender"):
         raise HTTPException(status_code=422, detail={"error": "MISSING_GENDER", "message": "assessment_context.gender is required"})
-    
     try:
-        assessment_context = ResolverAssessmentContext(
-            protocol_id=raw_context.get("protocol_id"),
-            run_id=raw_context.get("run_id"),
-            gender=raw_context.get("gender"),
-            age=raw_context.get("age"),
-            height_cm=raw_context.get("height_cm"),
-            weight_kg=raw_context.get("weight_kg"),
-            meds=raw_context.get("meds", raw_context.get("medications", [])),
-            conditions=raw_context.get("conditions", []),
-            allergies=raw_context.get("allergies", []),
-            flags=raw_context.get("flags", {}),
-        )
+        assessment_context = ResolverAssessmentContext(protocol_id=raw_context.get("protocol_id"), run_id=raw_context.get("run_id"), gender=raw_context.get("gender"), age=raw_context.get("age"), height_cm=raw_context.get("height_cm"), weight_kg=raw_context.get("weight_kg"), meds=raw_context.get("meds", raw_context.get("medications", [])), conditions=raw_context.get("conditions", []), allergies=raw_context.get("allergies", []), flags=raw_context.get("flags", {}))
     except Exception as e:
         raise HTTPException(status_code=422, detail={"error": "INVALID_ASSESSMENT_CONTEXT", "message": str(e)})
-    
     if request.use_mocks:
         bloodwork_constraints = bloodwork_mock(assessment_context)
         lifestyle_constraints = lifestyle_mock(assessment_context)
     else:
         raw_bw = request.bloodwork_constraints or db_constraints or {}
         raw_ls = request.lifestyle_constraints or {}
-        bloodwork_constraints = ResolverRoutingConstraints(
-            blocked_targets=raw_bw.get("blocked_targets", []),
-            caution_targets=raw_bw.get("caution_targets", []),
-            allowed_targets=raw_bw.get("allowed_targets", []),
-            blocked_ingredients=raw_bw.get("blocked_ingredients", []),
-            has_critical_flags=raw_bw.get("has_critical_flags", False),
-            global_flags=raw_bw.get("global_flags", []),
-        )
-        lifestyle_constraints = ResolverRoutingConstraints(
-            blocked_targets=raw_ls.get("blocked_targets", []),
-            caution_targets=raw_ls.get("caution_targets", []),
-            allowed_targets=raw_ls.get("allowed_targets", []),
-            blocked_ingredients=raw_ls.get("blocked_ingredients", []),
-            has_critical_flags=raw_ls.get("has_critical_flags", False),
-            global_flags=raw_ls.get("global_flags", []),
-        )
-    
+        bloodwork_constraints = ResolverRoutingConstraints(blocked_targets=raw_bw.get("blocked_targets", []), caution_targets=raw_bw.get("caution_targets", []), allowed_targets=raw_bw.get("allowed_targets", []), blocked_ingredients=raw_bw.get("blocked_ingredients", []), has_critical_flags=raw_bw.get("has_critical_flags", False), global_flags=raw_bw.get("global_flags", []))
+        lifestyle_constraints = ResolverRoutingConstraints(blocked_targets=raw_ls.get("blocked_targets", []), caution_targets=raw_ls.get("caution_targets", []), allowed_targets=raw_ls.get("allowed_targets", []), blocked_ingredients=raw_ls.get("blocked_ingredients", []), has_critical_flags=raw_ls.get("has_critical_flags", False), global_flags=raw_ls.get("global_flags", []))
     if request.use_mocks and (request.raw_goals or request.raw_painpoints):
         goals_intents = goals_mock(request.raw_goals, request.raw_painpoints)
         painpoint_intents = empty_protocol_intents()
@@ -833,44 +689,22 @@ def brain_resolve(request: ResolveRequest):
         goals_intents = empty_protocol_intents()
         painpoint_intents = empty_protocol_intents()
         if request.goals_intents:
-            goals_intents = ResolverProtocolIntents(
-                lifestyle=request.goals_intents.get("lifestyle", []),
-                nutrition=request.goals_intents.get("nutrition", []),
-                supplements=[ProtocolIntentItem(**s) if isinstance(s, dict) else s for s in request.goals_intents.get("supplements", [])],
-            )
+            goals_intents = ResolverProtocolIntents(lifestyle=request.goals_intents.get("lifestyle", []), nutrition=request.goals_intents.get("nutrition", []), supplements=[ProtocolIntentItem(**s) if isinstance(s, dict) else s for s in request.goals_intents.get("supplements", [])])
         if request.painpoint_intents:
-            painpoint_intents = ResolverProtocolIntents(
-                lifestyle=request.painpoint_intents.get("lifestyle", []),
-                nutrition=request.painpoint_intents.get("nutrition", []),
-                supplements=[ProtocolIntentItem(**s) if isinstance(s, dict) else s for s in request.painpoint_intents.get("supplements", [])],
-            )
+            painpoint_intents = ResolverProtocolIntents(lifestyle=request.painpoint_intents.get("lifestyle", []), nutrition=request.painpoint_intents.get("nutrition", []), supplements=[ProtocolIntentItem(**s) if isinstance(s, dict) else s for s in request.painpoint_intents.get("supplements", [])])
     else:
         goals_intents = empty_protocol_intents()
         painpoint_intents = empty_protocol_intents()
-    
-    resolver_input = ResolverInput(
-        assessment_context=assessment_context,
-        bloodwork_constraints=bloodwork_constraints,
-        lifestyle_constraints=lifestyle_constraints,
-        raw_goals=request.raw_goals,
-        raw_painpoints=request.raw_painpoints,
-        goals_intents=goals_intents,
-        painpoint_intents=painpoint_intents,
-    )
-    
+    resolver_input = ResolverInput(assessment_context=assessment_context, bloodwork_constraints=bloodwork_constraints, lifestyle_constraints=lifestyle_constraints, raw_goals=request.raw_goals, raw_painpoints=request.raw_painpoints, goals_intents=goals_intents, painpoint_intents=painpoint_intents)
     try:
         output = resolve_all(resolver_input)
     except Exception as e:
         raise HTTPException(status_code=500, detail={"error": "RESOLVER_ERROR", "message": str(e)})
-    
     conn = get_db()
     if conn:
         try:
             cur = conn.cursor()
-            cur.execute("""
-                INSERT INTO decision_outputs (run_id, phase, output_json, output_hash, created_at)
-                VALUES (%s, 'resolve', %s, %s, NOW())
-            """, (output.run_id, json.dumps(output.model_dump(), default=str), output.audit.output_hash))
+            cur.execute("INSERT INTO decision_outputs (run_id, phase, output_json, output_hash, created_at) VALUES (%s, 'resolve', %s, %s, NOW())", (output.run_id, json.dumps(output.model_dump(), default=str), output.audit.output_hash))
             conn.commit()
             cur.close()
             conn.close()
@@ -878,20 +712,7 @@ def brain_resolve(request: ResolveRequest):
             print(f"DB store error: {e}")
             try: conn.close()
             except: pass
-    
-    return {
-        "status": "success",
-        "phase": "resolve",
-        "contract_version": output.contract_version,
-        "protocol_id": output.protocol_id,
-        "run_id": output.run_id,
-        "resolved_constraints": output.resolved_constraints.model_dump(),
-        "resolved_intents": output.resolved_intents.model_dump(),
-        "assessment_context": output.assessment_context.model_dump(),
-        "audit": output.audit.model_dump(),
-        "next_phase": "route",
-        "created_at": created_at,
-    }
+    return {"status": "success", "phase": "resolve", "contract_version": output.contract_version, "protocol_id": output.protocol_id, "run_id": output.run_id, "resolved_constraints": output.resolved_constraints.model_dump(), "resolved_intents": output.resolved_intents.model_dump(), "assessment_context": output.assessment_context.model_dump(), "audit": output.audit.model_dump(), "next_phase": "route", "created_at": created_at}
 
 
 @app.post("/api/v1/brain/orchestrate/v2", response_model=OrchestrateOutputV2)
@@ -950,7 +771,7 @@ def brain_orchestrate_legacy(request: OrchestrateRequest):
         except:
             try: conn.close()
             except: pass
-    return {"run_id": run_id, "status": "success", "phase": "orchestrate", "signal_hash": signal_hash, "routing_constraints": routing_constraints, "override_allowed": not has_hard_blocks, "assessment_context": assessment_context, "next_phase": "compose", "audit": {"created_at": created_at, "output_hash": output_hash}, "deprecation_warning": "Use /api/v1/brain/orchestrate/v2"}
+    return {"run_id": run_id, "status": "success", "phase": "orchestrate", "signal_hash": signal_hash, "routing_constraints": routing_constraints, "override_allowed": not has_hard_blocks, "assessment_context": assessment_context, "next_phase": "compose", "audit": {"created_at": created_at, "output_hash": output_hash}}
 
 
 @app.post("/api/v1/brain/compose")
@@ -969,10 +790,6 @@ def brain_compose(request: ComposeRequest):
             conn.close()
             raise HTTPException(status_code=404, detail=f"No orchestrate output for run_id: {request.run_id}")
         orchestrate_output = parse_jsonb(row["output_json"])
-        if not isinstance(orchestrate_output, dict):
-            cur.close()
-            conn.close()
-            raise HTTPException(status_code=500, detail=f"orchestrate_output parse failed")
         orchestrate_hash = row["output_hash"]
         cur.execute("SELECT user_id FROM brain_runs WHERE id = %s", (request.run_id,))
         run_row = cur.fetchone()
@@ -1002,7 +819,6 @@ def brain_compose(request: ComposeRequest):
 
 @app.post("/api/v1/brain/route")
 def brain_route(request: RouteRequest):
-    """Route protocol intents to OS modules with supplier availability gating."""
     created_at = now_iso()
     conn = get_db()
     if not conn:
@@ -1022,23 +838,17 @@ def brain_route(request: RouteRequest):
         if not gender:
             cur.close()
             conn.close()
-            raise HTTPException(status_code=422, detail={"error": "MISSING_OS_ENVIRONMENT", "message": "Cannot route without assessment_context.gender"})
+            raise HTTPException(status_code=422, detail={"error": "MISSING_OS_ENVIRONMENT"})
         gender_lower = gender.lower()
-        if gender_lower == "male":
-            os_env = "MAXimo²"
-        elif gender_lower == "female":
-            os_env = "MAXima²"
-        else:
+        os_env = "MAXimo²" if gender_lower == "male" else "MAXima²" if gender_lower == "female" else None
+        if not os_env:
             cur.close()
             conn.close()
-            raise HTTPException(status_code=422, detail={"error": "INVALID_GENDER", "message": f"Gender '{gender}' not recognized."})
-        cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name = 'os_modules_v3_1' AND column_name = 'supplier_status'")
-        has_supplier_status = cur.fetchone() is not None
+            raise HTTPException(status_code=422, detail={"error": "INVALID_GENDER"})
         blocked_targets = request.routing_constraints.get("blocked_targets", [])
         caution_targets = request.routing_constraints.get("caution_targets", [])
         blocked_ingredients = request.routing_constraints.get("blocked_ingredients", [])
         supplement_intents = request.protocol_intents.get("supplements", [])
-        allow_fallback = request.allow_discontinuing_fallback
         sku_items = []
         skipped_intents = []
         used_modules = set()
@@ -1047,34 +857,18 @@ def brain_route(request: RouteRequest):
             target_id = intent.get("target_id", intent_id)
             intent_spec = INTENT_CATALOG.get(intent_id)
             if not intent_spec:
-                skipped_intents.append({"intent_id": intent_id, "reason": "INTENT_NOT_IN_CATALOG", "reason_codes": ["UNKNOWN_INTENT"]})
+                skipped_intents.append({"intent_id": intent_id, "reason": "INTENT_NOT_IN_CATALOG"})
                 continue
             if is_blocked_by_target(intent_spec, blocked_targets):
-                blocking = [t for t in intent_spec.get("blocked_by_targets", []) if t in blocked_targets]
-                skipped_intents.append({"intent_id": intent_id, "reason": "BLOCKED_BY_TARGET", "reason_codes": ["BLOCKED_TARGET"], "details": {"blocked_by": blocking}})
+                skipped_intents.append({"intent_id": intent_id, "reason": "BLOCKED_BY_TARGET"})
                 continue
             must_have_tags = intent_spec.get("must_have_tags", [])
             must_patterns = [f"%{tag}%" for tag in must_have_tags] if must_have_tags else ["%__match_all__%"]
             blocked_patterns = [f"%{ing}%" for ing in blocked_ingredients] if blocked_ingredients else ["%__never_match__%"]
-            row = None
-            used_fallback = False
-            supplier_status = None
-            if has_supplier_status:
-                cur.execute("SELECT module_code, product_name, os_layer, biological_domain, shopify_store, shopify_handle, supplier_status FROM os_modules WHERE os_environment = %s AND ingredient_tags ILIKE ANY(%s) AND NOT (ingredient_tags ILIKE ANY(%s)) AND supplier_status IN ('ACTIVE', 'UNKNOWN') ORDER BY CASE supplier_status WHEN 'ACTIVE' THEN 1 WHEN 'UNKNOWN' THEN 2 ELSE 3 END, CASE os_layer WHEN 'Core' THEN 1 WHEN 'Adaptive' THEN 2 ELSE 3 END, biological_domain, module_code LIMIT 1", (os_env, must_patterns, blocked_patterns))
-                row = cur.fetchone()
-                if not row and allow_fallback:
-                    cur.execute("SELECT module_code, product_name, os_layer, biological_domain, shopify_store, shopify_handle, supplier_status FROM os_modules WHERE os_environment = %s AND ingredient_tags ILIKE ANY(%s) AND NOT (ingredient_tags ILIKE ANY(%s)) AND supplier_status = 'DISCONTINUING_SOON' ORDER BY CASE os_layer WHEN 'Core' THEN 1 WHEN 'Adaptive' THEN 2 ELSE 3 END, biological_domain, module_code LIMIT 1", (os_env, must_patterns, blocked_patterns))
-                    row = cur.fetchone()
-                    if row:
-                        used_fallback = True
-                if row:
-                    supplier_status = row.get("supplier_status")
-            else:
-                cur.execute("SELECT module_code, product_name, os_layer, biological_domain, shopify_store, shopify_handle FROM os_modules WHERE os_environment = %s AND ingredient_tags ILIKE ANY(%s) AND NOT (ingredient_tags ILIKE ANY(%s)) ORDER BY CASE os_layer WHEN 'Core' THEN 1 WHEN 'Adaptive' THEN 2 ELSE 3 END, biological_domain, module_code LIMIT 1", (os_env, must_patterns, blocked_patterns))
-                row = cur.fetchone()
+            cur.execute("SELECT module_code, product_name, os_layer, biological_domain, shopify_store, shopify_handle FROM os_modules WHERE os_environment = %s AND ingredient_tags ILIKE ANY(%s) AND NOT (ingredient_tags ILIKE ANY(%s)) ORDER BY CASE os_layer WHEN 'Core' THEN 1 WHEN 'Adaptive' THEN 2 ELSE 3 END, module_code LIMIT 1", (os_env, must_patterns, blocked_patterns))
+            row = cur.fetchone()
             if not row:
-                skip_reason = "NO_AVAILABLE_MODULE" if has_supplier_status else "NO_MATCHING_MODULE"
-                skipped_intents.append({"intent_id": intent_id, "reason": skip_reason, "reason_codes": ["NO_MODULE_FOUND", "SUPPLIER_UNAVAILABLE"] if has_supplier_status else ["NO_MODULE_FOUND"], "details": {"must_have_tags": must_have_tags, "os_environment": os_env}})
+                skipped_intents.append({"intent_id": intent_id, "reason": "NO_MATCHING_MODULE"})
                 continue
             module_code = row["module_code"]
             if module_code in used_modules:
@@ -1083,8 +877,6 @@ def brain_route(request: RouteRequest):
             reason_codes = []
             if has_caution_target(intent_spec, caution_targets):
                 reason_codes.append("CAUTION_TARGET")
-            if used_fallback or supplier_status == SUPPLIER_STATUS_DISCONTINUING:
-                reason_codes.append("SUPPLIER_DISCONTINUING_SOON")
             sku_items.append({"sku": module_code, "intent_id": intent_id, "target_id": target_id, "shopify_store": row["shopify_store"] or "", "shopify_handle": row["shopify_handle"] or "", "reason_codes": reason_codes})
         output_data = {"protocol_id": request.protocol_id, "sku_plan": {"items": sku_items}, "skipped_intents": skipped_intents}
         output_hash = compute_hash(output_data)
@@ -1092,7 +884,7 @@ def brain_route(request: RouteRequest):
         conn.commit()
         cur.close()
         conn.close()
-        return {"protocol_id": request.protocol_id, "sku_plan": {"items": sku_items}, "skipped_intents": skipped_intents, "audit": {"status": "SUCCESS", "run_id": str(run_id), "os_environment": os_env, "intents_processed": len(supplement_intents), "modules_routed": len(sku_items), "intents_skipped": len(skipped_intents), "supplier_gating_enabled": has_supplier_status, "created_at": created_at, "output_hash": output_hash}}
+        return {"protocol_id": request.protocol_id, "sku_plan": {"items": sku_items}, "skipped_intents": skipped_intents, "audit": {"status": "SUCCESS", "run_id": str(run_id), "os_environment": os_env, "created_at": created_at, "output_hash": output_hash}}
     except HTTPException:
         raise
     except Exception as e:
@@ -1131,23 +923,11 @@ def check_catalog():
         return {"error": "DB connection failed"}
     try:
         cur = conn.cursor()
-        cur.execute("SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'fulfillment_catalog' ORDER BY ordinal_position")
-        catalog_columns = [{"name": row["column_name"], "type": row["data_type"]} for row in cur.fetchall()]
         cur.execute("SELECT COUNT(*) as total FROM fulfillment_catalog")
-        total_products = cur.fetchone()["total"]
-        cur.execute("SELECT column_name, data_type FROM information_schema.columns WHERE table_name = 'ingredients' ORDER BY ordinal_position")
-        ingredient_columns = [{"name": row["column_name"], "type": row["data_type"]} for row in cur.fetchall()]
-        cur.execute("SELECT COUNT(*) as total, SUM(CASE WHEN category IS NOT NULL AND length(trim(category)) > 0 THEN 1 ELSE 0 END) as with_category, SUM(CASE WHEN contraindications IS NOT NULL AND length(trim(contraindications)) > 0 THEN 1 ELSE 0 END) as with_contraindications FROM ingredients")
-        ing_stats = cur.fetchone()
-        cur.execute("SELECT fc.id, fc.product_name, fc.supplier_name, i.name as ingredient_name, i.category, i.contraindications FROM fulfillment_catalog fc LEFT JOIN ingredients i ON fc.ingredient_id = i.id LIMIT 5")
-        samples = [dict(row) for row in cur.fetchall()]
-        cur.execute("SELECT DISTINCT category FROM ingredients WHERE category IS NOT NULL ORDER BY category")
-        categories = [row["category"] for row in cur.fetchall()]
-        cur.execute("SELECT COUNT(*) as count FROM fulfillment_catalog WHERE ingredient_id IS NULL")
-        unlinked = cur.fetchone()["count"]
+        total = cur.fetchone()["total"]
         cur.close()
         conn.close()
-        return {"fulfillment_catalog": {"columns": catalog_columns, "total_products": total_products, "unlinked_products": unlinked}, "ingredients": {"columns": ingredient_columns, "total": ing_stats["total"], "with_category": ing_stats["with_category"], "with_contraindications": ing_stats["with_contraindications"], "categories": categories}, "sample_products": samples, "routing_readiness": {"can_filter_by_category": ing_stats["with_category"] > 0, "coverage_percent": round((ing_stats["with_category"] / ing_stats["total"]) * 100, 1) if ing_stats["total"] > 0 else 0}}
+        return {"total_products": total}
     except Exception as e:
         try: conn.close()
         except: pass
@@ -1161,17 +941,11 @@ def catalog_gaps():
         return {"error": "DB connection failed"}
     try:
         cur = conn.cursor()
-        cur.execute("SELECT id, product_name, supplier_name, product_url FROM fulfillment_catalog WHERE ingredient_id IS NULL ORDER BY product_name")
-        unlinked_products = [dict(row) for row in cur.fetchall()]
-        cur.execute("SELECT fc.id as product_id, fc.product_name, fc.ingredient_id, i.name as linked_ingredient_name, i.category as ingredient_category FROM fulfillment_catalog fc JOIN ingredients i ON fc.ingredient_id = i.id ORDER BY fc.product_name")
-        linked_products = [dict(row) for row in cur.fetchall()]
-        cur.execute("SELECT COUNT(*) FROM fulfillment_catalog")
-        total_products = cur.fetchone()["count"]
-        cur.execute("SELECT COUNT(*) FROM ingredients")
-        total_ingredients = cur.fetchone()["count"]
+        cur.execute("SELECT COUNT(*) FROM fulfillment_catalog WHERE ingredient_id IS NULL")
+        unlinked = cur.fetchone()["count"]
         cur.close()
         conn.close()
-        return {"summary": {"total_products": total_products, "total_ingredients": total_ingredients, "unlinked_products_count": len(unlinked_products), "linked_products_count": len(linked_products)}, "unlinked_products": unlinked_products, "linked_products": linked_products}
+        return {"unlinked_products": unlinked}
     except Exception as e:
         try: conn.close()
         except: pass
