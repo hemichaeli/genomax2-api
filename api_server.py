@@ -1,16 +1,13 @@
 """
 GenoMAX² API Server
 Gender-Optimized Biological Operating System
-Version 3.15.0 - Protocol Explainability & Trust UX (Issue #8)
+Version 3.15.1 - Painpoints & Lifestyle Schema Endpoints (Issue #2)
 
-INSTRUCTION: Replace api_server.py with this file to complete Issue #8 integration.
-
-Changes from v3.14.0:
-1. Import explainability_router from app.explainability.admin
-2. Register explainability_router with app.include_router()
-3. Update version to 3.15.0 in root, health, and /version endpoints
-4. Add explainability_version to /version response
-5. Add "explainability" to features list
+v3.15.1:
+- Add GET /api/v1/brain/painpoints endpoint
+- Add GET /api/v1/brain/lifestyle-schema endpoint  
+- Import painpoints_data from app.brain.painpoints_data
+- Add "painpoints", "lifestyle-schema" to features list
 
 v3.15.0:
 - Integrate Explainability Layer endpoints (Issue #8)
@@ -59,6 +56,9 @@ from app.brain.contracts import (
 from app.brain.resolver import resolve_all, compute_hash as resolver_compute_hash
 from app.brain.mocks import bloodwork_mock, lifestyle_mock, goals_mock
 
+# Painpoints and Lifestyle Schema imports (v3.15.1 - Issue #2)
+from app.brain.painpoints_data import PAINPOINTS_DICTIONARY, LIFESTYLE_SCHEMA
+
 # Catalog Governance imports (v3.12.0)
 from app.catalog.admin import router as catalog_router
 
@@ -68,10 +68,10 @@ from app.routing.admin import router as routing_router
 # Matching Layer imports (v3.14.0)
 from app.matching.admin import router as matching_router
 
-# Explainability Layer imports (NEW in v3.15.0)
+# Explainability Layer imports (v3.15.0)
 from app.explainability.admin import router as explainability_router
 
-app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.15.0")
+app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.15.1")
 
 app.add_middleware(
     CORSMiddleware,
@@ -91,7 +91,7 @@ app.include_router(routing_router)
 # Register Matching Layer router (v3.14.0)
 app.include_router(matching_router)
 
-# Register Explainability Layer router (NEW in v3.15.0)
+# Register Explainability Layer router (v3.15.0)
 app.include_router(explainability_router)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -550,18 +550,18 @@ def compose_intents(selected_goals: List[str], routing_constraints: Any, assessm
 
 @app.get("/")
 def root():
-    return {"service": "GenoMAX² API", "version": "3.15.0", "status": "operational"}
+    return {"service": "GenoMAX² API", "version": "3.15.1", "status": "operational"}
 
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "3.15.0"}
+    return {"status": "healthy", "version": "3.15.1"}
 
 
 @app.get("/version")
 def version():
     return {
-        "api_version": "3.15.0",
+        "api_version": "3.15.1",
         "brain_version": "1.5.0",
         "resolver_version": "1.0.0",
         "catalog_version": "catalog_governance_v1",
@@ -569,7 +569,7 @@ def version():
         "matching_version": "matching_layer_v1",
         "explainability_version": "explainability_v1",
         "contract_version": CONTRACT_VERSION,
-        "features": ["orchestrate", "orchestrate_v2", "compose", "route", "resolve", "supplier-gating", "catalog-governance", "routing-layer", "matching-layer", "explainability"]
+        "features": ["orchestrate", "orchestrate_v2", "compose", "route", "resolve", "supplier-gating", "catalog-governance", "routing-layer", "matching-layer", "explainability", "painpoints", "lifestyle-schema"]
     }
 
 
@@ -577,6 +577,38 @@ def version():
 def brain_health():
     return {"status": "healthy", "service": "brain", "version": "1.5.0", "resolver_version": "1.0.0", "contract_version": CONTRACT_VERSION}
 
+
+# ===== PAINPOINTS AND LIFESTYLE SCHEMA ENDPOINTS (v3.15.1 - Issue #2) =====
+
+@app.get("/api/v1/brain/painpoints")
+def get_painpoints():
+    """
+    Return the painpoints dictionary for frontend consumption.
+    Maps user-reported symptoms to supplement intents with priority scores.
+    """
+    return {
+        "status": "success",
+        "version": "1.0.0",
+        "painpoints": PAINPOINTS_DICTIONARY,
+        "count": len(PAINPOINTS_DICTIONARY)
+    }
+
+
+@app.get("/api/v1/brain/lifestyle-schema")
+def get_lifestyle_schema():
+    """
+    Return the lifestyle assessment schema for frontend form generation.
+    Defines questions for sleep, stress, activity, diet factors.
+    """
+    return {
+        "status": "success",
+        "version": "1.0.0",
+        "schema": LIFESTYLE_SCHEMA,
+        "question_count": len(LIFESTYLE_SCHEMA.get("questions", []))
+    }
+
+
+# ===== MIGRATION AND DEBUG ENDPOINTS =====
 
 @app.get("/migrate-supplier-status")
 def migrate_supplier_status():
