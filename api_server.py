@@ -1,7 +1,15 @@
 """
 GenoMAX² API Server
 Gender-Optimized Biological Operating System
-Version 3.17.0 - Telemetry Pipeline Instrumentation (Issue #9 Stage 2)
+Version 3.18.0 - Product Intake System Integration
+
+v3.18.0:
+- Register Product Intake System router (catalog governance)
+- POST /api/v1/catalog/intake - Create draft intake from Supliful
+- POST /api/v1/catalog/approve - Approve and insert to os_modules (append-only)
+- POST /api/v1/catalog/reject - Reject with audit trail
+- GET /api/v1/catalog/intakes - List intakes
+- Governance: append-only, no updates/deletes, full audit trail
 
 v3.17.0:
 - Instrument Brain endpoints with TelemetryEmitter (Issue #9 Stage 2)
@@ -81,10 +89,13 @@ from app.explainability.admin import router as explainability_router
 # Telemetry Admin imports (v3.16.0 - Issue #9)
 from app.telemetry.admin import router as telemetry_router
 
+# Product Intake System imports (v3.18.0)
+from app.intake.admin import router as intake_router
+
 # Telemetry Emitter imports (v3.17.0 - Issue #9 Stage 2)
 from app.telemetry import get_emitter, derive_run_summary, derive_events
 
-app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.17.0")
+app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.18.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -109,6 +120,9 @@ app.include_router(explainability_router)
 
 # Register Telemetry Admin router (v3.16.0 - Issue #9)
 app.include_router(telemetry_router)
+
+# Register Product Intake System router (v3.18.0)
+app.include_router(intake_router)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -596,7 +610,7 @@ def _emit_telemetry_for_phase(
             sex=sex,
             age=age,
             has_bloodwork=has_bloodwork or summary.has_bloodwork,
-            api_version="3.17.0",
+            api_version="3.18.0",
         )
         
         # Complete run with aggregates
@@ -629,18 +643,18 @@ def _emit_telemetry_for_phase(
 
 @app.get("/")
 def root():
-    return {"service": "GenoMAX² API", "version": "3.17.0", "status": "operational"}
+    return {"service": "GenoMAX² API", "version": "3.18.0", "status": "operational"}
 
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "3.17.0"}
+    return {"status": "healthy", "version": "3.18.0"}
 
 
 @app.get("/version")
 def version():
     return {
-        "api_version": "3.17.0",
+        "api_version": "3.18.0",
         "brain_version": "1.5.0",
         "resolver_version": "1.0.0",
         "catalog_version": "catalog_governance_v1",
@@ -648,8 +662,9 @@ def version():
         "matching_version": "matching_layer_v1",
         "explainability_version": "explainability_v1",
         "telemetry_version": "telemetry_instrumented_v1",
+        "intake_version": "intake_system_v1",
         "contract_version": CONTRACT_VERSION,
-        "features": ["orchestrate", "orchestrate_v2", "compose", "route", "resolve", "supplier-gating", "catalog-governance", "routing-layer", "matching-layer", "explainability", "painpoints", "lifestyle-schema", "telemetry", "telemetry-instrumented"]
+        "features": ["orchestrate", "orchestrate_v2", "compose", "route", "resolve", "supplier-gating", "catalog-governance", "routing-layer", "matching-layer", "explainability", "painpoints", "lifestyle-schema", "telemetry", "telemetry-instrumented", "intake-system"]
     }
 
 
