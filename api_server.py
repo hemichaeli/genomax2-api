@@ -1,7 +1,16 @@
 """
 GenoMAX² API Server
 Gender-Optimized Biological Operating System
-Version 3.18.0 - Product Intake System Integration
+Version 3.19.0 - Safety Gate Integration
+
+v3.19.0:
+- Integrate Safety Gate module for ingredient safety blocking
+- GET /api/v1/safety/status - Overall safety gate status
+- GET /api/v1/safety/blocked-ingredients - List rejected ingredients
+- GET /api/v1/safety/blocked-modules - List blocked modules
+- POST /api/v1/safety/check - Check specific modules for safety
+- GET /api/v1/safety/health - Safety gate health check
+- Enforces "Blood does not negotiate" principle - rejected ingredients permanently blocked
 
 v3.18.0:
 - Register Product Intake System router (catalog governance)
@@ -92,10 +101,13 @@ from app.telemetry.admin import router as telemetry_router
 # Product Intake System imports (v3.18.0)
 from app.intake.admin import router as intake_router
 
+# Safety Gate imports (v3.19.0)
+from app.brain.safety_admin import router as safety_router
+
 # Telemetry Emitter imports (v3.17.0 - Issue #9 Stage 2)
 from app.telemetry import get_emitter, derive_run_summary, derive_events
 
-app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.18.0")
+app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.19.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -123,6 +135,9 @@ app.include_router(telemetry_router)
 
 # Register Product Intake System router (v3.18.0)
 app.include_router(intake_router)
+
+# Register Safety Gate router (v3.19.0)
+app.include_router(safety_router)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -339,6 +354,82 @@ class ResolveRequest(BaseModel):
     bloodwork_constraints: Optional[Dict[str, Any]] = Field(None)
     lifestyle_constraints: Optional[Dict[str, Any]] = Field(None)
     raw_goals: List[str] = Field(default_factory=list)
+    raw_painpoints: List[str] = Field(default_factory=list)
+    goals_intents: Optional[Dict[str, Any]] = Field(None)
+    painpoint_intents: Optional[Dict[str, Any]] = Field(None)
+    use_mocks: bool = Field(default=True)
+
+
+def compute_hash(data: Any) -> str:
+    json_str = json.dumps(data, sort_keys=True, default=str)
+    return f"sha256:{hashlib.sha256(json_str.encode()).hexdigest()}"
+
+
+def now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def verify_signal_hash(signal: BloodworkSignalV1) -> bool:
+    signal_dict = signal.model_dump()
+    signal_dict["audit"]["output_hash"] = ""
+    canonical = json.dumps(signal_dict, sort_keys=True, default=str)
+    expected = f"sha256:{hashlib.sha256(canonical.encode()).hexdigest()}"
+    return signal.audit.output_hash == expected
+
+
+def build_routing_constraints_from_gates(signal: BloodworkSignalV1) -> Dict[str, Any]:
+    constraints = {"blocked_targets": [], "caution_targets": [], "allowed_targets": [], "target_details": {}}
+    for target_id, gate in signal.supplement_gates.items():
+        detail = {"gate_status": gate.gate_status.value, "reason": gate.reason, "blocking_biomarkers": gate.blocking_biomarkers, "caution_biomarkers": gate.caution_biomarkers}
+        constraints["target_details"][target_id] = detail
+        if gate.gate_status == GateStatus.BLOCKED:
+            constraints["blocked_targets"].append(target_id)
+        elif gate.gate_status == GateStatus.CAUTION:
+            constraints["caution_targets"].append(target_id)
+        else:
+            constraints["allowed_targets"].append(target_id)
+    constraints["global_flags"] = [{"flag_id": f.flag_id, "severity": f.severity, "message": f.message} for f in signal.global_flags]
+    critical_flags = [f for f in signal.global_flags if f.severity == "critical"]
+    constraints["has_critical_flags"] = len(critical_flags) > 0
+    if critical_flags:
+        constraints["critical_flag_ids"] = [f.flag_id for f in critical_flags]
+    return constraints
+
+
+GOAL_INTENT_MAP = {
+    "sleep": {"lifestyle": [{"intent_id": "improve_sleep_quality", "base_priority": 0.85, "depends_on": []}, {"intent_id": "regulate_circadian_rhythm", "base_priority": 0.70, "depends_on": []}], "nutrition": [{"intent_id": "evening_carb_timing", "base_priority": 0.60, "depends_on": []}], "supplements": [{"intent_id": "magnesium_for_sleep", "base_priority": 0.80, "depends_on": ["magnesium"]}, {"intent_id": "glycine_for_sleep", "base_priority": 0.65, "depends_on": ["glycine"]}]},
+    "energy": {"lifestyle": [{"intent_id": "optimize_energy_levels", "base_priority": 0.85, "depends_on": []}, {"intent_id": "morning_light_exposure", "base_priority": 0.70, "depends_on": []}], "nutrition": [{"intent_id": "blood_sugar_stability", "base_priority": 0.75, "depends_on": []}], "supplements": [{"intent_id": "b12_energy_support", "base_priority": 0.80, "depends_on": ["vitamin_b12"]}, {"intent_id": "coq10_cellular_energy", "base_priority": 0.70, "depends_on": ["coq10"]}, {"intent_id": "iron_energy_support", "base_priority": 0.75, "depends_on": ["iron"]}]},
+    "stress": {"lifestyle": [{"intent_id": "reduce_stress_response", "base_priority": 0.85, "depends_on": []}, {"intent_id": "breathwork_practice", "base_priority": 0.70, "depends_on": []}], "nutrition": [{"intent_id": "anti_stress_nutrition", "base_priority": 0.65, "depends_on": []}], "supplements": [{"intent_id": "magnesium_stress_support", "base_priority": 0.80, "depends_on": ["magnesium"]}, {"intent_id": "adaptogen_support", "base_priority": 0.70, "depends_on": ["adaptogen"]}]},
+    "focus": {"lifestyle": [{"intent_id": "enhance_cognitive_function", "base_priority": 0.85, "depends_on": []}, {"intent_id": "attention_training", "base_priority": 0.65, "depends_on": []}], "nutrition": [{"intent_id": "brain_fuel_optimization", "base_priority": 0.70, "depends_on": []}], "supplements": [{"intent_id": "omega3_brain_support", "base_priority": 0.80, "depends_on": ["omega3"]}, {"intent_id": "lions_mane_cognition", "base_priority": 0.65, "depends_on": ["lions_mane"]}]},
+    "immunity": {"lifestyle": [{"intent_id": "immune_resilience", "base_priority": 0.80, "depends_on": []}], "nutrition": [{"intent_id": "immune_nutrition", "base_priority": 0.70, "depends_on": []}], "supplements": [{"intent_id": "vitamin_d_immune", "base_priority": 0.85, "depends_on": ["vitamin_d"]}, {"intent_id": "zinc_immune_support", "base_priority": 0.75, "depends_on": ["zinc"]}, {"intent_id": "vitamin_c_immune", "base_priority": 0.70, "depends_on": ["vitamin_c"]}]},
+    "heart": {"lifestyle": [{"intent_id": "cardiovascular_health", "base_priority": 0.85, "depends_on": []}], "nutrition": [{"intent_id": "heart_healthy_diet", "base_priority": 0.80, "depends_on": []}], "supplements": [{"intent_id": "omega3_cardiovascular", "base_priority": 0.85, "depends_on": ["omega3"]}, {"intent_id": "coq10_heart_support", "base_priority": 0.75, "depends_on": ["coq10"]}, {"intent_id": "magnesium_heart", "base_priority": 0.70, "depends_on": ["magnesium"]}]},
+    "gut": {"lifestyle": [{"intent_id": "gut_health_optimization", "base_priority": 0.80, "depends_on": []}], "nutrition": [{"intent_id": "fiber_diversity", "base_priority": 0.75, "depends_on": []}, {"intent_id": "fermented_foods", "base_priority": 0.70, "depends_on": []}], "supplements": [{"intent_id": "probiotic_support", "base_priority": 0.80, "depends_on": ["probiotic"]}, {"intent_id": "digestive_enzyme_support", "base_priority": 0.65, "depends_on": ["digestive_enzyme"]}]},
+    "inflammation": {"lifestyle": [{"intent_id": "reduce_systemic_inflammation", "base_priority": 0.85, "depends_on": []}], "nutrition": [{"intent_id": "anti_inflammatory_diet", "base_priority": 0.80, "depends_on": []}], "supplements": [{"intent_id": "omega3_antiinflammatory", "base_priority": 0.85, "depends_on": ["omega3"]}, {"intent_id": "curcumin_inflammation", "base_priority": 0.75, "depends_on": ["curcumin"]}]},
+    "liver": {"lifestyle": [{"intent_id": "liver_health_support", "base_priority": 0.85, "depends_on": []}], "nutrition": [{"intent_id": "liver_supportive_diet", "base_priority": 0.80, "depends_on": []}], "supplements": [{"intent_id": "milk_thistle_liver", "base_priority": 0.75, "depends_on": ["milk_thistle", "hepatotoxic"]}, {"intent_id": "nac_liver_support", "base_priority": 0.70, "depends_on": ["nac"]}]}
+}
+
+ROUTING_RULES = {
+    "ferritin": {"high_threshold": 300, "constraint": {"ingredient_class": "iron", "constraint_type": "blocked", "reason": "Ferritin elevated ({value} ng/mL). Iron contraindicated.", "severity": "hard"}},
+    "alt": {"high_threshold": 50, "constraints": [{"ingredient_class": "hepatotoxic", "constraint_type": "blocked", "reason": "ALT elevated ({value} U/L). Hepatotoxic supplements blocked.", "severity": "hard"}, {"ingredient_class": "kava", "constraint_type": "blocked", "reason": "ALT elevated ({value} U/L). Kava contraindicated.", "severity": "hard"}]},
+    "potassium": {"high_threshold": 5.0, "constraint": {"ingredient_class": "potassium", "constraint_type": "blocked", "reason": "Potassium elevated ({value} mEq/L). Supplementation contraindicated.", "severity": "hard"}},
+    "vitamin_d": {"low_threshold": 30, "constraint": {"ingredient_class": "vitamin_d", "constraint_type": "required", "reason": "Vitamin D deficient ({value} ng/mL). Supplementation recommended.", "severity": "soft"}},
+    "b12": {"low_threshold": 400, "constraint": {"ingredient_class": "vitamin_b12", "constraint_type": "required", "reason": "B12 suboptimal ({value} pg/mL). Supplementation recommended.", "severity": "soft"}}
+}
+
+INTENT_CATALOG = {
+    "magnesium_for_sleep": {"must_have_tags": ["magnesium"], "blocked_by_targets": [], "caution_by_targets": [], "max_modules": 1},
+    "glycine_for_sleep": {"must_have_tags": ["gaba-oral", "l-theanine"], "blocked_by_targets": [], "caution_by_targets": [], "max_modules": 1},
+    "omega3_brain_support": {"must_have_tags": ["omega-3-epa"], "blocked_by_targets": [], "caution_by_targets": [], "max_modules": 1},
+    "omega3_cardiovascular": {"must_have_tags": ["omega-3-epa"], "blocked_by_targets": [], "caution_by_targets": [], "max_modules": 1},
+    "omega3_antiinflammatory": {"must_have_tags": ["omega-3-epa"], "blocked_by_targets": [], "caution_by_targets": [], "max_modules": 1},
+    "iron_energy_support": {"must_have_tags": ["iron-when-deficient"], "blocked_by_targets": ["iron_boost", "ferritin_elevated"], "caution_by_targets": [], "max_modules": 1},
+    "b12_energy_support": {"must_have_tags": ["niacin-vitamin-b3"], "blocked_by_targets": [], "caution_by_targets": [], "max_modules": 1},
+    "coq10_cellular_energy": {"must_have_tags": ["coq10-ubiquinone", "ubiquinol"], "blocked_by_targets": [], "caution_by_targets": [], "max_modules": 1},
+    "coq10_heart_support": {"must_have_tags": ["coq10-ubiquinone", "ubiquinol"], "blocked_by_targets": [], "caution_by_targets": [], "max_modules": 1},
+    "magnesium_stress_support": {"must_have_tags": ["magnesium"], "blocked_by_targets": [], "caution_by_targets": [], "max_modules": 1},
+    "magnesium_heart": {"must_have_tags": ["magnesium"], "blocked_by_targets": [], "caution_by_targets": [], "max_modules": 1},
+    "adaptogen_support": {"must_have_tags": ["holy-basil-tulsi", "panax-ginseng"], "blocked_by_targets": [], "caution_by_targets": [], "max_modules": 1},
+    "lions_mane_cognition": {"must_have_tags": default_factory=list)
     raw_painpoints: List[str] = Field(default_factory=list)
     goals_intents: Optional[Dict[str, Any]] = Field(None)
     painpoint_intents: Optional[Dict[str, Any]] = Field(None)
