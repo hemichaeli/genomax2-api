@@ -1,0 +1,30 @@
+name: Run SQL Migration
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "run" to confirm execution'
+        required: true
+        default: ''
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    if: github.event.inputs.confirm == 'run'
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Run SQL migration
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          sudo apt-get install -y postgresql-client
+          psql "$DATABASE_URL" -f migrations/design_copy_backfill.sql
+          
+      - name: Verify results
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          psql "$DATABASE_URL" -c "SELECT COUNT(*) AS total, SUM((front_label_text IS NULL)::int) AS null_front, SUM((LENGTH(front_label_text) < 50)::int) AS short_front FROM os_modules_v3_1;"
