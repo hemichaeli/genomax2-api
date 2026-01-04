@@ -6,16 +6,18 @@ Pure Safety Elimination - applies biological constraints to valid SKUs.
 This module implements the core routing function that:
 1. Checks each SKU against blocked_ingredients
 2. Checks each SKU against blocked_categories
-3. Propagates caution_flags (without blocking)
-4. Tracks requirements fulfillment
-5. Produces deterministic, auditable output
+3. Checks each SKU against pregnancy/lactation contraindications (NEW)
+4. Propagates caution_flags (without blocking)
+5. Tracks requirements fulfillment
+6. Produces deterministic, auditable output
 
 PRINCIPLE: Blood does not negotiate.
 
-Version: routing_layer_v1
+Version: routing_layer_v1.1 (added pregnancy/lactation blocking)
 """
 
-from typing import List, Tuple, Set
+import re
+from typing import List, Tuple, Set, Optional
 from datetime import datetime
 
 from .models import (
@@ -26,6 +28,76 @@ from .models import (
     BlockedSKU,
     RoutingAudit,
 )
+
+# Keywords that indicate pregnancy contraindication
+PREGNANCY_KEYWORDS = {
+    'pregnancy', 'pregnant', 'fetal', 'teratogen', 'teratogenic',
+    'uterine', 'embryo', 'fetus', 'trimester', 'conception',
+    'prenatal', 'birth defect'
+}
+
+# Keywords that indicate lactation/breastfeeding contraindication
+LACTATION_KEYWORDS = {
+    'lactation', 'lactating', 'breastfeeding', 'breastfeed',
+    'nursing', 'breast milk', 'breast-feeding'
+}
+
+
+def check_pregnancy_contraindication(contraindications: Optional[str]) -> bool:
+    """
+    Check if contraindications text contains pregnancy-related warnings.
+    
+    Args:
+        contraindications: Raw contraindications text from ingredient/module
+        
+    Returns:
+        True if pregnancy contraindication found
+    """
+    if not contraindications:
+        return False
+    
+    text_lower = contraindications.lower()
+    return any(keyword in text_lower for keyword in PREGNANCY_KEYWORDS)
+
+
+def check_lactation_contraindication(contraindications: Optional[str]) -> bool:
+    """
+    Check if contraindications text contains lactation/breastfeeding warnings.
+    
+    Args:
+        contraindications: Raw contraindications text from ingredient/module
+        
+    Returns:
+        True if lactation contraindication found
+    """
+    if not contraindications:
+        return False
+    
+    text_lower = contraindications.lower()
+    return any(keyword in text_lower for keyword in LACTATION_KEYWORDS)
+
+
+def aggregate_contraindications(sku: SkuInput) -> str:
+    """
+    Aggregate all contraindications from SKU for pregnancy/lactation check.
+    
+    Args:
+        sku: SKU with potential ingredient_contraindications
+        
+    Returns:
+        Combined contraindications text
+    """
+    parts = []
+    
+    # Check SKU-level contraindications if available
+    if hasattr(sku, 'contraindications') and sku.contraindications:
+        parts.append(sku.contraindications)
+    
+    # Check ingredient-level contraindications
+    if sku.ingredient_contraindications:
+        parts.extend(sku.ingredient_contraindications)
+    
+    return ' '.join(parts)
 
 
 def apply_routing_constraints(
@@ -55,6 +127,8 @@ def apply_routing_constraints(
     blocked_by_blood = 0
     blocked_by_metadata = 0
     blocked_by_category = 0
+    blocked_by_pregnancy = 0
+    blocked_by_lactation = 0
     caution_count = 0
     
     # Track requirements
@@ -66,11 +140,18 @@ def apply_routing_constraints(
     blocked_categories_lower = {cat.lower() for cat in constraints.blocked_categories}
     caution_flags_lower = {flag.lower() for flag in constraints.caution_flags}
     
+    # Determine if pregnancy/lactation checks are needed
+    check_pregnancy = constraints.biological_state == "PREGNANT"
+    check_lactation = constraints.biological_state == "BREASTFEEDING"
+    
     for sku in valid_skus:
         # Normalize SKU tags for matching
         sku_ingredients_lower = {tag.lower() for tag in sku.ingredient_tags}
         sku_categories_lower = {tag.lower() for tag in sku.category_tags}
         sku_risk_tags_lower = {tag.lower() for tag in sku.risk_tags}
+        
+        # Aggregate contraindications for pregnancy/lactation check
+        all_contraindications = aggregate_contraindications(sku)
         
         # Check for metadata blocks (from Issue #5)
         metadata_block_reasons = []
@@ -93,13 +174,35 @@ def apply_routing_constraints(
             for cat in category_block:
                 category_block_reasons.append(f"BLOCK_CATEGORY_{cat.upper()}")
         
+        # Check for pregnancy blocks (NEW)
+        pregnancy_block_reasons = []
+        if check_pregnancy and check_pregnancy_contraindication(all_contraindications):
+            pregnancy_block_reasons.append("BLOCK_PREGNANCY_CONTRAINDICATION")
+        
+        # Check for lactation blocks (NEW)
+        lactation_block_reasons = []
+        if check_lactation and check_lactation_contraindication(all_contraindications):
+            lactation_block_reasons.append("BLOCK_LACTATION_CONTRAINDICATION")
+        
         # Aggregate all block reasons
-        all_block_reasons = metadata_block_reasons + blood_block_reasons + category_block_reasons
+        all_block_reasons = (
+            metadata_block_reasons + 
+            blood_block_reasons + 
+            category_block_reasons +
+            pregnancy_block_reasons +
+            lactation_block_reasons
+        )
         
         if all_block_reasons:
             # SKU is BLOCKED
-            # Determine primary blocking source
-            if metadata_block_reasons:
+            # Determine primary blocking source (priority order)
+            if pregnancy_block_reasons:
+                blocked_by = "pregnancy"
+                blocked_by_pregnancy += 1
+            elif lactation_block_reasons:
+                blocked_by = "lactation"
+                blocked_by_lactation += 1
+            elif metadata_block_reasons:
                 blocked_by = "metadata"
                 blocked_by_metadata += 1
             elif blood_block_reasons:
@@ -160,6 +263,10 @@ def apply_routing_constraints(
         constraints_applied.append("caution_flags")
     if constraints.requirements:
         constraints_applied.append("requirements")
+    if check_pregnancy:
+        constraints_applied.append("pregnancy_check")
+    if check_lactation:
+        constraints_applied.append("lactation_check")
     
     # Determine missing requirements
     missing_requirements = sorted(list(requirements_set - fulfilled_requirements))
@@ -172,10 +279,13 @@ def apply_routing_constraints(
         blocked_by_blood=blocked_by_blood,
         blocked_by_metadata=blocked_by_metadata,
         blocked_by_category=blocked_by_category,
+        blocked_by_pregnancy=blocked_by_pregnancy,
+        blocked_by_lactation=blocked_by_lactation,
         constraints_applied=sorted(constraints_applied),
         requirements_in_catalog=sorted(list(fulfilled_requirements)),
         requirements_missing=missing_requirements,
         caution_count=caution_count,
+        biological_state_applied=constraints.biological_state,
         processed_at=datetime.utcnow().isoformat(),
     )
     
@@ -256,3 +366,41 @@ def get_requirements_coverage(
         "missing": sorted(list(missing)),
         "coverage_pct": round(coverage_pct, 2),
     }
+
+
+def get_pregnancy_blocked_ingredients(contraindications_map: dict) -> List[str]:
+    """
+    Get list of ingredients blocked for pregnancy based on contraindications.
+    
+    Utility function to pre-compute blocked ingredients for UI display.
+    
+    Args:
+        contraindications_map: Dict mapping ingredient_id -> contraindications text
+        
+    Returns:
+        List of ingredient IDs with pregnancy contraindications
+    """
+    blocked = []
+    for ing_id, text in contraindications_map.items():
+        if check_pregnancy_contraindication(text):
+            blocked.append(ing_id)
+    return sorted(blocked)
+
+
+def get_lactation_blocked_ingredients(contraindications_map: dict) -> List[str]:
+    """
+    Get list of ingredients blocked for lactation based on contraindications.
+    
+    Utility function to pre-compute blocked ingredients for UI display.
+    
+    Args:
+        contraindications_map: Dict mapping ingredient_id -> contraindications text
+        
+    Returns:
+        List of ingredient IDs with lactation contraindications
+    """
+    blocked = []
+    for ing_id, text in contraindications_map.items():
+        if check_lactation_contraindication(text):
+            blocked.append(ing_id)
+    return sorted(blocked)
