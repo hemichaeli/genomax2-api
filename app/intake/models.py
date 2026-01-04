@@ -4,12 +4,13 @@ GenoMAX² Product Intake System - Models
 Pydantic models for the intake workflow:
 - IntakeRequest: Input for creating new intakes
 - IntakeStatus: Workflow states
+- BiologicalState: Pregnancy/breastfeeding state (MAXima² only)
 - DraftModule: Proposed OS module
 - DraftCopy: Generated label copy
 - ValidationFlags: Warnings/blockers from validation
 - IntakeResponse: Full intake record response
 
-Version: intake_system_v1
+Version: intake_system_v1.1 (added BiologicalState)
 """
 
 from datetime import datetime
@@ -38,6 +39,22 @@ class OSLayer(str, Enum):
     CORE = "Core"           # TIER 1: Strong evidence
     ADAPTIVE = "Adaptive"   # TIER 2: Moderate evidence
     EXPERIMENTAL = "Experimental"  # TIER 3: Limited evidence
+
+
+class BiologicalState(str, Enum):
+    """
+    Biological state for MAXima² users.
+    
+    Used to trigger pregnancy/lactation safety blocks on ingredients
+    with contraindications or caution populations containing relevant keywords.
+    
+    NOTE: Only applicable to MAXima² (female) protocols.
+    MAXimo² users should always be GENERAL.
+    """
+    GENERAL = "GENERAL"             # Default state - no pregnancy/lactation
+    PREGNANT = "PREGNANT"           # Currently pregnant
+    BREASTFEEDING = "BREASTFEEDING" # Currently breastfeeding/lactating
+    PREFER_NOT_SAY = "PREFER_NOT_SAY"  # User declined to answer (treated as GENERAL for safety)
 
 
 class BiologicalDomain(str, Enum):
@@ -156,6 +173,47 @@ class IntakeRejectRequest(BaseModel):
     """Request to reject an intake."""
     intake_id: str = Field(..., description="UUID of the intake to reject")
     reason: str = Field(..., description="Reason for rejection")
+
+
+class UserIntakeRequest(BaseModel):
+    """
+    User intake questionnaire request.
+    
+    Captures user responses for protocol generation.
+    """
+    os_environment: OSEnvironment = Field(
+        ..., 
+        description="Target OS: MAXimo² (male) or MAXima² (female)"
+    )
+    goals: List[str] = Field(
+        ..., 
+        description="User health goals (e.g., ['energy', 'sleep', 'cognition'])"
+    )
+    medications: Optional[List[str]] = Field(
+        default=None,
+        description="Current medications for interaction checking"
+    )
+    conditions: Optional[List[str]] = Field(
+        default=None,
+        description="Existing health conditions"
+    )
+    biological_state: BiologicalState = Field(
+        default=BiologicalState.GENERAL,
+        description="Pregnancy/breastfeeding state (MAXima² only)"
+    )
+    
+    @field_validator('biological_state')
+    @classmethod
+    def validate_biological_state(cls, v: BiologicalState, info) -> BiologicalState:
+        """
+        Biological state is only relevant for MAXima² users.
+        MAXimo² users are forced to GENERAL.
+        """
+        os_env = info.data.get('os_environment')
+        if os_env == OSEnvironment.MAXIMO and v != BiologicalState.GENERAL:
+            # Silently override for male users
+            return BiologicalState.GENERAL
+        return v
 
 
 # =============================================
