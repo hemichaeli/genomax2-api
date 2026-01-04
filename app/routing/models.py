@@ -3,7 +3,7 @@ Routing Layer Models (Issue #6)
 
 Pydantic models for routing inputs, outputs, and audit trails.
 
-Version: routing_layer_v1
+Version: routing_layer_v1.1 (added biological_state support)
 """
 
 from datetime import datetime
@@ -11,6 +11,17 @@ from typing import List, Optional, Literal
 from pydantic import BaseModel, Field
 import hashlib
 import json
+
+
+class BiologicalState(str):
+    """
+    Biological state enum values.
+    Re-exported from intake models for routing layer use.
+    """
+    GENERAL = "GENERAL"
+    PREGNANT = "PREGNANT"
+    BREASTFEEDING = "BREASTFEEDING"
+    PREFER_NOT_SAY = "PREFER_NOT_SAY"
 
 
 class RoutingConstraints(BaseModel):
@@ -39,6 +50,12 @@ class RoutingConstraints(BaseModel):
         default_factory=list,
         description="Reason codes explaining constraints (e.g., ['BLOCK_IRON_FERRITIN_HIGH'])"
     )
+    biological_state: str = Field(
+        default="GENERAL",
+        description="User biological state: GENERAL, PREGNANT, or BREASTFEEDING. "
+                    "When PREGNANT or BREASTFEEDING, ingredients with pregnancy/lactation "
+                    "contraindications are automatically blocked."
+    )
     
     class Config:
         extra = "forbid"
@@ -57,6 +74,11 @@ class SkuInput(BaseModel):
     risk_tags: List[str] = Field(default_factory=list)
     gender_line: Optional[str] = None  # "MAXimo2", "MAXima2", "UNISEX"
     evidence_tier: Optional[str] = None
+    # New: ingredient-level contraindications for pregnancy check
+    ingredient_contraindications: Optional[List[str]] = Field(
+        default=None,
+        description="Aggregated contraindications from linked ingredients"
+    )
     
     class Config:
         extra = "allow"  # Allow additional fields from catalog
@@ -117,7 +139,7 @@ class BlockedSKU(BaseModel):
     reason_codes: List[str] = Field(
         description="All reason codes explaining why blocked"
     )
-    blocked_by: Literal["blood", "metadata", "safety", "category"] = Field(
+    blocked_by: Literal["blood", "metadata", "safety", "category", "pregnancy", "lactation"] = Field(
         description="Primary blocking source"
     )
     blocked_ingredients: List[str] = Field(
@@ -149,6 +171,14 @@ class RoutingAudit(BaseModel):
     blocked_by_category: int = Field(
         description="SKUs blocked by category constraints"
     )
+    blocked_by_pregnancy: int = Field(
+        default=0,
+        description="SKUs blocked due to pregnancy contraindications"
+    )
+    blocked_by_lactation: int = Field(
+        default=0,
+        description="SKUs blocked due to lactation/breastfeeding contraindications"
+    )
     constraints_applied: List[str] = Field(
         description="List of constraint types that were applied"
     )
@@ -163,6 +193,10 @@ class RoutingAudit(BaseModel):
     caution_count: int = Field(
         default=0,
         description="Number of allowed SKUs with caution flags"
+    )
+    biological_state_applied: str = Field(
+        default="GENERAL",
+        description="The biological state constraint that was applied"
     )
     processed_at: str = Field(
         default_factory=lambda: datetime.utcnow().isoformat()
@@ -182,7 +216,7 @@ class RoutingResult(BaseModel):
         description="Deterministic hash of the routing result"
     )
     audit: RoutingAudit
-    version: str = "routing_layer_v1"
+    version: str = "routing_layer_v1.1"
     
     class Config:
         extra = "forbid"
@@ -215,5 +249,5 @@ class RoutingHealthResponse(BaseModel):
     """Health check response for routing module."""
     status: str = "ok"
     module: str = "routing_layer"
-    version: str = "routing_layer_v1"
+    version: str = "routing_layer_v1.1"
     timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
