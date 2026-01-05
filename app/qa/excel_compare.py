@@ -1,12 +1,15 @@
 """
-GenoMAX² Excel vs DB Comparison Module v2
+GenoMAX² Excel vs DB Comparison Module v3
 Validates os_modules_v3_1 against GenoMAX2_Catalog_Selection_v2_FINAL.xlsx
 
-Matching Key: (supliful_sku, os_environment) -> (shopify_handle, os_environment)
+Matching Key: Excel (supliful_sku, os_environment) -> DB (shopify_handle, os_environment)
 
-Key insight: Excel contains multiple research_ingredients per (SKU, environment) pair
-because one Supliful product can contain multiple ingredients. The DB should have
-one module per (shopify_handle, os_environment) pair.
+CRITICAL INSIGHT (v3):
+- Excel supliful_sku: "omega-3-epa-dha-softgel-capsules"
+- DB shopify_handle: "omega-3-epa-dha-softgel-capsules-maximo" or "-maxima"
+- Pattern: shopify_handle = supliful_sku + "-" + environment_suffix
+- MAXimo² -> "-maximo"
+- MAXima² -> "-maxima"
 """
 
 import os
@@ -38,6 +41,23 @@ def normalize_text(text: str) -> str:
     text = text.replace("'", "'").replace("'", "'").replace(""", '"').replace(""", '"')
     text = re.sub(r'\s+', ' ', text)
     return text
+
+
+def derive_shopify_handle(supliful_sku: str, os_environment: str) -> str:
+    """
+    Derive expected shopify_handle from Excel SKU + environment.
+    
+    Pattern: {supliful_sku}-{environment_suffix}
+    - MAXimo² -> "-maximo"
+    - MAXima² -> "-maxima"
+    """
+    if os_environment == "MAXimo²":
+        return f"{supliful_sku}-maximo"
+    elif os_environment == "MAXima²":
+        return f"{supliful_sku}-maxima"
+    else:
+        # Fallback - shouldn't happen
+        return supliful_sku
 
 
 # Expected data from GenoMAX2_Catalog_Selection_v2_FINAL.xlsx
@@ -161,11 +181,20 @@ def get_excel_skus() -> Set[str]:
     return {row[0] for row in EXCEL_YES_ROWS}
 
 
+def get_expected_handles() -> Set[Tuple[str, str]]:
+    """Get expected (shopify_handle, os_environment) pairs derived from Excel."""
+    pairs = set()
+    for sku, os_env in get_unique_sku_env_pairs():
+        handle = derive_shopify_handle(sku, os_env)
+        pairs.add((handle, os_env))
+    return pairs
+
+
 @router.get("/compare/debug-handles")
 def debug_handles() -> Dict[str, Any]:
     """
-    Debug endpoint to compare Excel SKUs vs DB shopify_handle values.
-    Shows first 30 of each for quick comparison.
+    Debug endpoint to compare Excel-derived handles vs actual DB handles.
+    Shows the mapping pattern and what's matching/missing.
     """
     conn = get_db()
     if not conn:
@@ -174,40 +203,49 @@ def debug_handles() -> Dict[str, Any]:
     try:
         cur = conn.cursor()
         
-        # Get unique DB handles
+        # Get unique DB handles with environment
         cur.execute("""
-            SELECT DISTINCT shopify_handle
+            SELECT DISTINCT shopify_handle, os_environment
             FROM os_modules_v3_1
             WHERE supplier_status IS NULL 
                OR supplier_status NOT IN ('DUPLICATE_INACTIVE')
             ORDER BY shopify_handle
         """)
-        db_handles = [r["shopify_handle"] for r in cur.fetchall()]
+        db_rows = cur.fetchall()
+        db_handle_env_pairs = {(r["shopify_handle"], r["os_environment"]) for r in db_rows}
+        db_handles = {r["shopify_handle"] for r in db_rows}
         
         cur.close()
         conn.close()
         
-        excel_skus = sorted(get_excel_skus())
+        # Get Excel data
+        excel_sku_env_pairs = get_unique_sku_env_pairs()
+        excel_skus = get_excel_skus()
         
-        # Find overlaps
-        excel_set = set(excel_skus)
-        db_set = set(db_handles)
+        # Derive expected handles from Excel
+        expected_handle_env_pairs = get_expected_handles()
+        expected_handles = {h for h, _ in expected_handle_env_pairs}
         
-        matches = excel_set & db_set
-        in_excel_only = excel_set - db_set
-        in_db_only = db_set - excel_set
+        # Find overlaps using derived handles
+        matches = expected_handle_env_pairs & db_handle_env_pairs
+        in_excel_only = expected_handle_env_pairs - db_handle_env_pairs
+        in_db_only = db_handle_env_pairs - expected_handle_env_pairs
         
         return {
-            "excel_unique_skus": len(excel_skus),
-            "db_unique_handles": len(db_handles),
+            "matching_strategy": "Excel SKU + environment suffix -> DB shopify_handle",
+            "pattern": "{supliful_sku}-{maximo|maxima}",
+            "excel_unique_sku_env_pairs": len(excel_sku_env_pairs),
+            "expected_handle_env_pairs": len(expected_handle_env_pairs),
+            "db_handle_env_pairs": len(db_handle_env_pairs),
             "exact_matches": len(matches),
             "in_excel_only": len(in_excel_only),
             "in_db_only": len(in_db_only),
-            "sample_excel_skus": excel_skus[:30],
-            "sample_db_handles": db_handles[:30],
-            "matched_handles": sorted(matches)[:30] if matches else [],
-            "excel_only_sample": sorted(in_excel_only)[:20],
-            "db_only_sample": sorted(in_db_only)[:20]
+            "match_rate_percent": round(100 * len(matches) / len(expected_handle_env_pairs), 1) if expected_handle_env_pairs else 0,
+            "sample_expected_handles": sorted([f"{h} ({e})" for h, e in list(expected_handle_env_pairs)[:15]]),
+            "sample_db_handles": sorted([f"{h} ({e})" for h, e in list(db_handle_env_pairs)[:15]]),
+            "matched_sample": sorted([f"{h} ({e})" for h, e in list(matches)[:15]]) if matches else [],
+            "excel_only_sample": sorted([f"{h} ({e})" for h, e in list(in_excel_only)[:15]]),
+            "db_only_sample": sorted([f"{h} ({e})" for h, e in list(in_db_only)[:15]])
         }
         
     except Exception as e:
@@ -223,10 +261,10 @@ def compare_excel_db_full() -> Dict[str, Any]:
     """
     Full comparison of DB against expected Excel YES rows.
     
-    Matching strategy:
-    - Key: (supliful_sku, os_environment) in Excel -> (shopify_handle, os_environment) in DB
-    - One DB module per unique (shopify_handle, os_environment) pair
-    - Excel may have multiple research_ingredients per SKU (multi-ingredient products)
+    Matching strategy (v3):
+    - Excel: (supliful_sku, os_environment)
+    - Derived: shopify_handle = supliful_sku + "-maximo" or "-maxima"
+    - DB key: (shopify_handle, os_environment)
     """
     conn = get_db()
     if not conn:
@@ -252,15 +290,15 @@ def compare_excel_db_full() -> Dict[str, Any]:
         for row in db_rows:
             key = (row["shopify_handle"], row["os_environment"])
             if key in db_by_key:
-                # Duplicate - should not happen after fix
-                pass
+                pass  # Duplicate - should not happen after fix
             db_by_key[key] = dict(row)
         
         # Get unique Excel SKU+env pairs
         excel_sku_env_pairs = get_unique_sku_env_pairs()
         
         results = {
-            "audit_type": "Excel vs DB Comparison (SKU-based)",
+            "audit_type": "Excel vs DB Comparison (v3 - handle suffix pattern)",
+            "matching_pattern": "{supliful_sku}-{maximo|maxima}",
             "excel_total_rows": len(EXCEL_YES_ROWS),
             "excel_unique_sku_env_pairs": len(excel_sku_env_pairs),
             "db_active_modules": len(db_rows),
@@ -278,9 +316,11 @@ def compare_excel_db_full() -> Dict[str, Any]:
         # Track matched DB keys
         matched_db_keys: Set[Tuple[str, str]] = set()
         
-        # Match Excel SKU+env pairs to DB
+        # Match Excel SKU+env pairs to DB using derived handle
         for sku, os_env in excel_sku_env_pairs:
-            db_key = (sku, os_env)
+            # Derive expected handle
+            expected_handle = derive_shopify_handle(sku, os_env)
+            db_key = (expected_handle, os_env)
             
             if db_key in db_by_key:
                 db_row = db_by_key[db_key]
@@ -295,7 +335,9 @@ def compare_excel_db_full() -> Dict[str, Any]:
                 excel_ingredients = [r[4] for r in excel_rows_for_key]
                 
                 match_record = {
-                    "excel_key": f"({sku}, {os_env})",
+                    "excel_sku": sku,
+                    "derived_handle": expected_handle,
+                    "os_environment": os_env,
                     "db_module_code": db_row["module_code"],
                     "db_product_name": db_row["product_name"],
                     "excel_ingredients": excel_ingredients
@@ -323,7 +365,8 @@ def compare_excel_db_full() -> Dict[str, Any]:
                 
                 if diffs:
                     results["field_diffs"].append({
-                        "excel_key": f"({sku}, {os_env})",
+                        "excel_sku": sku,
+                        "derived_handle": expected_handle,
                         "db_module_code": db_row["module_code"],
                         "diffs": diffs
                     })
@@ -331,7 +374,8 @@ def compare_excel_db_full() -> Dict[str, Any]:
                 # Get Excel info for this missing pair
                 excel_rows_for_key = [r for r in EXCEL_YES_ROWS if r[0] == sku and r[1] == os_env]
                 results["coverage"]["missing_in_db"].append({
-                    "supliful_sku": sku,
+                    "excel_sku": sku,
+                    "expected_handle": expected_handle,
                     "os_environment": os_env,
                     "excel_os_layer": excel_rows_for_key[0][2] if excel_rows_for_key else None,
                     "excel_bio_subsystem": excel_rows_for_key[0][3] if excel_rows_for_key else None,
@@ -366,19 +410,18 @@ def compare_excel_db_full() -> Dict[str, Any]:
         if (results["summary"]["missing_in_db_count"] == 0 and 
             results["summary"]["diff_count"] == 0):
             results["overall_status"] = "PASS"
-            results["decision"] = "DB is 100% aligned with Excel YES rows (by SKU+environment)"
+            results["decision"] = "DB is 100% aligned with Excel YES rows"
         else:
             results["overall_status"] = "FAIL"
             issues = []
             if results["summary"]["missing_in_db_count"] > 0:
-                issues.append(f"{results['summary']['missing_in_db_count']} SKU+env pairs missing in DB")
+                issues.append(f"{results['summary']['missing_in_db_count']} expected handles missing in DB")
             if results["summary"]["diff_count"] > 0:
                 issues.append(f"{results['summary']['diff_count']} field differences")
             results["decision"] = f"Do not proceed. Issues: {'; '.join(issues)}"
             
-            # Add recommendation if missing
             if results["summary"]["missing_in_db_count"] > 0:
-                results["recommendation"] = "Add missing SKU+environment pairs to os_modules_v3_1 or update shopify_handle values"
+                results["recommendation"] = "Add missing products to os_modules_v3_1 with correct shopify_handle pattern: {sku}-{maximo|maxima}"
         
         return results
         
@@ -396,6 +439,7 @@ def compare_excel_db_summary() -> Dict[str, Any]:
     full = compare_excel_db_full()
     return {
         "overall_status": full["overall_status"],
+        "matching_pattern": full.get("matching_pattern", ""),
         "summary": full["summary"],
         "decision": full.get("decision", ""),
         "recommendation": full.get("recommendation", "")
@@ -404,17 +448,17 @@ def compare_excel_db_summary() -> Dict[str, Any]:
 
 @router.get("/compare/missing-skus")
 def get_missing_skus() -> Dict[str, Any]:
-    """List SKUs from Excel that are missing in DB."""
+    """List expected handles from Excel that are missing in DB."""
     full = compare_excel_db_full()
     return {
         "missing_count": len(full["coverage"]["missing_in_db"]),
-        "missing_skus": full["coverage"]["missing_in_db"]
+        "missing_products": full["coverage"]["missing_in_db"]
     }
 
 
 @router.get("/compare/extra-db-modules")
 def get_extra_db_modules() -> Dict[str, Any]:
-    """List DB modules not in Excel YES rows."""
+    """List DB modules not expected from Excel YES rows."""
     full = compare_excel_db_full()
     return {
         "extra_count": len(full["coverage"]["extra_in_db"]),
