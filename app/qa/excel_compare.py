@@ -156,6 +156,68 @@ def get_unique_sku_env_pairs() -> Set[Tuple[str, str]]:
     return {(row[0], row[1]) for row in EXCEL_YES_ROWS}
 
 
+def get_excel_skus() -> Set[str]:
+    """Get unique supliful_sku values from Excel."""
+    return {row[0] for row in EXCEL_YES_ROWS}
+
+
+@router.get("/compare/debug-handles")
+def debug_handles() -> Dict[str, Any]:
+    """
+    Debug endpoint to compare Excel SKUs vs DB shopify_handle values.
+    Shows first 30 of each for quick comparison.
+    """
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        cur = conn.cursor()
+        
+        # Get unique DB handles
+        cur.execute("""
+            SELECT DISTINCT shopify_handle
+            FROM os_modules_v3_1
+            WHERE supplier_status IS NULL 
+               OR supplier_status NOT IN ('DUPLICATE_INACTIVE')
+            ORDER BY shopify_handle
+        """)
+        db_handles = [r["shopify_handle"] for r in cur.fetchall()]
+        
+        cur.close()
+        conn.close()
+        
+        excel_skus = sorted(get_excel_skus())
+        
+        # Find overlaps
+        excel_set = set(excel_skus)
+        db_set = set(db_handles)
+        
+        matches = excel_set & db_set
+        in_excel_only = excel_set - db_set
+        in_db_only = db_set - excel_set
+        
+        return {
+            "excel_unique_skus": len(excel_skus),
+            "db_unique_handles": len(db_handles),
+            "exact_matches": len(matches),
+            "in_excel_only": len(in_excel_only),
+            "in_db_only": len(in_db_only),
+            "sample_excel_skus": excel_skus[:30],
+            "sample_db_handles": db_handles[:30],
+            "matched_handles": sorted(matches)[:30] if matches else [],
+            "excel_only_sample": sorted(in_excel_only)[:20],
+            "db_only_sample": sorted(in_db_only)[:20]
+        }
+        
+    except Exception as e:
+        try:
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Debug error: {str(e)}")
+
+
 @router.get("/compare/excel-db-full")
 def compare_excel_db_full() -> Dict[str, Any]:
     """
