@@ -1,4 +1,4 @@
-# GenoMAX² API Server v3.0 Requirements
+# GenoMAX² API Server v3.21.0 Requirements
 
 # Web Framework
 fastapi==0.109.0
@@ -21,6 +21,10 @@ httpx==0.27.0
 
 # JSON Schema Validation
 jsonschema==4.21.1
+
+# Excel Processing (v3.21.0 - Override Module)
+openpyxl==3.1.2
+pandas==2.1.4
 
 # Testing
 pytest==8.0.0
