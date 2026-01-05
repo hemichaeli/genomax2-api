@@ -184,13 +184,13 @@ def compare_excel_db_full() -> Dict[str, Any]:
     try:
         cur = conn.cursor()
         
-        # Get all active DB modules with relevant fields
+        # Get all active DB modules with relevant fields (only columns that exist)
         cur.execute("""
             SELECT 
                 module_code, os_environment, os_layer, biological_domain,
                 product_name, genomax_ingredients, ingredient_tags,
                 suggested_use_full, safety_notes, contraindications,
-                dosing_protocol, evidence_rationale, supplier_status
+                dosing_protocol, supplier_status
             FROM os_modules_v3_1
             WHERE supplier_status IS NULL 
                OR supplier_status NOT IN ('DUPLICATE_INACTIVE')
@@ -295,23 +295,21 @@ def compare_excel_db_full() -> Dict[str, Any]:
                     "biological_domain": db_row["biological_domain"]
                 })
         
-        # Check for placeholders in DB
+        # Check for placeholders in DB (only existing columns)
         cur.execute("""
             SELECT module_code, os_environment, 
                    CASE 
                        WHEN COALESCE(suggested_use_full,'') ~* '\\m(TBD|MISSING|REVIEW|PLACEHOLDER)\\M' THEN 'suggested_use_full'
                        WHEN COALESCE(safety_notes,'') ~* '\\m(TBD|MISSING|REVIEW|PLACEHOLDER)\\M' THEN 'safety_notes'
                        WHEN COALESCE(contraindications,'') ~* '\\m(TBD|MISSING|REVIEW|PLACEHOLDER)\\M' THEN 'contraindications'
-                       WHEN COALESCE(evidence_rationale,'') ~* '\\m(TBD|MISSING|REVIEW|PLACEHOLDER)\\M' THEN 'evidence_rationale'
                        ELSE 'unknown'
                    END AS placeholder_field
             FROM os_modules_v3_1
-            WHERE supplier_status IS NULL OR supplier_status NOT IN ('DUPLICATE_INACTIVE')
+            WHERE (supplier_status IS NULL OR supplier_status NOT IN ('DUPLICATE_INACTIVE'))
               AND (
                   COALESCE(suggested_use_full,'') ~* '\\m(TBD|MISSING|REVIEW|PLACEHOLDER)\\M'
                   OR COALESCE(safety_notes,'') ~* '\\m(TBD|MISSING|REVIEW|PLACEHOLDER)\\M'
                   OR COALESCE(contraindications,'') ~* '\\m(TBD|MISSING|REVIEW|PLACEHOLDER)\\M'
-                  OR COALESCE(evidence_rationale,'') ~* '\\m(TBD|MISSING|REVIEW|PLACEHOLDER)\\M'
               )
             LIMIT 20
         """)
