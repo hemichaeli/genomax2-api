@@ -1,7 +1,15 @@
 """
 GenoMAX² API Server
 Gender-Optimized Biological Operating System
-Version 3.20.0 - QA Audit System
+Version 3.21.0 - Excel Override System
+
+v3.21.0:
+- Add Excel Override endpoints for catalog data sync
+- POST /api/v1/catalog/override/preflight - Validate Excel structure
+- POST /api/v1/catalog/override/dry-run - Compute diffs without changes
+- POST /api/v1/catalog/override/execute - Execute override with confirm=True
+- GET /api/v1/catalog/override/logs/{batch_id} - Retrieve audit logs
+- Implements Option D: Primary ingredient classification + Aggregate safety
 
 v3.20.0:
 - Add QA Audit endpoints for os_modules catalog validation
@@ -115,10 +123,13 @@ from app.brain.safety_admin import router as safety_router
 # QA Audit imports (v3.20.0)
 from app.qa import qa_router
 
+# Excel Override imports (v3.21.0)
+from app.catalog.override import router as override_router
+
 # Telemetry Emitter imports (v3.17.0 - Issue #9 Stage 2)
 from app.telemetry import get_emitter, derive_run_summary, derive_events
 
-app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.20.0")
+app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.21.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -152,6 +163,9 @@ app.include_router(safety_router)
 
 # Register QA Audit router (v3.20.0)
 app.include_router(qa_router)
+
+# Register Excel Override router (v3.21.0)
+app.include_router(override_router)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -639,7 +653,7 @@ def _emit_telemetry_for_phase(
             sex=sex,
             age=age,
             has_bloodwork=has_bloodwork or summary.has_bloodwork,
-            api_version="3.20.0",
+            api_version="3.21.0",
         )
         
         # Complete run with aggregates
@@ -672,18 +686,18 @@ def _emit_telemetry_for_phase(
 
 @app.get("/")
 def root():
-    return {"service": "GenoMAX² API", "version": "3.20.0", "status": "operational"}
+    return {"service": "GenoMAX² API", "version": "3.21.0", "status": "operational"}
 
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "3.20.0"}
+    return {"status": "healthy", "version": "3.21.0"}
 
 
 @app.get("/version")
 def version():
     return {
-        "api_version": "3.20.0",
+        "api_version": "3.21.0",
         "brain_version": "1.5.0",
         "resolver_version": "1.0.0",
         "catalog_version": "catalog_governance_v1",
@@ -694,8 +708,9 @@ def version():
         "intake_version": "intake_system_v1",
         "safety_gate_version": "safety_gate_v1",
         "qa_audit_version": "qa_audit_v1",
+        "override_version": "excel_override_v1",
         "contract_version": CONTRACT_VERSION,
-        "features": ["orchestrate", "orchestrate_v2", "compose", "route", "resolve", "supplier-gating", "catalog-governance", "routing-layer", "matching-layer", "explainability", "painpoints", "lifestyle-schema", "telemetry", "telemetry-instrumented", "intake-system", "safety-gate", "qa-audit"]
+        "features": ["orchestrate", "orchestrate_v2", "compose", "route", "resolve", "supplier-gating", "catalog-governance", "routing-layer", "matching-layer", "explainability", "painpoints", "lifestyle-schema", "telemetry", "telemetry-instrumented", "intake-system", "safety-gate", "qa-audit", "excel-override"]
     }
 
 
