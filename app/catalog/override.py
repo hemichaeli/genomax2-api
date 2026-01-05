@@ -197,6 +197,62 @@ def build_payload_from_excel(df: pd.DataFrame) -> Tuple[List[Dict], List[Dict]]:
     return payload_records, violations
 
 
+@router.get("/override/migrate")
+def migrate_override_tables() -> Dict[str, Any]:
+    """Create required tables for override system."""
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        cur = conn.cursor()
+        
+        # Create override log table
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS catalog_override_log_v1 (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                override_batch_id UUID NOT NULL,
+                module_code VARCHAR(100) NOT NULL,
+                os_environment VARCHAR(20) NOT NULL,
+                field_name VARCHAR(50) NOT NULL,
+                old_value TEXT,
+                new_value TEXT,
+                source_sku VARCHAR(200),
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        
+        # Create indexes
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_catalog_override_log_batch_id 
+            ON catalog_override_log_v1 (override_batch_id)
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_catalog_override_log_module 
+            ON catalog_override_log_v1 (module_code, os_environment)
+        """)
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        return {
+            "status": "success",
+            "tables_created": ["catalog_override_log_v1"],
+            "indexes_created": [
+                "idx_catalog_override_log_batch_id",
+                "idx_catalog_override_log_module"
+            ]
+        }
+        
+    except Exception as e:
+        try:
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Migration error: {str(e)}")
+
+
 @router.post("/override/preflight")
 async def override_preflight(file: UploadFile = File(...)) -> Dict[str, Any]:
     """
@@ -428,6 +484,21 @@ async def override_execute(file: UploadFile = File(...), confirm: bool = False) 
         
         batch_id = str(uuid.uuid4())
         cur = conn.cursor()
+        
+        # Ensure log table exists
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS catalog_override_log_v1 (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                override_batch_id UUID NOT NULL,
+                module_code VARCHAR(100) NOT NULL,
+                os_environment VARCHAR(20) NOT NULL,
+                field_name VARCHAR(50) NOT NULL,
+                old_value TEXT,
+                new_value TEXT,
+                source_sku VARCHAR(200),
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
         
         # Start transaction
         updated_count = 0
