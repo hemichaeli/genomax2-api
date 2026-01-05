@@ -357,7 +357,7 @@ def get_duplicate_details(shopify_handle: str) -> Dict[str, Any]:
     try:
         cur = conn.cursor()
         cur.execute("""
-            SELECT id, module_code, product_name, shopify_handle, os_environment, 
+            SELECT module_code, product_name, shopify_handle, os_environment, 
                    os_layer, biological_domain, supliful_handle, supplier_status,
                    supplier_page_url, url, created_at, updated_at
             FROM os_modules_v3_1
