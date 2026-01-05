@@ -344,6 +344,48 @@ def audit_os_modules_summary() -> Dict[str, Any]:
     }
 
 
+@router.get("/audit/os-modules/duplicates/{shopify_handle}")
+def get_duplicate_details(shopify_handle: str) -> Dict[str, Any]:
+    """
+    Get full details of duplicate shopify_handle records.
+    Use this to investigate and decide which record to keep.
+    """
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, module_code, product_name, shopify_handle, os_environment, 
+                   os_layer, biological_domain, supliful_handle, supplier_status,
+                   supplier_page_url, url, created_at, updated_at
+            FROM os_modules_v3_1
+            WHERE shopify_handle = %s
+            ORDER BY
+              (supplier_page_url IS NOT NULL AND TRIM(supplier_page_url) <> '') DESC,
+              (url IS NOT NULL AND TRIM(url) <> '') DESC,
+              (product_name IS NOT NULL AND TRIM(product_name) <> '') DESC,
+              updated_at DESC
+        """, (shopify_handle,))
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        
+        return {
+            "shopify_handle": shopify_handle,
+            "count": len(rows),
+            "recommendation": rows[0]["module_code"] if rows else None,
+            "records": [dict(r) for r in rows]
+        }
+    except Exception as e:
+        try:
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Query error: {str(e)}")
+
+
 @router.get("/audit/os-modules/export")
 def audit_os_modules_export() -> Dict[str, Any]:
     """
