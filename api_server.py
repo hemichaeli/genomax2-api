@@ -1,7 +1,15 @@
 """
 GenoMAX² API Server
 Gender-Optimized Biological Operating System
-Version 3.19.0 - Safety Gate Integration
+Version 3.20.0 - QA Audit System
+
+v3.20.0:
+- Add QA Audit endpoints for os_modules catalog validation
+- GET /api/v1/qa/audit/os-modules - Full validation audit
+- GET /api/v1/qa/audit/os-modules/summary - Quick summary
+- GET /api/v1/qa/audit/os-modules/export - Export for Excel comparison
+- Validates schema, uniqueness, field completeness, OS pairing
+- Supports catalog governance QA workflows
 
 v3.19.0:
 - Integrate Safety Gate module for ingredient safety blocking
@@ -104,10 +112,13 @@ from app.intake.admin import router as intake_router
 # Safety Gate imports (v3.19.0)
 from app.brain.safety_admin import router as safety_router
 
+# QA Audit imports (v3.20.0)
+from app.qa import qa_router
+
 # Telemetry Emitter imports (v3.17.0 - Issue #9 Stage 2)
 from app.telemetry import get_emitter, derive_run_summary, derive_events
 
-app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.19.0")
+app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.20.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -138,6 +149,9 @@ app.include_router(intake_router)
 
 # Register Safety Gate router (v3.19.0)
 app.include_router(safety_router)
+
+# Register QA Audit router (v3.20.0)
+app.include_router(qa_router)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -625,7 +639,7 @@ def _emit_telemetry_for_phase(
             sex=sex,
             age=age,
             has_bloodwork=has_bloodwork or summary.has_bloodwork,
-            api_version="3.19.0",
+            api_version="3.20.0",
         )
         
         # Complete run with aggregates
@@ -658,18 +672,18 @@ def _emit_telemetry_for_phase(
 
 @app.get("/")
 def root():
-    return {"service": "GenoMAX² API", "version": "3.19.0", "status": "operational"}
+    return {"service": "GenoMAX² API", "version": "3.20.0", "status": "operational"}
 
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "3.19.0"}
+    return {"status": "healthy", "version": "3.20.0"}
 
 
 @app.get("/version")
 def version():
     return {
-        "api_version": "3.19.0",
+        "api_version": "3.20.0",
         "brain_version": "1.5.0",
         "resolver_version": "1.0.0",
         "catalog_version": "catalog_governance_v1",
@@ -679,8 +693,9 @@ def version():
         "telemetry_version": "telemetry_instrumented_v1",
         "intake_version": "intake_system_v1",
         "safety_gate_version": "safety_gate_v1",
+        "qa_audit_version": "qa_audit_v1",
         "contract_version": CONTRACT_VERSION,
-        "features": ["orchestrate", "orchestrate_v2", "compose", "route", "resolve", "supplier-gating", "catalog-governance", "routing-layer", "matching-layer", "explainability", "painpoints", "lifestyle-schema", "telemetry", "telemetry-instrumented", "intake-system", "safety-gate"]
+        "features": ["orchestrate", "orchestrate_v2", "compose", "route", "resolve", "supplier-gating", "catalog-governance", "routing-layer", "matching-layer", "explainability", "painpoints", "lifestyle-schema", "telemetry", "telemetry-instrumented", "intake-system", "safety-gate", "qa-audit"]
     }
 
 
