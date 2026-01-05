@@ -1,11 +1,12 @@
 """
-GenoMAX² Excel vs DB Comparison Module v5
+GenoMAX² Excel vs DB Comparison Module v6
 Validates os_modules_v3_1 against GenoMAX2_Catalog_Selection_v2_FINAL.xlsx
 
-MATCHING STRATEGY (v5):
+MATCHING STRATEGY (v6):
 - Explicit mapping from Excel supliful_sku to DB shopify_handle base
 - Handles cases where DB uses different naming conventions
 - Tracks products in Excel that don't exist in DB
+- Handles gender-specific products (only one environment)
 """
 
 import os
@@ -37,6 +38,20 @@ def normalize_text(text: str) -> str:
     text = text.replace("'", "'").replace("'", "'").replace(""", '"').replace(""", '"')
     text = re.sub(r'\s+', ' ', text)
     return text
+
+
+# ============================================================================
+# GENDER-SPECIFIC PRODUCTS (only available in one environment)
+# ============================================================================
+# These Excel (sku, environment) pairs should be EXCLUDED from comparison
+# because the DB correctly only has them in one gender-specific environment.
+# ============================================================================
+
+GENDER_SPECIFIC_EXCLUSIONS = {
+    # mens-vitality is male-only product, DB has men-s-vitality-maximo only
+    # Excel incorrectly lists it for both MAXimo² and MAXima²
+    ("mens-vitality-tablets", "MAXima²"),
+}
 
 
 # ============================================================================
@@ -103,24 +118,19 @@ EXCEL_SKU_TO_DB_BASE = {
     "probiotic-40-billion-prebiotics-capsules": "probiotic-40-billion-with-prebiotics",
     "resveratrol-50-percent-capsules": "resveratrol-50-600mg",
     "max-detox-acai-capsules": "max-detox-acai-detox",
-    "mens-vitality-tablets": "men-s-vitality",  # Note: men's not mens, maximo only in DB
-    
-    # Products not in DB - mapped to None (will be reported separately)
-    # "kojic-acid-turmeric-soap": None,
-    # "moisturizing-strengthening-hair-oil-old": None,
-    # "green-tea-antioxidant-serum": None,
-    # "vitamin-glow-serum": None,
-    # "vitamin-c-serum": None,
-    # "recovery-cream": None,
-    # "peptide-hair-growth-serum": None,
+    "mens-vitality-tablets": "men-s-vitality",  # MAXimo² only (male product)
 }
 
 
 def get_expected_db_handle(excel_sku: str, os_environment: str) -> Optional[str]:
     """
     Get expected DB shopify_handle from Excel SKU and environment.
-    Returns None if product is known to not exist in DB.
+    Returns None if product is known to not exist in DB or is gender-excluded.
     """
+    # Check gender-specific exclusions first
+    if (excel_sku, os_environment) in GENDER_SPECIFIC_EXCLUSIONS:
+        return None
+    
     # Check if product is known to not exist
     if excel_sku in EXCEL_PRODUCTS_NOT_IN_DB:
         return None
@@ -325,10 +335,14 @@ def debug_handles() -> Dict[str, Any]:
         
         excel_sku_env_pairs = get_unique_sku_env_pairs()
         
-        # Derive expected handles (excluding products not in DB)
+        # Derive expected handles (excluding products not in DB and gender exclusions)
         expected_handle_env_pairs = set()
         skipped_not_in_db = set()
+        skipped_gender = set()
         for sku, os_env in excel_sku_env_pairs:
+            if (sku, os_env) in GENDER_SPECIFIC_EXCLUSIONS:
+                skipped_gender.add((sku, os_env))
+                continue
             expected_handle = get_expected_db_handle(sku, os_env)
             if expected_handle is None:
                 skipped_not_in_db.add(sku)
@@ -340,11 +354,13 @@ def debug_handles() -> Dict[str, Any]:
         in_db_only = db_handle_env_pairs - expected_handle_env_pairs
         
         return {
-            "matching_strategy": "Explicit SKU-to-handle mapping (v5)",
+            "matching_strategy": "Explicit SKU-to-handle mapping (v6 with gender exclusions)",
             "excel_unique_sku_env_pairs": len(excel_sku_env_pairs),
             "expected_handle_env_pairs": len(expected_handle_env_pairs),
             "skipped_not_in_db": len(skipped_not_in_db),
             "skipped_products": sorted(skipped_not_in_db),
+            "skipped_gender_specific": len(skipped_gender),
+            "gender_exclusions": [f"{s} ({e})" for s, e in sorted(skipped_gender)],
             "db_handle_env_pairs": len(db_handle_env_pairs),
             "exact_matches": len(matches),
             "in_excel_only": len(in_excel_only),
@@ -393,7 +409,7 @@ def compare_excel_db_full() -> Dict[str, Any]:
         excel_sku_env_pairs = get_unique_sku_env_pairs()
         
         results = {
-            "audit_type": "Excel vs DB Comparison (v5)",
+            "audit_type": "Excel vs DB Comparison (v6 with gender exclusions)",
             "excel_total_rows": len(EXCEL_YES_ROWS),
             "excel_unique_sku_env_pairs": len(excel_sku_env_pairs),
             "db_active_modules": len(db_rows),
@@ -402,6 +418,7 @@ def compare_excel_db_full() -> Dict[str, Any]:
                 "matched": [],
                 "missing_in_db": [],
                 "expected_not_in_db": [],  # Products we know aren't in DB
+                "gender_specific_excluded": [],  # Gender-specific exclusions
                 "extra_in_db": []
             },
             "field_diffs": [],
@@ -412,6 +429,17 @@ def compare_excel_db_full() -> Dict[str, Any]:
         matched_db_keys: Set[Tuple[str, str]] = set()
         
         for sku, os_env in excel_sku_env_pairs:
+            # Check gender-specific exclusions first
+            if (sku, os_env) in GENDER_SPECIFIC_EXCLUSIONS:
+                excel_rows_for_key = [r for r in EXCEL_YES_ROWS if r[0] == sku and r[1] == os_env]
+                results["coverage"]["gender_specific_excluded"].append({
+                    "excel_sku": sku,
+                    "os_environment": os_env,
+                    "reason": "Gender-specific product - only available in opposite environment",
+                    "excel_ingredients": [r[4] for r in excel_rows_for_key]
+                })
+                continue
+            
             expected_handle = get_expected_db_handle(sku, os_env)
             
             # Handle products known to not be in DB
@@ -495,11 +523,15 @@ def compare_excel_db_full() -> Dict[str, Any]:
         conn.close()
         
         # Calculate summary - only count mappable products
-        mappable_pairs = len(excel_sku_env_pairs) - len(results["coverage"]["expected_not_in_db"])
+        excluded_count = (len(results["coverage"]["expected_not_in_db"]) + 
+                         len(results["coverage"]["gender_specific_excluded"]))
+        mappable_pairs = len(excel_sku_env_pairs) - excluded_count
+        
         results["summary"] = {
             "excel_unique_sku_env_pairs": len(excel_sku_env_pairs),
             "mappable_pairs": mappable_pairs,
             "expected_not_in_db_count": len(results["coverage"]["expected_not_in_db"]),
+            "gender_specific_excluded_count": len(results["coverage"]["gender_specific_excluded"]),
             "matched_count": len(results["coverage"]["matched"]),
             "missing_in_db_count": len(results["coverage"]["missing_in_db"]),
             "extra_in_db_count": len(results["coverage"]["extra_in_db"]),
@@ -538,7 +570,8 @@ def compare_excel_db_summary() -> Dict[str, Any]:
         "overall_status": full["overall_status"],
         "summary": full["summary"],
         "decision": full.get("decision", ""),
-        "expected_not_in_db": [p["excel_sku"] for p in full["coverage"]["expected_not_in_db"][:10]]
+        "expected_not_in_db": [p["excel_sku"] for p in full["coverage"]["expected_not_in_db"][:10]],
+        "gender_excluded": [f"{p['excel_sku']} ({p['os_environment']})" for p in full["coverage"]["gender_specific_excluded"]]
     }
 
 
@@ -578,6 +611,7 @@ def check_mapping() -> Dict[str, Any]:
     excel_skus = {row[0] for row in EXCEL_YES_ROWS}
     mapped_skus = set(EXCEL_SKU_TO_DB_BASE.keys())
     not_in_db_skus = EXCEL_PRODUCTS_NOT_IN_DB
+    gender_excluded_skus = {sku for sku, _ in GENDER_SPECIFIC_EXCLUSIONS}
     
     # SKUs that need mapping but don't have one
     unmapped = excel_skus - mapped_skus - not_in_db_skus
@@ -587,6 +621,7 @@ def check_mapping() -> Dict[str, Any]:
         "excel_unique_skus": len(excel_skus),
         "mapped_skus": len(mapped_skus),
         "not_in_db_skus": len(not_in_db_skus),
+        "gender_excluded_pairs": len(GENDER_SPECIFIC_EXCLUSIONS),
         "unmapped_skus": sorted(unmapped) if unmapped else [],
         "extra_mappings": sorted(extra_mappings) if extra_mappings else [],
         "all_covered": len(unmapped) == 0
