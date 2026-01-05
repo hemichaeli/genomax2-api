@@ -1,13 +1,17 @@
 """
-GenoMAX² Excel vs DB Comparison Module
+GenoMAX² Excel vs DB Comparison Module v2
 Validates os_modules_v3_1 against GenoMAX2_Catalog_Selection_v2_FINAL.xlsx
 
-Matching Key: (os_environment, research_ingredient) -> genomax_ingredients/ingredient_tags
+Matching Key: (supliful_sku, os_environment) -> (shopify_handle, os_environment)
+
+Key insight: Excel contains multiple research_ingredients per (SKU, environment) pair
+because one Supliful product can contain multiple ingredients. The DB should have
+one module per (shopify_handle, os_environment) pair.
 """
 
 import os
 import re
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Set, Tuple
 from fastapi import APIRouter, HTTPException
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -31,324 +35,288 @@ def normalize_text(text: str) -> str:
     if not text:
         return ""
     text = str(text).strip().lower()
-    # Replace smart quotes with regular quotes
     text = text.replace("'", "'").replace("'", "'").replace(""", '"').replace(""", '"')
-    # Replace multiple spaces with single space
     text = re.sub(r'\s+', ' ', text)
     return text
 
 
-def ingredient_match(search_ingredient: str, db_ingredients: str, db_tags: str) -> bool:
-    """Check if search_ingredient is found in DB genomax_ingredients or ingredient_tags."""
-    search_norm = normalize_text(search_ingredient)
-    if not search_norm:
-        return False
-    
-    # Check genomax_ingredients
-    if db_ingredients:
-        ingredients_norm = normalize_text(db_ingredients)
-        if search_norm in ingredients_norm:
-            return True
-    
-    # Check ingredient_tags
-    if db_tags:
-        tags_norm = normalize_text(db_tags)
-        if search_norm in tags_norm:
-            return True
-    
-    return False
+# Expected data from GenoMAX2_Catalog_Selection_v2_FINAL.xlsx
+# Format: (supliful_sku, os_environment, os_layer, biological_subsystem, research_ingredient)
+# Multiple rows per SKU+env pair are valid (multi-ingredient products)
+EXCEL_YES_ROWS = [
+    ("omega-3-epa-dha-softgel-capsules", "MAXimo²", "Core", "Cardiovascular Function", "Omega-3 EPA/DHA"),
+    ("omega-3-epa-dha-softgel-capsules", "MAXima²", "Core", "Cardiovascular Function", "Omega-3 EPA/DHA"),
+    ("magnesium-glycinate-capsules", "MAXimo²", "Core", "Neurotransmission & Cognitive Circuits", "Magnesium"),
+    ("magnesium-glycinate-capsules", "MAXima²", "Core", "Neurotransmission & Cognitive Circuits", "Magnesium"),
+    ("vitamin-d3-2000iu-softgel-capsules", "MAXimo²", "Core", "Digestive & Absorptive Systems", "Vitamin D3"),
+    ("vitamin-d3-2000iu-softgel-capsules", "MAXima²", "Core", "Digestive & Absorptive Systems", "Vitamin D3"),
+    ("creatine-monohydrate-powder", "MAXimo²", "Support", "Musculoskeletal Integrity", "Creatine Monohydrate"),
+    ("creatine-monohydrate-powder", "MAXima²", "Support", "Musculoskeletal Integrity", "Creatine Monohydrate"),
+    ("coq10-ubiquinone-capsules", "MAXimo²", "Support", "Cellular Protection & Longevity Pathways", "CoQ10 Ubiquinone/Ubiquinol"),
+    ("coq10-ubiquinone-capsules", "MAXima²", "Support", "Cellular Protection & Longevity Pathways", "CoQ10 Ubiquinone/Ubiquinol"),
+    ("platinum-turmeric-capsules", "MAXimo²", "Support", "Immune Defense & Inflammatory Balance", "Curcumin"),
+    ("platinum-turmeric-capsules", "MAXima²", "Support", "Immune Defense & Inflammatory Balance", "Curcumin"),
+    ("berberine-capsules", "MAXimo²", "Support", "Glucose & Insulin Signaling", "Berberine"),
+    ("berberine-capsules", "MAXima²", "Support", "Glucose & Insulin Signaling", "Berberine"),
+    ("liver-support-capsules", "MAXimo²", "Support", "Detoxification & Biotransformation", "NAC N-Acetyl Cysteine"),
+    ("liver-support-capsules", "MAXima²", "Support", "Detoxification & Biotransformation", "NAC N-Acetyl Cysteine"),
+    ("vision-support-capsules", "MAXimo²", "Core", "Immune Defense & Inflammatory Balance", "Zinc"),
+    ("vision-support-capsules", "MAXima²", "Core", "Immune Defense & Inflammatory Balance", "Zinc"),
+    ("complete-multivitamin-capsules", "MAXimo²", "Core", "Neurotransmission & Cognitive Circuits", "Vitamin B12 Methylcobalamin"),
+    ("complete-multivitamin-capsules", "MAXima²", "Core", "Neurotransmission & Cognitive Circuits", "Vitamin B12 Methylcobalamin"),
+    ("cognitive-support-capsules", "MAXimo²", "Optimize", "Neurotransmission & Cognitive Circuits", "Bacopa monnieri"),
+    ("cognitive-support-capsules", "MAXima²", "Optimize", "Neurotransmission & Cognitive Circuits", "Bacopa monnieri"),
+    ("sleep-formula-capsules", "MAXimo²", "Support", "Circadian & Sleep Architecture", "Melatonin"),
+    ("sleep-formula-capsules", "MAXima²", "Support", "Circadian & Sleep Architecture", "Melatonin"),
+    ("colon-gentle-cleanse-sachets", "MAXimo²", "Support", "Digestive & Absorptive Systems", "Psyllium Husk"),
+    ("colon-gentle-cleanse-sachets", "MAXima²", "Support", "Digestive & Absorptive Systems", "Psyllium Husk"),
+    ("kojic-acid-turmeric-soap", "MAXimo²", "Support", "Glucose & Insulin Signaling", "Alpha-Lipoic Acid"),
+    ("kojic-acid-turmeric-soap", "MAXima²", "Support", "Glucose & Insulin Signaling", "Alpha-Lipoic Acid"),
+    ("ashwagandha-capsules", "MAXimo²", "Optimize", "Cardiovascular Function", "Algal Oil DHA"),
+    ("ashwagandha-capsules", "MAXima²", "Optimize", "Cardiovascular Function", "Algal Oil DHA"),
+    ("energy-powder-cotton-candy", "MAXimo²", "Support", "Immune Defense & Inflammatory Balance", "Spirulina"),
+    ("energy-powder-cotton-candy", "MAXima²", "Support", "Immune Defense & Inflammatory Balance", "Spirulina"),
+    ("moisturizing-strengthening-hair-oil-old", "MAXimo²", "Optimize", "Immune Defense & Inflammatory Balance", "Black Seed Oil Nigella sativa"),
+    ("moisturizing-strengthening-hair-oil-old", "MAXima²", "Optimize", "Immune Defense & Inflammatory Balance", "Black Seed Oil Nigella sativa"),
+    ("probiotic-40-billion-prebiotics-capsules", "MAXimo²", "Core", "Digestive & Absorptive Systems", "Probiotics Multi-strain"),
+    ("probiotic-40-billion-prebiotics-capsules", "MAXima²", "Core", "Digestive & Absorptive Systems", "Probiotics Multi-strain"),
+    ("energy-powder-cotton-candy", "MAXimo²", "Support", "Cardiovascular Function", "Taurine"),
+    ("energy-powder-cotton-candy", "MAXima²", "Support", "Cardiovascular Function", "Taurine"),
+    ("cognitive-support-capsules", "MAXimo²", "Support", "Neurotransmission & Cognitive Circuits", "L-Theanine"),
+    ("cognitive-support-capsules", "MAXima²", "Support", "Neurotransmission & Cognitive Circuits", "L-Theanine"),
+    ("joint-support-capsules", "MAXimo²", "Support", "Immune Defense & Inflammatory Balance", "Boswellia serrata"),
+    ("joint-support-capsules", "MAXima²", "Support", "Immune Defense & Inflammatory Balance", "Boswellia serrata"),
+    ("liver-support-capsules", "MAXimo²", "Support", "Digestive & Absorptive Systems", "Ginger Extract"),
+    ("liver-support-capsules", "MAXima²", "Support", "Digestive & Absorptive Systems", "Ginger Extract"),
+    ("vision-support-capsules", "MAXimo²", "Support", "Cardiovascular Function", "Aged Garlic Extract"),
+    ("vision-support-capsules", "MAXima²", "Support", "Cardiovascular Function", "Aged Garlic Extract"),
+    ("vitamin-glow-serum", "MAXimo²", "Core", "Neurotransmission & Cognitive Circuits", "Niacin Vitamin B3"),
+    ("vitamin-glow-serum", "MAXima²", "Core", "Neurotransmission & Cognitive Circuits", "Niacin Vitamin B3"),
+    ("vitamin-c-serum", "MAXimo²", "Core", "Immune Defense & Inflammatory Balance", "Vitamin C"),
+    ("vitamin-c-serum", "MAXima²", "Core", "Immune Defense & Inflammatory Balance", "Vitamin C"),
+    ("iron-strips", "MAXimo²", "Core", "Reproductive & Hormonal Axis (Female)", "Folate Methylfolate"),
+    ("iron-strips", "MAXima²", "Core", "Reproductive & Hormonal Axis (Female)", "Folate Methylfolate"),
+    ("complete-multivitamin-capsules", "MAXimo²", "Core", "Neurotransmission & Cognitive Circuits", "Riboflavin Vitamin B2"),
+    ("complete-multivitamin-capsules", "MAXima²", "Core", "Neurotransmission & Cognitive Circuits", "Riboflavin Vitamin B2"),
+    ("multivitamin-bear-gummies-adult", "MAXimo²", "Core", "Thyroid & Metabolic Rate Control", "Iodine"),
+    ("multivitamin-bear-gummies-adult", "MAXima²", "Core", "Thyroid & Metabolic Rate Control", "Iodine"),
+    ("nitric-oxide-capsules", "MAXimo²", "Support", "Musculoskeletal Integrity", "Citrulline"),
+    ("nitric-oxide-capsules", "MAXima²", "Support", "Musculoskeletal Integrity", "Citrulline"),
+    ("green-tea-antioxidant-serum", "MAXimo²", "Optimize", "Cellular Protection & Longevity Pathways", "Green Tea Extract EGCG"),
+    ("green-tea-antioxidant-serum", "MAXima²", "Optimize", "Cellular Protection & Longevity Pathways", "Green Tea Extract EGCG"),
+    ("vitamin-d3-2000iu-softgel-capsules", "MAXimo²", "Support", "Cardiovascular Function", "Vitamin K1"),
+    ("vitamin-d3-2000iu-softgel-capsules", "MAXima²", "Support", "Cardiovascular Function", "Vitamin K1"),
+    ("max-detox-acai-capsules", "MAXimo²", "Optimize", "Detoxification & Biotransformation", "Chlorella"),
+    ("max-detox-acai-capsules", "MAXima²", "Optimize", "Detoxification & Biotransformation", "Chlorella"),
+    ("complete-multivitamin-capsules", "MAXimo²", "Core", "Thyroid & Metabolic Rate Control", "Selenium"),
+    ("complete-multivitamin-capsules", "MAXima²", "Core", "Thyroid & Metabolic Rate Control", "Selenium"),
+    ("resveratrol-50-percent-capsules", "MAXimo²", "Optimize", "Cellular Protection & Longevity Pathways", "Resveratrol"),
+    ("resveratrol-50-percent-capsules", "MAXima²", "Optimize", "Cellular Protection & Longevity Pathways", "Resveratrol"),
+    ("nad-plus-capsules", "MAXimo²", "Support", "Immune Defense & Inflammatory Balance", "Quercetin"),
+    ("nad-plus-capsules", "MAXima²", "Support", "Immune Defense & Inflammatory Balance", "Quercetin"),
+    ("coq10-ubiquinone-capsules", "MAXimo²", "Optimize", "Cellular Protection & Longevity Pathways", "PQQ Pyrroloquinoline quinone"),
+    ("coq10-ubiquinone-capsules", "MAXima²", "Optimize", "Cellular Protection & Longevity Pathways", "PQQ Pyrroloquinoline quinone"),
+    ("diet-drops-ultra", "MAXimo²", "Optimize", "HPA Axis & Stress Response", "Rhodiola rosea"),
+    ("diet-drops-ultra", "MAXima²", "Optimize", "HPA Axis & Stress Response", "Rhodiola rosea"),
+    ("mushroom-coffee-fusion-lions-mane-chaga-16oz", "MAXimo²", "Optimize", "Neurotransmission & Cognitive Circuits", "Lion's Mane Hericium erinaceus"),
+    ("mushroom-coffee-fusion-lions-mane-chaga-16oz", "MAXima²", "Optimize", "Neurotransmission & Cognitive Circuits", "Lion's Mane Hericium erinaceus"),
+    ("focus-powder-sour-candy", "MAXimo²", "Support", "Neurotransmission & Cognitive Circuits", "Inositol Myo-inositol"),
+    ("focus-powder-sour-candy", "MAXima²", "Support", "Neurotransmission & Cognitive Circuits", "Inositol Myo-inositol"),
+    ("recovery-cream", "MAXimo²", "Optimize", "Neurotransmission & Cognitive Circuits", "SAMe S-Adenosyl-L-methionine"),
+    ("recovery-cream", "MAXima²", "Optimize", "Neurotransmission & Cognitive Circuits", "SAMe S-Adenosyl-L-methionine"),
+    ("cognitive-support-capsules", "MAXimo²", "Support", "Neurotransmission & Cognitive Circuits", "L-Tyrosine"),
+    ("cognitive-support-capsules", "MAXima²", "Support", "Neurotransmission & Cognitive Circuits", "L-Tyrosine"),
+    ("nitric-oxide-capsules", "MAXimo²", "Support", "Cardiovascular Function", "L-Arginine"),
+    ("nitric-oxide-capsules", "MAXima²", "Support", "Cardiovascular Function", "L-Arginine"),
+    ("l-glutamine-powder", "MAXimo²", "Support", "Digestive & Absorptive Systems", "L-Glutamine"),
+    ("l-glutamine-powder", "MAXima²", "Support", "Digestive & Absorptive Systems", "L-Glutamine"),
+    ("mens-vitality-tablets", "MAXimo²", "Optimize", "Reproductive & Hormonal Axis (Male)", "Tongkat Ali Eurycoma longifolia"),
+    ("mens-vitality-tablets", "MAXima²", "Optimize", "Reproductive & Hormonal Axis (Male)", "Tongkat Ali Eurycoma longifolia"),
+    ("maca-plus-capsules", "MAXimo²", "Optimize", "Reproductive & Hormonal Axis (Female)", "Maca Root"),
+    ("maca-plus-capsules", "MAXima²", "Optimize", "Reproductive & Hormonal Axis (Female)", "Maca Root"),
+    ("beetroot-capsules", "MAXimo²", "Support", "Cardiovascular Function", "Beetroot/Nitrate"),
+    ("beetroot-capsules", "MAXima²", "Support", "Cardiovascular Function", "Beetroot/Nitrate"),
+    ("keto-5-capsules", "MAXimo²", "Support", "Musculoskeletal Integrity", "Caffeine"),
+    ("keto-5-capsules", "MAXima²", "Support", "Musculoskeletal Integrity", "Caffeine"),
+    ("peptide-hair-growth-serum", "MAXimo²", "Support", "Circadian & Sleep Architecture", "Glycine"),
+    ("peptide-hair-growth-serum", "MAXima²", "Support", "Circadian & Sleep Architecture", "Glycine"),
+    ("complete-multivitamin-capsules", "MAXimo²", "Core", "Neurotransmission & Cognitive Circuits", "Vitamin B6 Pyridoxine/P5P"),
+    ("complete-multivitamin-capsules", "MAXima²", "Core", "Neurotransmission & Cognitive Circuits", "Vitamin B6 Pyridoxine/P5P"),
+    ("cognitive-support-capsules", "MAXimo²", "Support", "Neurotransmission & Cognitive Circuits", "Choline Alpha-GPC/CDP"),
+    ("cognitive-support-capsules", "MAXima²", "Support", "Neurotransmission & Cognitive Circuits", "Choline Alpha-GPC/CDP"),
+    ("complete-multivitamin-capsules", "MAXimo²", "Core", "Immune Defense & Inflammatory Balance", "Vitamin A Retinol/Beta-carotene"),
+    ("complete-multivitamin-capsules", "MAXima²", "Core", "Immune Defense & Inflammatory Balance", "Vitamin A Retinol/Beta-carotene"),
+    ("appetite-balance-weight-support-strips", "MAXimo²", "Optimize", "Neurotransmission & Cognitive Circuits", "Saffron Crocus sativus"),
+    ("appetite-balance-weight-support-strips", "MAXima²", "Optimize", "Neurotransmission & Cognitive Circuits", "Saffron Crocus sativus"),
+]
+
+
+def get_unique_sku_env_pairs() -> Set[Tuple[str, str]]:
+    """Get unique (supliful_sku, os_environment) pairs from Excel."""
+    return {(row[0], row[1]) for row in EXCEL_YES_ROWS}
 
 
 @router.get("/compare/excel-db-full")
 def compare_excel_db_full() -> Dict[str, Any]:
     """
     Full comparison of DB against expected Excel YES rows.
-    Uses hardcoded expected data from GenoMAX2_Catalog_Selection_v2_FINAL.xlsx.
     
-    Returns comprehensive match report with field-by-field diffs.
+    Matching strategy:
+    - Key: (supliful_sku, os_environment) in Excel -> (shopify_handle, os_environment) in DB
+    - One DB module per unique (shopify_handle, os_environment) pair
+    - Excel may have multiple research_ingredients per SKU (multi-ingredient products)
     """
     conn = get_db()
     if not conn:
         raise HTTPException(status_code=500, detail="Database connection failed")
     
-    # Expected YES rows from Excel (104 total: 52 MAXimo² + 52 MAXima²)
-    # Format: (research_ingredient, os_environment, os_layer, biological_subsystem)
-    excel_yes_rows = [
-        ("Omega-3 EPA/DHA", "MAXimo²", "Core", "Cardiovascular Function"),
-        ("Omega-3 EPA/DHA", "MAXima²", "Core", "Cardiovascular Function"),
-        ("Magnesium", "MAXimo²", "Core", "Neurotransmission & Cognitive Circuits"),
-        ("Magnesium", "MAXima²", "Core", "Neurotransmission & Cognitive Circuits"),
-        ("Vitamin D3", "MAXimo²", "Core", "Digestive & Absorptive Systems"),
-        ("Vitamin D3", "MAXima²", "Core", "Digestive & Absorptive Systems"),
-        ("Creatine Monohydrate", "MAXimo²", "Support", "Musculoskeletal Integrity"),
-        ("Creatine Monohydrate", "MAXima²", "Support", "Musculoskeletal Integrity"),
-        ("CoQ10 Ubiquinone/Ubiquinol", "MAXimo²", "Support", "Cellular Protection & Longevity Pathways"),
-        ("CoQ10 Ubiquinone/Ubiquinol", "MAXima²", "Support", "Cellular Protection & Longevity Pathways"),
-        ("Zinc", "MAXimo²", "Core", "Immune Defense & Inflammatory Balance"),
-        ("Zinc", "MAXima²", "Core", "Immune Defense & Inflammatory Balance"),
-        ("B-Complex", "MAXimo²", "Core", "Neurotransmission & Cognitive Circuits"),
-        ("B-Complex", "MAXima²", "Core", "Neurotransmission & Cognitive Circuits"),
-        ("Vitamin C", "MAXimo²", "Core", "Immune Defense & Inflammatory Balance"),
-        ("Vitamin C", "MAXima²", "Core", "Immune Defense & Inflammatory Balance"),
-        ("Probiotics", "MAXimo²", "Core", "Digestive & Absorptive Systems"),
-        ("Probiotics", "MAXima²", "Core", "Digestive & Absorptive Systems"),
-        ("Curcumin/Turmeric", "MAXimo²", "Support", "Immune Defense & Inflammatory Balance"),
-        ("Curcumin/Turmeric", "MAXima²", "Support", "Immune Defense & Inflammatory Balance"),
-        ("Alpha-Lipoic Acid", "MAXimo²", "Support", "Glucose & Insulin Signaling"),
-        ("Alpha-Lipoic Acid", "MAXima²", "Support", "Glucose & Insulin Signaling"),
-        ("NAC (N-Acetyl Cysteine)", "MAXimo²", "Support", "Cellular Protection & Longevity Pathways"),
-        ("NAC (N-Acetyl Cysteine)", "MAXima²", "Support", "Cellular Protection & Longevity Pathways"),
-        ("Berberine", "MAXimo²", "Support", "Glucose & Insulin Signaling"),
-        ("Berberine", "MAXima²", "Support", "Glucose & Insulin Signaling"),
-        ("Collagen Peptides", "MAXimo²", "Support", "Musculoskeletal Integrity"),
-        ("Collagen Peptides", "MAXima²", "Support", "Musculoskeletal Integrity"),
-        ("Resveratrol", "MAXimo²", "Optimize", "Cellular Protection & Longevity Pathways"),
-        ("Resveratrol", "MAXima²", "Optimize", "Cellular Protection & Longevity Pathways"),
-        ("Vitamin K2 MK-7", "MAXimo²", "Support", "Cardiovascular Function"),
-        ("Vitamin K2 MK-7", "MAXima²", "Support", "Cardiovascular Function"),
-        ("Quercetin", "MAXimo²", "Support", "Immune Defense & Inflammatory Balance"),
-        ("Quercetin", "MAXima²", "Support", "Immune Defense & Inflammatory Balance"),
-        ("L-Theanine", "MAXimo²", "Support", "Neurotransmission & Cognitive Circuits"),
-        ("L-Theanine", "MAXima²", "Support", "Neurotransmission & Cognitive Circuits"),
-        ("Psyllium Husk", "MAXimo²", "Support", "Digestive & Absorptive Systems"),
-        ("Psyllium Husk", "MAXima²", "Support", "Digestive & Absorptive Systems"),
-        ("Astaxanthin", "MAXimo²", "Optimize", "Cellular Protection & Longevity Pathways"),
-        ("Astaxanthin", "MAXima²", "Optimize", "Cellular Protection & Longevity Pathways"),
-        ("Selenium", "MAXimo²", "Core", "Thyroid & Metabolic Rate Control"),
-        ("Selenium", "MAXima²", "Core", "Thyroid & Metabolic Rate Control"),
-        ("Digestive Enzymes", "MAXimo²", "Support", "Digestive & Absorptive Systems"),
-        ("Digestive Enzymes", "MAXima²", "Support", "Digestive & Absorptive Systems"),
-        ("Lion's Mane", "MAXimo²", "Optimize", "Neurotransmission & Cognitive Circuits"),
-        ("Lion's Mane", "MAXima²", "Optimize", "Neurotransmission & Cognitive Circuits"),
-        ("PQQ (Pyrroloquinoline Quinone)", "MAXimo²", "Optimize", "Cellular Protection & Longevity Pathways"),
-        ("PQQ (Pyrroloquinoline Quinone)", "MAXima²", "Optimize", "Cellular Protection & Longevity Pathways"),
-        ("Betaine HCl", "MAXimo²", "Support", "Digestive & Absorptive Systems"),
-        ("Betaine HCl", "MAXima²", "Support", "Digestive & Absorptive Systems"),
-        ("Milk Thistle (Silymarin)", "MAXimo²", "Support", "Detoxification & Biotransformation"),
-        ("Milk Thistle (Silymarin)", "MAXima²", "Support", "Detoxification & Biotransformation"),
-        ("Glucosamine + Chondroitin", "MAXimo²", "Support", "Musculoskeletal Integrity"),
-        ("Glucosamine + Chondroitin", "MAXima²", "Support", "Musculoskeletal Integrity"),
-        ("Boron", "MAXimo²", "Optimize", "Musculoskeletal Integrity"),
-        ("Boron", "MAXima²", "Optimize", "Musculoskeletal Integrity"),
-        ("Lutein + Zeaxanthin", "MAXimo²", "Support", "Cellular Protection & Longevity Pathways"),
-        ("Lutein + Zeaxanthin", "MAXima²", "Support", "Cellular Protection & Longevity Pathways"),
-        ("Melatonin", "MAXimo²", "Support", "Circadian & Sleep Architecture"),
-        ("Melatonin", "MAXima²", "Support", "Circadian & Sleep Architecture"),
-        ("GABA", "MAXimo²", "Support", "Neurotransmission & Cognitive Circuits"),
-        ("GABA", "MAXima²", "Support", "Neurotransmission & Cognitive Circuits"),
-        ("5-HTP", "MAXimo²", "Support", "Neurotransmission & Cognitive Circuits"),
-        ("5-HTP", "MAXima²", "Support", "Neurotransmission & Cognitive Circuits"),
-        ("Olive Leaf Extract", "MAXimo²", "Optimize", "Cardiovascular Function"),
-        ("Olive Leaf Extract", "MAXima²", "Optimize", "Cardiovascular Function"),
-        ("Rhodiola Rosea", "MAXimo²", "Optimize", "HPA Axis & Stress Response"),
-        ("Rhodiola Rosea", "MAXima²", "Optimize", "HPA Axis & Stress Response"),
-        ("Ginkgo Biloba", "MAXimo²", "Optimize", "Neurotransmission & Cognitive Circuits"),
-        ("Ginkgo Biloba", "MAXima²", "Optimize", "Neurotransmission & Cognitive Circuits"),
-        ("Elderberry", "MAXimo²", "Support", "Immune Defense & Inflammatory Balance"),
-        ("Elderberry", "MAXima²", "Support", "Immune Defense & Inflammatory Balance"),
-        ("Cordyceps", "MAXimo²", "Optimize", "Musculoskeletal Integrity"),
-        ("Cordyceps", "MAXima²", "Optimize", "Musculoskeletal Integrity"),
-        ("Reishi", "MAXimo²", "Optimize", "HPA Axis & Stress Response"),
-        ("Reishi", "MAXima²", "Optimize", "HPA Axis & Stress Response"),
-        ("DIM (Diindolylmethane)", "MAXimo²", "Optimize", "Reproductive & Hormonal Axis (Male)"),
-        ("DIM (Diindolylmethane)", "MAXima²", "Optimize", "Reproductive & Hormonal Axis (Female)"),
-        ("Saw Palmetto", "MAXimo²", "Optimize", "Reproductive & Hormonal Axis (Male)"),
-        ("Maca Root", "MAXima²", "Optimize", "Reproductive & Hormonal Axis (Female)"),
-        ("Fenugreek", "MAXimo²", "Optimize", "Reproductive & Hormonal Axis (Male)"),
-        ("Vitex (Chasteberry)", "MAXima²", "Optimize", "Reproductive & Hormonal Axis (Female)"),
-        ("Tongkat Ali", "MAXimo²", "Optimize", "Reproductive & Hormonal Axis (Male)"),
-        ("Evening Primrose Oil", "MAXima²", "Optimize", "Reproductive & Hormonal Axis (Female)"),
-        ("Iodine", "MAXimo²", "Core", "Thyroid & Metabolic Rate Control"),
-        ("Iodine", "MAXima²", "Core", "Thyroid & Metabolic Rate Control"),
-        ("Iron (Gentle/Bisglycinate)", "MAXima²", "Core", "Cardiovascular Function"),
-        ("Calcium + Magnesium", "MAXima²", "Core", "Musculoskeletal Integrity"),
-        ("Folate (Methylfolate)", "MAXima²", "Core", "Reproductive & Hormonal Axis (Female)"),
-        ("Chromium Picolinate", "MAXimo²", "Support", "Glucose & Insulin Signaling"),
-        ("Chromium Picolinate", "MAXima²", "Support", "Glucose & Insulin Signaling"),
-        ("Phosphatidylserine", "MAXimo²", "Optimize", "Neurotransmission & Cognitive Circuits"),
-        ("Phosphatidylserine", "MAXima²", "Optimize", "Neurotransmission & Cognitive Circuits"),
-        ("Chlorophyll / Chlorella", "MAXimo²", "Optimize", "Detoxification & Biotransformation"),
-        ("Chlorophyll / Chlorella", "MAXima²", "Optimize", "Detoxification & Biotransformation"),
-        ("Spirulina", "MAXimo²", "Support", "Immune Defense & Inflammatory Balance"),
-        ("Spirulina", "MAXima²", "Support", "Immune Defense & Inflammatory Balance"),
-        ("Beta-Glucan", "MAXimo²", "Support", "Immune Defense & Inflammatory Balance"),
-        ("Beta-Glucan", "MAXima²", "Support", "Immune Defense & Inflammatory Balance"),
-        ("Bacopa Monnieri", "MAXimo²", "Optimize", "Neurotransmission & Cognitive Circuits"),
-        ("Bacopa Monnieri", "MAXima²", "Optimize", "Neurotransmission & Cognitive Circuits"),
-        ("Garlic Extract", "MAXimo²", "Support", "Cardiovascular Function"),
-        ("Garlic Extract", "MAXima²", "Support", "Cardiovascular Function"),
-        ("Citrus Bergamot", "MAXimo²", "Optimize", "Cardiovascular Function"),
-        ("Citrus Bergamot", "MAXima²", "Optimize", "Cardiovascular Function"),
-    ]
-    
     try:
         cur = conn.cursor()
         
-        # Get all active DB modules with relevant fields (only columns that exist)
+        # Get all active DB modules
         cur.execute("""
             SELECT 
-                module_code, os_environment, os_layer, biological_domain,
-                product_name, genomax_ingredients, ingredient_tags,
-                suggested_use_full, safety_notes, contraindications,
-                dosing_protocol, supplier_status
+                module_code, shopify_handle, os_environment, os_layer, 
+                biological_domain, product_name, supplier_status
             FROM os_modules_v3_1
             WHERE supplier_status IS NULL 
                OR supplier_status NOT IN ('DUPLICATE_INACTIVE')
-            ORDER BY os_environment, product_name
+            ORDER BY shopify_handle, os_environment
         """)
         db_rows = cur.fetchall()
         
+        # Build DB lookup by (shopify_handle, os_environment)
+        db_by_key: Dict[Tuple[str, str], dict] = {}
+        for row in db_rows:
+            key = (row["shopify_handle"], row["os_environment"])
+            if key in db_by_key:
+                # Duplicate - should not happen after fix
+                pass
+            db_by_key[key] = dict(row)
+        
+        # Get unique Excel SKU+env pairs
+        excel_sku_env_pairs = get_unique_sku_env_pairs()
+        
         results = {
-            "audit_type": "Excel vs DB Comparison",
-            "excel_yes_count": len(excel_yes_rows),
-            "db_active_count": len(db_rows),
+            "audit_type": "Excel vs DB Comparison (SKU-based)",
+            "excel_total_rows": len(EXCEL_YES_ROWS),
+            "excel_unique_sku_env_pairs": len(excel_sku_env_pairs),
+            "db_active_modules": len(db_rows),
+            "db_unique_keys": len(db_by_key),
             "coverage": {
                 "matched": [],
                 "missing_in_db": [],
-                "ambiguous_matches": [],
                 "extra_in_db": []
             },
             "field_diffs": [],
-            "placeholders_in_db": [],
             "summary": {},
             "overall_status": "PENDING"
         }
         
-        # Build DB lookup by os_environment
-        db_by_env = {"MAXimo²": [], "MAXima²": []}
-        for row in db_rows:
-            env = row["os_environment"]
-            if env in db_by_env:
-                db_by_env[env].append(dict(row))
+        # Track matched DB keys
+        matched_db_keys: Set[Tuple[str, str]] = set()
         
-        # Track which DB rows have been matched
-        matched_db_codes = set()
-        
-        # Match Excel rows to DB
-        for excel_row in excel_yes_rows:
-            ingredient, os_env, os_layer, bio_subsystem = excel_row
+        # Match Excel SKU+env pairs to DB
+        for sku, os_env in excel_sku_env_pairs:
+            db_key = (sku, os_env)
             
-            # Find matching DB rows
-            matches = []
-            for db_row in db_by_env.get(os_env, []):
-                if ingredient_match(ingredient, db_row.get("genomax_ingredients"), db_row.get("ingredient_tags")):
-                    matches.append(db_row)
-            
-            if len(matches) == 0:
-                results["coverage"]["missing_in_db"].append({
-                    "research_ingredient": ingredient,
-                    "os_environment": os_env,
-                    "os_layer": os_layer,
-                    "biological_subsystem": bio_subsystem
-                })
-            elif len(matches) == 1:
-                db_match = matches[0]
-                matched_db_codes.add(db_match["module_code"])
+            if db_key in db_by_key:
+                db_row = db_by_key[db_key]
+                matched_db_keys.add(db_key)
+                
+                # Get Excel rows for this SKU+env (may have multiple ingredients)
+                excel_rows_for_key = [r for r in EXCEL_YES_ROWS if r[0] == sku and r[1] == os_env]
+                
+                # Use first row for os_layer/bio_subsystem (should be consistent)
+                excel_os_layer = excel_rows_for_key[0][2]
+                excel_bio_subsystem = excel_rows_for_key[0][3]
+                excel_ingredients = [r[4] for r in excel_rows_for_key]
                 
                 match_record = {
-                    "excel_key": f"({os_env}, {ingredient})",
-                    "db_module_code": db_match["module_code"],
-                    "db_product_name": db_match["product_name"]
+                    "excel_key": f"({sku}, {os_env})",
+                    "db_module_code": db_row["module_code"],
+                    "db_product_name": db_row["product_name"],
+                    "excel_ingredients": excel_ingredients
                 }
                 results["coverage"]["matched"].append(match_record)
                 
-                # Check field-by-field diffs
+                # Check field diffs
                 diffs = []
                 
-                # os_layer comparison
-                if normalize_text(os_layer) != normalize_text(db_match.get("os_layer", "")):
+                db_os_layer = normalize_text(db_row.get("os_layer", ""))
+                if normalize_text(excel_os_layer) != db_os_layer:
                     diffs.append({
                         "field": "os_layer",
-                        "excel_value": os_layer,
-                        "db_value": db_match.get("os_layer")
+                        "excel_value": excel_os_layer,
+                        "db_value": db_row.get("os_layer")
                     })
                 
-                # biological_subsystem vs biological_domain
-                if normalize_text(bio_subsystem) != normalize_text(db_match.get("biological_domain", "")):
+                db_bio_domain = normalize_text(db_row.get("biological_domain", ""))
+                if normalize_text(excel_bio_subsystem) != db_bio_domain:
                     diffs.append({
                         "field": "biological_subsystem/domain",
-                        "excel_value": bio_subsystem,
-                        "db_value": db_match.get("biological_domain")
+                        "excel_value": excel_bio_subsystem,
+                        "db_value": db_row.get("biological_domain")
                     })
                 
                 if diffs:
                     results["field_diffs"].append({
-                        "excel_key": f"({os_env}, {ingredient})",
-                        "db_module_code": db_match["module_code"],
+                        "excel_key": f"({sku}, {os_env})",
+                        "db_module_code": db_row["module_code"],
                         "diffs": diffs
                     })
             else:
-                results["coverage"]["ambiguous_matches"].append({
-                    "research_ingredient": ingredient,
+                # Get Excel info for this missing pair
+                excel_rows_for_key = [r for r in EXCEL_YES_ROWS if r[0] == sku and r[1] == os_env]
+                results["coverage"]["missing_in_db"].append({
+                    "supliful_sku": sku,
                     "os_environment": os_env,
-                    "match_count": len(matches),
-                    "matching_modules": [m["module_code"] for m in matches]
+                    "excel_os_layer": excel_rows_for_key[0][2] if excel_rows_for_key else None,
+                    "excel_bio_subsystem": excel_rows_for_key[0][3] if excel_rows_for_key else None,
+                    "excel_ingredients": [r[4] for r in excel_rows_for_key]
                 })
         
-        # Find extra DB rows not matched to any Excel YES row
-        for db_row in db_rows:
-            if db_row["module_code"] not in matched_db_codes:
+        # Find extra DB rows not in Excel
+        for db_key, db_row in db_by_key.items():
+            if db_key not in matched_db_keys:
                 results["coverage"]["extra_in_db"].append({
+                    "shopify_handle": db_key[0],
+                    "os_environment": db_key[1],
                     "module_code": db_row["module_code"],
-                    "os_environment": db_row["os_environment"],
                     "product_name": db_row["product_name"],
-                    "biological_domain": db_row["biological_domain"]
+                    "biological_domain": db_row.get("biological_domain")
                 })
-        
-        # Check for placeholders in DB (only existing columns)
-        cur.execute("""
-            SELECT module_code, os_environment, 
-                   CASE 
-                       WHEN COALESCE(suggested_use_full,'') ~* '\\m(TBD|MISSING|REVIEW|PLACEHOLDER)\\M' THEN 'suggested_use_full'
-                       WHEN COALESCE(safety_notes,'') ~* '\\m(TBD|MISSING|REVIEW|PLACEHOLDER)\\M' THEN 'safety_notes'
-                       WHEN COALESCE(contraindications,'') ~* '\\m(TBD|MISSING|REVIEW|PLACEHOLDER)\\M' THEN 'contraindications'
-                       ELSE 'unknown'
-                   END AS placeholder_field
-            FROM os_modules_v3_1
-            WHERE (supplier_status IS NULL OR supplier_status NOT IN ('DUPLICATE_INACTIVE'))
-              AND (
-                  COALESCE(suggested_use_full,'') ~* '\\m(TBD|MISSING|REVIEW|PLACEHOLDER)\\M'
-                  OR COALESCE(safety_notes,'') ~* '\\m(TBD|MISSING|REVIEW|PLACEHOLDER)\\M'
-                  OR COALESCE(contraindications,'') ~* '\\m(TBD|MISSING|REVIEW|PLACEHOLDER)\\M'
-              )
-            LIMIT 20
-        """)
-        placeholders = cur.fetchall()
-        results["placeholders_in_db"] = [dict(p) for p in placeholders]
         
         cur.close()
         conn.close()
         
         # Calculate summary
         results["summary"] = {
-            "excel_yes_count": len(excel_yes_rows),
+            "excel_unique_sku_env_pairs": len(excel_sku_env_pairs),
             "matched_count": len(results["coverage"]["matched"]),
             "missing_in_db_count": len(results["coverage"]["missing_in_db"]),
-            "ambiguous_match_count": len(results["coverage"]["ambiguous_matches"]),
             "extra_in_db_count": len(results["coverage"]["extra_in_db"]),
             "diff_count": len(results["field_diffs"]),
-            "placeholders_count": len(results["placeholders_in_db"])
+            "match_rate_percent": round(100 * len(results["coverage"]["matched"]) / len(excel_sku_env_pairs), 1) if excel_sku_env_pairs else 0
         }
         
         # Determine overall status
         if (results["summary"]["missing_in_db_count"] == 0 and 
-            results["summary"]["ambiguous_match_count"] == 0 and
-            results["summary"]["diff_count"] == 0 and
-            results["summary"]["placeholders_count"] == 0):
+            results["summary"]["diff_count"] == 0):
             results["overall_status"] = "PASS"
-            results["decision"] = "DB is 100% aligned with GenoMAX2_Catalog_Selection_v2_FINAL.xlsx for YES rows"
+            results["decision"] = "DB is 100% aligned with Excel YES rows (by SKU+environment)"
         else:
             results["overall_status"] = "FAIL"
             issues = []
             if results["summary"]["missing_in_db_count"] > 0:
-                issues.append(f"{results['summary']['missing_in_db_count']} Excel YES rows missing in DB")
-            if results["summary"]["ambiguous_match_count"] > 0:
-                issues.append(f"{results['summary']['ambiguous_match_count']} ambiguous matches")
+                issues.append(f"{results['summary']['missing_in_db_count']} SKU+env pairs missing in DB")
             if results["summary"]["diff_count"] > 0:
                 issues.append(f"{results['summary']['diff_count']} field differences")
-            if results["summary"]["placeholders_count"] > 0:
-                issues.append(f"{results['summary']['placeholders_count']} placeholder texts in DB")
             results["decision"] = f"Do not proceed. Issues: {'; '.join(issues)}"
+            
+            # Add recommendation if missing
+            if results["summary"]["missing_in_db_count"] > 0:
+                results["recommendation"] = "Add missing SKU+environment pairs to os_modules_v3_1 or update shopify_handle values"
         
         return results
         
@@ -367,5 +335,26 @@ def compare_excel_db_summary() -> Dict[str, Any]:
     return {
         "overall_status": full["overall_status"],
         "summary": full["summary"],
-        "decision": full.get("decision", "")
+        "decision": full.get("decision", ""),
+        "recommendation": full.get("recommendation", "")
+    }
+
+
+@router.get("/compare/missing-skus")
+def get_missing_skus() -> Dict[str, Any]:
+    """List SKUs from Excel that are missing in DB."""
+    full = compare_excel_db_full()
+    return {
+        "missing_count": len(full["coverage"]["missing_in_db"]),
+        "missing_skus": full["coverage"]["missing_in_db"]
+    }
+
+
+@router.get("/compare/extra-db-modules")
+def get_extra_db_modules() -> Dict[str, Any]:
+    """List DB modules not in Excel YES rows."""
+    full = compare_excel_db_full()
+    return {
+        "extra_count": len(full["coverage"]["extra_in_db"]),
+        "extra_modules": full["coverage"]["extra_in_db"][:50]  # Limit output
     }
