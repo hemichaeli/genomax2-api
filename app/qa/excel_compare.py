@@ -1,11 +1,11 @@
 """
-GenoMAX² Excel vs DB Comparison Module v4
+GenoMAX² Excel vs DB Comparison Module v5
 Validates os_modules_v3_1 against GenoMAX2_Catalog_Selection_v2_FINAL.xlsx
 
-MATCHING STRATEGY (v4):
-- Instead of assuming a pattern, we build an explicit mapping from
-  Excel supliful_sku to DB shopify_handle
-- This handles cases where DB uses shorter names than Excel
+MATCHING STRATEGY (v5):
+- Explicit mapping from Excel supliful_sku to DB shopify_handle base
+- Handles cases where DB uses different naming conventions
+- Tracks products in Excel that don't exist in DB
 """
 
 import os
@@ -40,10 +40,30 @@ def normalize_text(text: str) -> str:
 
 
 # ============================================================================
+# EXCEL PRODUCTS NOT IN DATABASE
+# ============================================================================
+# These products are in Excel YES rows but have no matching product in DB.
+# They will be reported as "expected missing" rather than errors.
+# ============================================================================
+
+EXCEL_PRODUCTS_NOT_IN_DB = {
+    "kojic-acid-turmeric-soap",              # No DB match - cosmetic product
+    "moisturizing-strengthening-hair-oil-old",  # No DB match - hair oil
+    "green-tea-antioxidant-serum",           # No DB match - serum
+    "vitamin-glow-serum",                    # No DB match - serum
+    "vitamin-c-serum",                       # No DB match - serum
+    "recovery-cream",                        # No DB match - cream
+    "peptide-hair-growth-serum",             # No DB match - serum
+}
+
+
+# ============================================================================
 # EXCEL TO DB HANDLE MAPPING
 # ============================================================================
 # Built by comparing Excel supliful_sku to actual DB shopify_handle base names
 # Excel SKU -> DB handle base (without -maximo/-maxima suffix)
+# 
+# Verified against actual DB values 2026-01-05
 # ============================================================================
 
 EXCEL_SKU_TO_DB_BASE = {
@@ -58,7 +78,7 @@ EXCEL_SKU_TO_DB_BASE = {
     "multivitamin-bear-gummies-adult": "multivitamin-bear-gummies-adult",
     "mushroom-coffee-fusion-lions-mane-chaga-16oz": "mushroom-coffee-fusion-lions-mane-chaga-16oz",
     
-    # Mappings where DB uses shorter name (without -capsules, -powder, etc.)
+    # Mappings where DB uses shorter/different name
     "ashwagandha-capsules": "ashwagandha",
     "berberine-capsules": "berberine",
     "cognitive-support-capsules": "cognitive-support",
@@ -66,37 +86,45 @@ EXCEL_SKU_TO_DB_BASE = {
     "complete-multivitamin-capsules": "complete-multivitamin",
     "coq10-ubiquinone-capsules": "coq10-ubiquinone",
     "creatine-monohydrate-powder": "creatine-monohydrate",
-    "green-tea-antioxidant-serum": "green-tea-antioxidant",
     "joint-support-capsules": "joint-support",
     "keto-5-capsules": "keto-5",
-    "kojic-acid-turmeric-soap": "kojic-acid-turmeric",
     "liver-support-capsules": "liver-support",
     "maca-plus-capsules": "maca-plus",
     "magnesium-glycinate-capsules": "magnesium-glycinate",
-    "max-detox-acai-capsules": "max-detox-acai",
-    "mens-vitality-tablets": "mens-vitality",
-    "moisturizing-strengthening-hair-oil-old": "moisturizing-strengthening-hair-oil",
-    "nad-plus-capsules": "nad-plus",
     "nitric-oxide-capsules": "nitric-oxide",
-    "omega-3-epa-dha-softgel-capsules": "omega-3-epa-dha",
-    "peptide-hair-growth-serum": "peptide-hair-growth",
     "platinum-turmeric-capsules": "platinum-turmeric",
-    "probiotic-40-billion-prebiotics-capsules": "probiotic-40-billion-prebiotics",
-    "recovery-cream": "recovery",
-    "resveratrol-50-percent-capsules": "resveratrol-50-percent",
     "sleep-formula-capsules": "sleep-formula",
     "vision-support-capsules": "vision-support",
-    "vitamin-c-serum": "vitamin-c",
-    "vitamin-d3-2000iu-softgel-capsules": "vitamin-d3-2000iu",
-    "vitamin-glow-serum": "vitamin-glow",
+    
+    # Mappings with significantly different DB names (verified 2026-01-05)
+    "omega-3-epa-dha-softgel-capsules": "omega-3-epa-180mg-dha-120mg",
+    "vitamin-d3-2000iu-softgel-capsules": "vitamin-d3-2-000-iu",
+    "nad-plus-capsules": "nad",
+    "probiotic-40-billion-prebiotics-capsules": "probiotic-40-billion-with-prebiotics",
+    "resveratrol-50-percent-capsules": "resveratrol-50-600mg",
+    "max-detox-acai-capsules": "max-detox-acai-detox",
+    "mens-vitality-tablets": "men-s-vitality",  # Note: men's not mens, maximo only in DB
+    
+    # Products not in DB - mapped to None (will be reported separately)
+    # "kojic-acid-turmeric-soap": None,
+    # "moisturizing-strengthening-hair-oil-old": None,
+    # "green-tea-antioxidant-serum": None,
+    # "vitamin-glow-serum": None,
+    # "vitamin-c-serum": None,
+    # "recovery-cream": None,
+    # "peptide-hair-growth-serum": None,
 }
 
 
-def get_expected_db_handle(excel_sku: str, os_environment: str) -> str:
+def get_expected_db_handle(excel_sku: str, os_environment: str) -> Optional[str]:
     """
     Get expected DB shopify_handle from Excel SKU and environment.
-    Uses explicit mapping, falling back to pattern-based derivation.
+    Returns None if product is known to not exist in DB.
     """
+    # Check if product is known to not exist
+    if excel_sku in EXCEL_PRODUCTS_NOT_IN_DB:
+        return None
+    
     # Look up base name from mapping
     if excel_sku in EXCEL_SKU_TO_DB_BASE:
         base = EXCEL_SKU_TO_DB_BASE[excel_sku]
@@ -275,7 +303,6 @@ def get_db_base_handles() -> Dict[str, Any]:
 def debug_handles() -> Dict[str, Any]:
     """
     Debug endpoint to compare Excel-derived handles vs actual DB handles.
-    Shows the mapping pattern and what's matching/missing.
     """
     conn = get_db()
     if not conn:
@@ -283,8 +310,6 @@ def debug_handles() -> Dict[str, Any]:
     
     try:
         cur = conn.cursor()
-        
-        # Get unique DB handles with environment
         cur.execute("""
             SELECT DISTINCT shopify_handle, os_environment
             FROM os_modules_v3_1
@@ -298,32 +323,34 @@ def debug_handles() -> Dict[str, Any]:
         cur.close()
         conn.close()
         
-        # Get Excel data
         excel_sku_env_pairs = get_unique_sku_env_pairs()
         
-        # Derive expected handles from Excel using explicit mapping
+        # Derive expected handles (excluding products not in DB)
         expected_handle_env_pairs = set()
+        skipped_not_in_db = set()
         for sku, os_env in excel_sku_env_pairs:
             expected_handle = get_expected_db_handle(sku, os_env)
-            expected_handle_env_pairs.add((expected_handle, os_env))
+            if expected_handle is None:
+                skipped_not_in_db.add(sku)
+            else:
+                expected_handle_env_pairs.add((expected_handle, os_env))
         
-        # Find overlaps
         matches = expected_handle_env_pairs & db_handle_env_pairs
         in_excel_only = expected_handle_env_pairs - db_handle_env_pairs
         in_db_only = db_handle_env_pairs - expected_handle_env_pairs
         
         return {
-            "matching_strategy": "Explicit SKU-to-handle mapping with environment suffix",
+            "matching_strategy": "Explicit SKU-to-handle mapping (v5)",
             "excel_unique_sku_env_pairs": len(excel_sku_env_pairs),
             "expected_handle_env_pairs": len(expected_handle_env_pairs),
+            "skipped_not_in_db": len(skipped_not_in_db),
+            "skipped_products": sorted(skipped_not_in_db),
             "db_handle_env_pairs": len(db_handle_env_pairs),
             "exact_matches": len(matches),
             "in_excel_only": len(in_excel_only),
             "in_db_only": len(in_db_only),
             "match_rate_percent": round(100 * len(matches) / len(expected_handle_env_pairs), 1) if expected_handle_env_pairs else 0,
-            "sample_expected_handles": sorted([f"{h} ({e})" for h, e in list(expected_handle_env_pairs)[:15]]),
-            "sample_db_handles": sorted([f"{h} ({e})" for h, e in list(db_handle_env_pairs)[:15]]),
-            "matched_sample": sorted([f"{h} ({e})" for h, e in list(matches)[:15]]) if matches else [],
+            "matched_sample": sorted([f"{h} ({e})" for h, e in list(matches)[:20]]) if matches else [],
             "excel_only_sample": sorted([f"{h} ({e})" for h, e in list(in_excel_only)[:15]]),
             "db_only_sample": sorted([f"{h} ({e})" for h, e in list(in_db_only)[:15]])
         }
@@ -340,11 +367,6 @@ def debug_handles() -> Dict[str, Any]:
 def compare_excel_db_full() -> Dict[str, Any]:
     """
     Full comparison of DB against expected Excel YES rows.
-    
-    Matching strategy (v4):
-    - Excel: (supliful_sku, os_environment)
-    - Derived: shopify_handle via explicit EXCEL_SKU_TO_DB_BASE mapping
-    - DB key: (shopify_handle, os_environment)
     """
     conn = get_db()
     if not conn:
@@ -352,8 +374,6 @@ def compare_excel_db_full() -> Dict[str, Any]:
     
     try:
         cur = conn.cursor()
-        
-        # Get all active DB modules
         cur.execute("""
             SELECT 
                 module_code, shopify_handle, os_environment, os_layer, 
@@ -365,17 +385,15 @@ def compare_excel_db_full() -> Dict[str, Any]:
         """)
         db_rows = cur.fetchall()
         
-        # Build DB lookup by (shopify_handle, os_environment)
         db_by_key: Dict[Tuple[str, str], dict] = {}
         for row in db_rows:
             key = (row["shopify_handle"], row["os_environment"])
             db_by_key[key] = dict(row)
         
-        # Get unique Excel SKU+env pairs
         excel_sku_env_pairs = get_unique_sku_env_pairs()
         
         results = {
-            "audit_type": "Excel vs DB Comparison (v4 - explicit mapping)",
+            "audit_type": "Excel vs DB Comparison (v5)",
             "excel_total_rows": len(EXCEL_YES_ROWS),
             "excel_unique_sku_env_pairs": len(excel_sku_env_pairs),
             "db_active_modules": len(db_rows),
@@ -383,6 +401,7 @@ def compare_excel_db_full() -> Dict[str, Any]:
             "coverage": {
                 "matched": [],
                 "missing_in_db": [],
+                "expected_not_in_db": [],  # Products we know aren't in DB
                 "extra_in_db": []
             },
             "field_diffs": [],
@@ -390,19 +409,28 @@ def compare_excel_db_full() -> Dict[str, Any]:
             "overall_status": "PENDING"
         }
         
-        # Track matched DB keys
         matched_db_keys: Set[Tuple[str, str]] = set()
         
-        # Match Excel SKU+env pairs to DB using explicit mapping
         for sku, os_env in excel_sku_env_pairs:
             expected_handle = get_expected_db_handle(sku, os_env)
+            
+            # Handle products known to not be in DB
+            if expected_handle is None:
+                excel_rows_for_key = [r for r in EXCEL_YES_ROWS if r[0] == sku and r[1] == os_env]
+                results["coverage"]["expected_not_in_db"].append({
+                    "excel_sku": sku,
+                    "os_environment": os_env,
+                    "reason": "Product not available in Supliful/DB catalog",
+                    "excel_ingredients": [r[4] for r in excel_rows_for_key]
+                })
+                continue
+            
             db_key = (expected_handle, os_env)
             
             if db_key in db_by_key:
                 db_row = db_by_key[db_key]
                 matched_db_keys.add(db_key)
                 
-                # Get Excel rows for this SKU+env
                 excel_rows_for_key = [r for r in EXCEL_YES_ROWS if r[0] == sku and r[1] == os_env]
                 excel_os_layer = excel_rows_for_key[0][2]
                 excel_bio_subsystem = excel_rows_for_key[0][3]
@@ -418,9 +446,7 @@ def compare_excel_db_full() -> Dict[str, Any]:
                 }
                 results["coverage"]["matched"].append(match_record)
                 
-                # Check field diffs
                 diffs = []
-                
                 db_os_layer = normalize_text(db_row.get("os_layer", ""))
                 if normalize_text(excel_os_layer) != db_os_layer:
                     diffs.append({
@@ -455,7 +481,6 @@ def compare_excel_db_full() -> Dict[str, Any]:
                     "excel_ingredients": [r[4] for r in excel_rows_for_key]
                 })
         
-        # Find extra DB rows not in Excel
         for db_key, db_row in db_by_key.items():
             if db_key not in matched_db_keys:
                 results["coverage"]["extra_in_db"].append({
@@ -469,21 +494,23 @@ def compare_excel_db_full() -> Dict[str, Any]:
         cur.close()
         conn.close()
         
-        # Calculate summary
+        # Calculate summary - only count mappable products
+        mappable_pairs = len(excel_sku_env_pairs) - len(results["coverage"]["expected_not_in_db"])
         results["summary"] = {
             "excel_unique_sku_env_pairs": len(excel_sku_env_pairs),
+            "mappable_pairs": mappable_pairs,
+            "expected_not_in_db_count": len(results["coverage"]["expected_not_in_db"]),
             "matched_count": len(results["coverage"]["matched"]),
             "missing_in_db_count": len(results["coverage"]["missing_in_db"]),
             "extra_in_db_count": len(results["coverage"]["extra_in_db"]),
             "diff_count": len(results["field_diffs"]),
-            "match_rate_percent": round(100 * len(results["coverage"]["matched"]) / len(excel_sku_env_pairs), 1) if excel_sku_env_pairs else 0
+            "match_rate_percent": round(100 * len(results["coverage"]["matched"]) / mappable_pairs, 1) if mappable_pairs else 0
         }
         
-        # Determine overall status
         if (results["summary"]["missing_in_db_count"] == 0 and 
             results["summary"]["diff_count"] == 0):
             results["overall_status"] = "PASS"
-            results["decision"] = "DB is 100% aligned with Excel YES rows"
+            results["decision"] = "DB is 100% aligned with mappable Excel YES rows"
         else:
             results["overall_status"] = "FAIL"
             issues = []
@@ -511,17 +538,27 @@ def compare_excel_db_summary() -> Dict[str, Any]:
         "overall_status": full["overall_status"],
         "summary": full["summary"],
         "decision": full.get("decision", ""),
-        "recommendation": full.get("recommendation", "")
+        "expected_not_in_db": [p["excel_sku"] for p in full["coverage"]["expected_not_in_db"][:10]]
     }
 
 
 @router.get("/compare/missing-skus")
 def get_missing_skus() -> Dict[str, Any]:
-    """List expected handles from Excel that are missing in DB."""
+    """List expected handles from Excel that are missing in DB (unexpected)."""
     full = compare_excel_db_full()
     return {
         "missing_count": len(full["coverage"]["missing_in_db"]),
         "missing_products": full["coverage"]["missing_in_db"]
+    }
+
+
+@router.get("/compare/expected-not-in-db")
+def get_expected_not_in_db() -> Dict[str, Any]:
+    """List Excel products known to not exist in DB."""
+    full = compare_excel_db_full()
+    return {
+        "count": len(full["coverage"]["expected_not_in_db"]),
+        "products": full["coverage"]["expected_not_in_db"]
     }
 
 
@@ -540,14 +577,17 @@ def check_mapping() -> Dict[str, Any]:
     """Check if the Excel-to-DB mapping covers all Excel SKUs."""
     excel_skus = {row[0] for row in EXCEL_YES_ROWS}
     mapped_skus = set(EXCEL_SKU_TO_DB_BASE.keys())
+    not_in_db_skus = EXCEL_PRODUCTS_NOT_IN_DB
     
-    unmapped = excel_skus - mapped_skus
+    # SKUs that need mapping but don't have one
+    unmapped = excel_skus - mapped_skus - not_in_db_skus
     extra_mappings = mapped_skus - excel_skus
     
     return {
         "excel_unique_skus": len(excel_skus),
         "mapped_skus": len(mapped_skus),
+        "not_in_db_skus": len(not_in_db_skus),
         "unmapped_skus": sorted(unmapped) if unmapped else [],
         "extra_mappings": sorted(extra_mappings) if extra_mappings else [],
-        "all_mapped": len(unmapped) == 0
+        "all_covered": len(unmapped) == 0
     }
