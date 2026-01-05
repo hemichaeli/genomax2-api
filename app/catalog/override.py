@@ -102,6 +102,7 @@ PRIMARY_INGREDIENT_MAP = {
 }
 
 # Fields to override from Excel
+# NOTE: evidence_rationale does NOT exist in os_modules_v3_1 - excluded from override
 OVERRIDE_FIELDS = [
     'os_layer',
     'biological_domain',  # mapped from biological_subsystem
@@ -109,7 +110,7 @@ OVERRIDE_FIELDS = [
     'safety_notes',
     'contraindications',
     'dosing_protocol',  # mapped from dosage_context_note
-    'evidence_rationale',
+    # 'evidence_rationale' - column does not exist in DB
 ]
 
 
@@ -195,6 +196,42 @@ def build_payload_from_excel(df: pd.DataFrame) -> Tuple[List[Dict], List[Dict]]:
         })
     
     return payload_records, violations
+
+
+@router.get("/override/schema")
+def get_module_schema() -> Dict[str, Any]:
+    """Get os_modules_v3_1 column schema to verify available fields."""
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT column_name, data_type, character_maximum_length
+            FROM information_schema.columns 
+            WHERE table_name = 'os_modules_v3_1'
+            ORDER BY ordinal_position
+        """)
+        columns = cur.fetchall()
+        
+        cur.close()
+        conn.close()
+        
+        return {
+            "table": "os_modules_v3_1",
+            "column_count": len(columns),
+            "columns": [dict(c) for c in columns],
+            "override_target_fields": OVERRIDE_FIELDS,
+            "note": "evidence_rationale column does NOT exist in this table"
+        }
+        
+    except Exception as e:
+        try:
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Schema query error: {str(e)}")
 
 
 @router.get("/override/migrate")
@@ -357,12 +394,11 @@ async def override_dry_run(file: UploadFile = File(...)) -> Dict[str, Any]:
         
         cur = conn.cursor()
         
-        # Get current DB values
+        # Get current DB values (evidence_rationale column does not exist)
         cur.execute("""
             SELECT module_code, shopify_handle, os_environment, 
                    os_layer, biological_domain, suggested_use_full,
-                   safety_notes, contraindications, dosing_protocol,
-                   evidence_rationale
+                   safety_notes, contraindications, dosing_protocol
             FROM os_modules_v3_1
             WHERE supplier_status IS NULL 
                OR supplier_status NOT IN ('DUPLICATE_INACTIVE')
@@ -396,7 +432,7 @@ async def override_dry_run(file: UploadFile = File(...)) -> Dict[str, Any]:
             matched += 1
             db_row = db_by_handle[key]
             
-            # Field mappings: Excel -> DB
+            # Field mappings: Excel -> DB (evidence_rationale excluded - column doesn't exist)
             field_mappings = {
                 'os_layer': ('os_layer', record.get('os_layer', '')),
                 'biological_domain': ('biological_subsystem', record.get('biological_subsystem', '')),
@@ -404,7 +440,6 @@ async def override_dry_run(file: UploadFile = File(...)) -> Dict[str, Any]:
                 'safety_notes': ('safety_notes', record.get('safety_notes', '')),
                 'contraindications': ('contraindications', record.get('contraindications', '')),
                 'dosing_protocol': ('dosage_context_note', record.get('dosage_context_note', '')),
-                'evidence_rationale': ('evidence_rationale', record.get('evidence_rationale', '')),
             }
             
             record_diffs = []
@@ -514,11 +549,11 @@ async def override_execute(file: UploadFile = File(...), confirm: bool = False) 
                 continue
             
             try:
-                # Get current values for logging
+                # Get current values for logging (evidence_rationale excluded - column doesn't exist)
                 cur.execute("""
                     SELECT module_code, os_layer, biological_domain, 
                            suggested_use_full, safety_notes, contraindications,
-                           dosing_protocol, evidence_rationale
+                           dosing_protocol
                     FROM os_modules_v3_1
                     WHERE shopify_handle = %s AND os_environment = %s
                 """, (handle, env))
@@ -529,7 +564,7 @@ async def override_execute(file: UploadFile = File(...), confirm: bool = False) 
                 
                 module_code = existing['module_code']
                 
-                # Build update and log changes
+                # Build update and log changes (evidence_rationale excluded)
                 updates = []
                 params = []
                 
@@ -540,7 +575,6 @@ async def override_execute(file: UploadFile = File(...), confirm: bool = False) 
                     ('safety_notes', record.get('safety_notes', '')),
                     ('contraindications', record.get('contraindications', '')),
                     ('dosing_protocol', record.get('dosage_context_note', '')),
-                    ('evidence_rationale', record.get('evidence_rationale', '')),
                 ]
                 
                 for db_field, excel_value in field_mappings:
