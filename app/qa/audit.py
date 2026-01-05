@@ -16,6 +16,7 @@ import os
 import re
 from typing import Dict, Any, List, Optional
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
@@ -31,6 +32,11 @@ def get_db():
     except Exception as e:
         print(f"Database connection error: {e}")
         return None
+
+
+class FixDuplicatesRequest(BaseModel):
+    shopify_handle: str
+    keep_module_code: str
 
 
 @router.get("/audit/os-modules")
@@ -88,10 +94,11 @@ def audit_os_modules() -> Dict[str, Any]:
             "status": "PASS" if a2_count == 210 else "FAIL"
         }
         
-        # A3: shopify_handle uniqueness
+        # A3: shopify_handle uniqueness (excluding DUPLICATE_INACTIVE)
         cur.execute("""
             SELECT shopify_handle, COUNT(*) AS c
             FROM os_modules_v3_1
+            WHERE supplier_status != 'DUPLICATE_INACTIVE'
             GROUP BY shopify_handle
             HAVING COUNT(*) > 1
             ORDER BY c DESC, shopify_handle
@@ -99,7 +106,7 @@ def audit_os_modules() -> Dict[str, Any]:
         """)
         a3_dups = cur.fetchall()
         results["checks"]["A3_shopify_handle_unique"] = {
-            "description": "No duplicate shopify_handle values",
+            "description": "No duplicate shopify_handle values (excluding DUPLICATE_INACTIVE)",
             "duplicates_found": len(a3_dups),
             "duplicates": [dict(r) for r in a3_dups] if a3_dups else [],
             "status": "PASS" if len(a3_dups) == 0 else "FAIL"
@@ -384,6 +391,67 @@ def get_duplicate_details(shopify_handle: str) -> Dict[str, Any]:
         except:
             pass
         raise HTTPException(status_code=500, detail=f"Query error: {str(e)}")
+
+
+@router.post("/audit/os-modules/fix-duplicates")
+def fix_duplicates(request: FixDuplicatesRequest) -> Dict[str, Any]:
+    """
+    Mark duplicate shopify_handle records as DUPLICATE_INACTIVE.
+    Keeps the specified module_code active, marks others as inactive.
+    """
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        cur = conn.cursor()
+        
+        # First verify the keep_module_code exists for this shopify_handle
+        cur.execute("""
+            SELECT module_code FROM os_modules_v3_1
+            WHERE shopify_handle = %s AND module_code = %s
+        """, (request.shopify_handle, request.keep_module_code))
+        
+        if not cur.fetchone():
+            cur.close()
+            conn.close()
+            raise HTTPException(
+                status_code=404, 
+                detail=f"Module {request.keep_module_code} not found for shopify_handle {request.shopify_handle}"
+            )
+        
+        # Mark all other records as DUPLICATE_INACTIVE
+        cur.execute("""
+            UPDATE os_modules_v3_1
+            SET supplier_status = 'DUPLICATE_INACTIVE',
+                updated_at = NOW()
+            WHERE shopify_handle = %s
+              AND module_code != %s
+            RETURNING module_code, supplier_status
+        """, (request.shopify_handle, request.keep_module_code))
+        
+        updated_rows = cur.fetchall()
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        return {
+            "status": "success",
+            "shopify_handle": request.shopify_handle,
+            "kept_module_code": request.keep_module_code,
+            "marked_inactive": [dict(r) for r in updated_rows],
+            "inactive_count": len(updated_rows)
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        try:
+            conn.rollback()
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Fix error: {str(e)}")
 
 
 @router.get("/audit/os-modules/export")
