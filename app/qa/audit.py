@@ -1,5 +1,5 @@
 """
-GenoMAX² QA Audit Module v2.1
+GenoMAX² QA Audit Module v2.2
 Post-Migration Validation for os_modules_v3_1
 
 SPLIT AUDIT MODES:
@@ -20,6 +20,9 @@ Returns comprehensive JSON report with PASS/FAIL status per mode.
 
 v2.1 CHANGES:
 - Added /api/v1/qa/copy/clean/summary endpoint for clean copy audit
+
+v2.2 CHANGES:
+- Added /api/v1/qa/copy/clean/count endpoint (count-only)
 """
 
 import os
@@ -70,7 +73,7 @@ READY_FOR_DESIGN_CHECKS = [
 
 
 # ============================================================================
-# CLEAN COPY SUMMARY ENDPOINT
+# CLEAN COPY ENDPOINTS
 # ============================================================================
 
 @router.get("/copy/clean/summary")
@@ -99,14 +102,14 @@ def clean_copy_summary() -> Dict[str, Any]:
         # Missing front_label_text
         cur.execute("""
             SELECT COUNT(*) AS count FROM os_modules_v3_1
-            WHERE front_label_text IS NULL OR TRIM(front_label_text) = ''
+            WHERE front_label_text IS NULL OR BTRIM(front_label_text) = ''
         """)
         missing_front = cur.fetchone()["count"]
         
         # Missing back_label_text
         cur.execute("""
             SELECT COUNT(*) AS count FROM os_modules_v3_1
-            WHERE back_label_text IS NULL OR TRIM(back_label_text) = ''
+            WHERE back_label_text IS NULL OR BTRIM(back_label_text) = ''
         """)
         missing_back = cur.fetchone()["count"]
         
@@ -114,10 +117,10 @@ def clean_copy_summary() -> Dict[str, Any]:
         cur.execute("""
             SELECT COUNT(*) AS count FROM os_modules_v3_1
             WHERE (
-                (front_label_text IS NOT NULL AND TRIM(front_label_text) <> '' 
+                (front_label_text IS NOT NULL AND BTRIM(front_label_text) <> '' 
                  AND front_label_text ~* '(TBD|MISSING|REVIEW|PLACEHOLDER)')
                 OR
-                (back_label_text IS NOT NULL AND TRIM(back_label_text) <> '' 
+                (back_label_text IS NOT NULL AND BTRIM(back_label_text) <> '' 
                  AND back_label_text ~* '(TBD|MISSING|REVIEW|PLACEHOLDER)')
             )
         """)
@@ -126,21 +129,21 @@ def clean_copy_summary() -> Dict[str, Any]:
         # Missing front OR back (union)
         cur.execute("""
             SELECT COUNT(*) AS count FROM os_modules_v3_1
-            WHERE front_label_text IS NULL OR TRIM(front_label_text) = ''
-               OR back_label_text IS NULL OR TRIM(back_label_text) = ''
+            WHERE front_label_text IS NULL OR BTRIM(front_label_text) = ''
+               OR back_label_text IS NULL OR BTRIM(back_label_text) = ''
         """)
         missing_front_or_back = cur.fetchone()["count"]
         
         # Overlap: missing AND has placeholders (modules counted in both categories)
         cur.execute("""
             SELECT COUNT(*) AS count FROM os_modules_v3_1
-            WHERE (front_label_text IS NULL OR TRIM(front_label_text) = ''
-                   OR back_label_text IS NULL OR TRIM(back_label_text) = '')
+            WHERE (front_label_text IS NULL OR BTRIM(front_label_text) = ''
+                   OR back_label_text IS NULL OR BTRIM(back_label_text) = '')
               AND (
-                (front_label_text IS NOT NULL AND TRIM(front_label_text) <> '' 
+                (front_label_text IS NOT NULL AND BTRIM(front_label_text) <> '' 
                  AND front_label_text ~* '(TBD|MISSING|REVIEW|PLACEHOLDER)')
                 OR
-                (back_label_text IS NOT NULL AND TRIM(back_label_text) <> '' 
+                (back_label_text IS NOT NULL AND BTRIM(back_label_text) <> '' 
                  AND back_label_text ~* '(TBD|MISSING|REVIEW|PLACEHOLDER)')
               )
         """)
@@ -150,9 +153,9 @@ def clean_copy_summary() -> Dict[str, Any]:
         cur.execute("""
             SELECT COUNT(*) AS count FROM os_modules_v3_1
             WHERE front_label_text IS NOT NULL 
-              AND TRIM(front_label_text) <> ''
+              AND BTRIM(front_label_text) <> ''
               AND back_label_text IS NOT NULL 
-              AND TRIM(back_label_text) <> ''
+              AND BTRIM(back_label_text) <> ''
               AND front_label_text !~* '(TBD|MISSING|REVIEW|PLACEHOLDER)'
               AND back_label_text !~* '(TBD|MISSING|REVIEW|PLACEHOLDER)'
         """)
@@ -163,10 +166,10 @@ def clean_copy_summary() -> Dict[str, Any]:
             SELECT module_code, shopify_handle, os_environment
             FROM os_modules_v3_1
             WHERE (
-                (front_label_text IS NOT NULL AND TRIM(front_label_text) <> '' 
+                (front_label_text IS NOT NULL AND BTRIM(front_label_text) <> '' 
                  AND front_label_text ~* '(TBD|MISSING|REVIEW|PLACEHOLDER)')
                 OR
-                (back_label_text IS NOT NULL AND TRIM(back_label_text) <> '' 
+                (back_label_text IS NOT NULL AND BTRIM(back_label_text) <> '' 
                  AND back_label_text ~* '(TBD|MISSING|REVIEW|PLACEHOLDER)')
             )
             ORDER BY shopify_handle, os_environment
@@ -177,11 +180,11 @@ def clean_copy_summary() -> Dict[str, Any]:
         # Get examples of modules missing front or back
         cur.execute("""
             SELECT module_code, shopify_handle, os_environment,
-                   CASE WHEN front_label_text IS NULL OR TRIM(front_label_text) = '' THEN 'front' ELSE '' END AS missing_front,
-                   CASE WHEN back_label_text IS NULL OR TRIM(back_label_text) = '' THEN 'back' ELSE '' END AS missing_back
+                   CASE WHEN front_label_text IS NULL OR BTRIM(front_label_text) = '' THEN 'front' ELSE '' END AS missing_front,
+                   CASE WHEN back_label_text IS NULL OR BTRIM(back_label_text) = '' THEN 'back' ELSE '' END AS missing_back
             FROM os_modules_v3_1
-            WHERE front_label_text IS NULL OR TRIM(front_label_text) = ''
-               OR back_label_text IS NULL OR TRIM(back_label_text) = ''
+            WHERE front_label_text IS NULL OR BTRIM(front_label_text) = ''
+               OR back_label_text IS NULL OR BTRIM(back_label_text) = ''
             ORDER BY shopify_handle, os_environment
             LIMIT 10
         """)
@@ -231,6 +234,41 @@ def clean_copy_summary() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=f"Clean copy audit error: {str(e)}")
 
 
+@router.get("/copy/clean/count")
+def clean_copy_count_only() -> Dict[str, int]:
+    """
+    Quick count-only endpoint for clean copy modules.
+    Returns just the count for dashboards and monitoring.
+    """
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT COUNT(*) AS count FROM os_modules_v3_1
+            WHERE front_label_text IS NOT NULL 
+              AND BTRIM(front_label_text) <> ''
+              AND back_label_text IS NOT NULL 
+              AND BTRIM(back_label_text) <> ''
+              AND front_label_text !~* '(TBD|MISSING|REVIEW|PLACEHOLDER)'
+              AND back_label_text !~* '(TBD|MISSING|REVIEW|PLACEHOLDER)'
+        """)
+        clean_copy_count = cur.fetchone()["count"]
+        cur.close()
+        conn.close()
+        
+        return {"clean_copy_count": clean_copy_count}
+        
+    except Exception as e:
+        try:
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Clean copy count error: {str(e)}")
+
+
 # ============================================================================
 # MAIN AUDIT ENDPOINTS
 # ============================================================================
@@ -253,7 +291,7 @@ def audit_os_modules(mode: Optional[str] = Query(default=None)) -> Dict[str, Any
         raise HTTPException(status_code=500, detail="Database connection failed")
     
     results = {
-        "audit_version": "2.1.0",
+        "audit_version": "2.2.0",
         "table": "os_modules_v3_1",
         "mode": mode or "all",
         "checks": {},
@@ -405,12 +443,12 @@ def audit_os_modules(mode: Optional[str] = Query(default=None)) -> Dict[str, Any
             # B3: Required fields check (READY_FOR_DESIGN gate)
             cur.execute("""
                 SELECT
-                  SUM(CASE WHEN NOT (product_name IS NOT NULL AND TRIM(product_name) <> '') THEN 1 ELSE 0 END) AS missing_product_name,
-                  SUM(CASE WHEN NOT ((url IS NOT NULL AND TRIM(url) <> '') OR (supplier_page_url IS NOT NULL AND TRIM(supplier_page_url) <> '')) THEN 1 ELSE 0 END) AS missing_link,
-                  SUM(CASE WHEN NOT (net_quantity IS NOT NULL AND TRIM(net_quantity) <> '') THEN 1 ELSE 0 END) AS missing_net_quantity,
-                  SUM(CASE WHEN NOT (front_label_text IS NOT NULL AND TRIM(front_label_text) <> '') THEN 1 ELSE 0 END) AS missing_front_label,
-                  SUM(CASE WHEN NOT (back_label_text IS NOT NULL AND TRIM(back_label_text) <> '') THEN 1 ELSE 0 END) AS missing_back_label,
-                  SUM(CASE WHEN NOT (fda_disclaimer IS NOT NULL AND TRIM(fda_disclaimer) <> '') THEN 1 ELSE 0 END) AS missing_fda_disclaimer
+                  SUM(CASE WHEN NOT (product_name IS NOT NULL AND BTRIM(product_name) <> '') THEN 1 ELSE 0 END) AS missing_product_name,
+                  SUM(CASE WHEN NOT ((url IS NOT NULL AND BTRIM(url) <> '') OR (supplier_page_url IS NOT NULL AND BTRIM(supplier_page_url) <> '')) THEN 1 ELSE 0 END) AS missing_link,
+                  SUM(CASE WHEN NOT (net_quantity IS NOT NULL AND BTRIM(net_quantity) <> '') THEN 1 ELSE 0 END) AS missing_net_quantity,
+                  SUM(CASE WHEN NOT (front_label_text IS NOT NULL AND BTRIM(front_label_text) <> '') THEN 1 ELSE 0 END) AS missing_front_label,
+                  SUM(CASE WHEN NOT (back_label_text IS NOT NULL AND BTRIM(back_label_text) <> '') THEN 1 ELSE 0 END) AS missing_back_label,
+                  SUM(CASE WHEN NOT (fda_disclaimer IS NOT NULL AND BTRIM(fda_disclaimer) <> '') THEN 1 ELSE 0 END) AS missing_fda_disclaimer
                 FROM os_modules_v3_1
             """)
             b3_summary = cur.fetchone()
@@ -428,12 +466,12 @@ def audit_os_modules(mode: Optional[str] = Query(default=None)) -> Dict[str, Any
                 SELECT shopify_handle, os_environment, module_code
                 FROM os_modules_v3_1
                 WHERE
-                  NOT (product_name IS NOT NULL AND TRIM(product_name) <> '')
-                  OR NOT ((url IS NOT NULL AND TRIM(url) <> '') OR (supplier_page_url IS NOT NULL AND TRIM(supplier_page_url) <> ''))
-                  OR NOT (net_quantity IS NOT NULL AND TRIM(net_quantity) <> '')
-                  OR NOT (front_label_text IS NOT NULL AND TRIM(front_label_text) <> '')
-                  OR NOT (back_label_text IS NOT NULL AND TRIM(back_label_text) <> '')
-                  OR NOT (fda_disclaimer IS NOT NULL AND TRIM(fda_disclaimer) <> '')
+                  NOT (product_name IS NOT NULL AND BTRIM(product_name) <> '')
+                  OR NOT ((url IS NOT NULL AND BTRIM(url) <> '') OR (supplier_page_url IS NOT NULL AND BTRIM(supplier_page_url) <> ''))
+                  OR NOT (net_quantity IS NOT NULL AND BTRIM(net_quantity) <> '')
+                  OR NOT (front_label_text IS NOT NULL AND BTRIM(front_label_text) <> '')
+                  OR NOT (back_label_text IS NOT NULL AND BTRIM(back_label_text) <> '')
+                  OR NOT (fda_disclaimer IS NOT NULL AND BTRIM(fda_disclaimer) <> '')
                 ORDER BY shopify_handle, os_environment
                 LIMIT 20
             """)
@@ -667,9 +705,9 @@ def get_duplicate_details(shopify_handle: str) -> Dict[str, Any]:
             FROM os_modules_v3_1
             WHERE shopify_handle = %s
             ORDER BY
-              (supplier_page_url IS NOT NULL AND TRIM(supplier_page_url) <> '') DESC,
-              (url IS NOT NULL AND TRIM(url) <> '') DESC,
-              (product_name IS NOT NULL AND TRIM(product_name) <> '') DESC,
+              (supplier_page_url IS NOT NULL AND BTRIM(supplier_page_url) <> '') DESC,
+              (url IS NOT NULL AND BTRIM(url) <> '') DESC,
+              (product_name IS NOT NULL AND BTRIM(product_name) <> '') DESC,
               updated_at DESC
         """, (shopify_handle,))
         rows = cur.fetchall()
