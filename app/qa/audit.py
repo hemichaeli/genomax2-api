@@ -1,5 +1,5 @@
 """
-GenoMAX² QA Audit Module v2
+GenoMAX² QA Audit Module v2.1
 Post-Migration Validation for os_modules_v3_1
 
 SPLIT AUDIT MODES:
@@ -17,6 +17,9 @@ Individual checks:
 - F1: Index verification (DB_INTEGRITY)
 
 Returns comprehensive JSON report with PASS/FAIL status per mode.
+
+v2.1 CHANGES:
+- Added /api/v1/qa/copy/clean/summary endpoint for clean copy audit
 """
 
 import os
@@ -66,6 +69,172 @@ READY_FOR_DESIGN_CHECKS = [
 ]
 
 
+# ============================================================================
+# CLEAN COPY SUMMARY ENDPOINT
+# ============================================================================
+
+@router.get("/copy/clean/summary")
+def clean_copy_summary() -> Dict[str, Any]:
+    """
+    Clean Copy Summary for os_modules_v3_1.
+    
+    Definition - A module has "clean copy" if:
+    - front_label_text is NOT NULL and NOT empty
+    - back_label_text is NOT NULL and NOT empty
+    - Neither field contains placeholders (TBD|MISSING|REVIEW|PLACEHOLDER, case-insensitive)
+    
+    Returns counts with mathematical invariant validation.
+    """
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        cur = conn.cursor()
+        
+        # Total modules
+        cur.execute("SELECT COUNT(*) AS total FROM os_modules_v3_1")
+        total_modules = cur.fetchone()["total"]
+        
+        # Missing front_label_text
+        cur.execute("""
+            SELECT COUNT(*) AS count FROM os_modules_v3_1
+            WHERE front_label_text IS NULL OR TRIM(front_label_text) = ''
+        """)
+        missing_front = cur.fetchone()["count"]
+        
+        # Missing back_label_text
+        cur.execute("""
+            SELECT COUNT(*) AS count FROM os_modules_v3_1
+            WHERE back_label_text IS NULL OR TRIM(back_label_text) = ''
+        """)
+        missing_back = cur.fetchone()["count"]
+        
+        # Placeholders in front OR back (only in non-empty fields)
+        cur.execute("""
+            SELECT COUNT(*) AS count FROM os_modules_v3_1
+            WHERE (
+                (front_label_text IS NOT NULL AND TRIM(front_label_text) <> '' 
+                 AND front_label_text ~* '(TBD|MISSING|REVIEW|PLACEHOLDER)')
+                OR
+                (back_label_text IS NOT NULL AND TRIM(back_label_text) <> '' 
+                 AND back_label_text ~* '(TBD|MISSING|REVIEW|PLACEHOLDER)')
+            )
+        """)
+        placeholders_front_or_back = cur.fetchone()["count"]
+        
+        # Missing front OR back (union)
+        cur.execute("""
+            SELECT COUNT(*) AS count FROM os_modules_v3_1
+            WHERE front_label_text IS NULL OR TRIM(front_label_text) = ''
+               OR back_label_text IS NULL OR TRIM(back_label_text) = ''
+        """)
+        missing_front_or_back = cur.fetchone()["count"]
+        
+        # Overlap: missing AND has placeholders (modules counted in both categories)
+        cur.execute("""
+            SELECT COUNT(*) AS count FROM os_modules_v3_1
+            WHERE (front_label_text IS NULL OR TRIM(front_label_text) = ''
+                   OR back_label_text IS NULL OR TRIM(back_label_text) = '')
+              AND (
+                (front_label_text IS NOT NULL AND TRIM(front_label_text) <> '' 
+                 AND front_label_text ~* '(TBD|MISSING|REVIEW|PLACEHOLDER)')
+                OR
+                (back_label_text IS NOT NULL AND TRIM(back_label_text) <> '' 
+                 AND back_label_text ~* '(TBD|MISSING|REVIEW|PLACEHOLDER)')
+              )
+        """)
+        overlap_missing_and_placeholders = cur.fetchone()["count"]
+        
+        # Clean copy count (direct query for accuracy)
+        cur.execute("""
+            SELECT COUNT(*) AS count FROM os_modules_v3_1
+            WHERE front_label_text IS NOT NULL 
+              AND TRIM(front_label_text) <> ''
+              AND back_label_text IS NOT NULL 
+              AND TRIM(back_label_text) <> ''
+              AND front_label_text !~* '(TBD|MISSING|REVIEW|PLACEHOLDER)'
+              AND back_label_text !~* '(TBD|MISSING|REVIEW|PLACEHOLDER)'
+        """)
+        clean_copy_count = cur.fetchone()["count"]
+        
+        # Get examples of modules with placeholders
+        cur.execute("""
+            SELECT module_code, shopify_handle, os_environment
+            FROM os_modules_v3_1
+            WHERE (
+                (front_label_text IS NOT NULL AND TRIM(front_label_text) <> '' 
+                 AND front_label_text ~* '(TBD|MISSING|REVIEW|PLACEHOLDER)')
+                OR
+                (back_label_text IS NOT NULL AND TRIM(back_label_text) <> '' 
+                 AND back_label_text ~* '(TBD|MISSING|REVIEW|PLACEHOLDER)')
+            )
+            ORDER BY shopify_handle, os_environment
+            LIMIT 10
+        """)
+        placeholder_examples = [dict(r) for r in cur.fetchall()]
+        
+        # Get examples of modules missing front or back
+        cur.execute("""
+            SELECT module_code, shopify_handle, os_environment,
+                   CASE WHEN front_label_text IS NULL OR TRIM(front_label_text) = '' THEN 'front' ELSE '' END AS missing_front,
+                   CASE WHEN back_label_text IS NULL OR TRIM(back_label_text) = '' THEN 'back' ELSE '' END AS missing_back
+            FROM os_modules_v3_1
+            WHERE front_label_text IS NULL OR TRIM(front_label_text) = ''
+               OR back_label_text IS NULL OR TRIM(back_label_text) = ''
+            ORDER BY shopify_handle, os_environment
+            LIMIT 10
+        """)
+        missing_examples = [dict(r) for r in cur.fetchall()]
+        
+        cur.close()
+        conn.close()
+        
+        # Calculate dirty count using inclusion-exclusion principle
+        # dirty = missing_front_or_back + placeholders_front_or_back - overlap
+        dirty_count = missing_front_or_back + placeholders_front_or_back - overlap_missing_and_placeholders
+        
+        # Validate invariant: clean + dirty = total
+        invariant_pass = (clean_copy_count + dirty_count) == total_modules
+        
+        return {
+            "table": "os_modules_v3_1",
+            "total_modules": total_modules,
+            "missing_front": missing_front,
+            "missing_back": missing_back,
+            "missing_front_or_back": missing_front_or_back,
+            "placeholders_front_or_back": placeholders_front_or_back,
+            "overlap_missing_and_placeholders": overlap_missing_and_placeholders,
+            "dirty_count": dirty_count,
+            "clean_copy_count": clean_copy_count,
+            "clean_copy_percentage": round(100 * clean_copy_count / total_modules, 1) if total_modules > 0 else 0,
+            "invariant_check": {
+                "rule": "clean_copy_count + dirty_count = total_modules",
+                "values": f"{clean_copy_count} + {dirty_count} = {total_modules}",
+                "status": "PASS" if invariant_pass else "FAIL"
+            },
+            "examples": {
+                "placeholder_examples": placeholder_examples,
+                "missing_examples": missing_examples
+            },
+            "definition": {
+                "clean_copy": "front_label_text and back_label_text both non-empty and without placeholders",
+                "placeholders_pattern": "(TBD|MISSING|REVIEW|PLACEHOLDER) case-insensitive"
+            }
+        }
+        
+    except Exception as e:
+        try:
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Clean copy audit error: {str(e)}")
+
+
+# ============================================================================
+# MAIN AUDIT ENDPOINTS
+# ============================================================================
+
 @router.get("/audit/os-modules")
 def audit_os_modules(mode: Optional[str] = Query(default=None)) -> Dict[str, Any]:
     """
@@ -84,7 +253,7 @@ def audit_os_modules(mode: Optional[str] = Query(default=None)) -> Dict[str, Any
         raise HTTPException(status_code=500, detail="Database connection failed")
     
     results = {
-        "audit_version": "2.0.0",
+        "audit_version": "2.1.0",
         "table": "os_modules_v3_1",
         "mode": mode or "all",
         "checks": {},
