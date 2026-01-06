@@ -1,12 +1,12 @@
 """
-GenoMAX² QA Compare Module v7
+GenoMAX² QA Compare Module v7.1
 Batch-aware comparison using payload snapshots from override batches
 
-CHANGES FROM v6:
-- Added batch-aware comparison endpoint /compare/batch/{batch_id}
-- Compares DB against payload snapshot, NOT hardcoded EXCEL_YES_ROWS
-- Authoritative fields match OVERRIDE_FIELDS (6 fields, excludes evidence_rationale)
-- Legacy endpoints retained for backward compatibility but deprecated
+CHANGES FROM v7:
+- Added excluded/attempted counts to summary
+- Added invariant_check for mathematical consistency validation
+- Rule 1: attempted + excluded = payload_records
+- Rule 2: matched_in_db + not_found_in_db = attempted
 
 SOURCE OF TRUTH:
 - For batch comparison: catalog_override_payload_snapshot_v1 table
@@ -65,6 +65,10 @@ def compare_batch(batch_id: str) -> Dict[str, Any]:
     """
     Compare DB against payload snapshot from a specific override batch.
     This is the authoritative QA comparison - uses persisted payload, not hardcoded data.
+    
+    Invariants:
+    - attempted + excluded = payload_records
+    - matched_in_db + not_found_in_db = attempted
     """
     conn = get_db()
     if not conn:
@@ -118,8 +122,10 @@ def compare_batch(batch_id: str) -> Dict[str, Any]:
             db_by_key[key] = dict(row)
         
         # Compare payload against DB
-        matched = 0
-        not_found = []
+        excluded = 0      # Records without shopify_handle (no DB mapping)
+        attempted = 0     # Records with handle that we tried to compare
+        matched = 0       # Found in DB
+        not_found = []    # Not found in DB
         diffs = []
         field_diff_counts = {f: 0 for f in AUTHORITATIVE_FIELDS}
         
@@ -130,8 +136,10 @@ def compare_batch(batch_id: str) -> Dict[str, Any]:
             
             if not handle:
                 # Skip records without handle mapping
+                excluded += 1
                 continue
             
+            attempted += 1
             key = (handle, env)
             
             if key not in db_by_key:
@@ -172,9 +180,31 @@ def compare_batch(batch_id: str) -> Dict[str, Any]:
         conn.close()
         
         total_diffs = sum(field_diff_counts.values())
+        payload_records = len(payload_rows)
+        not_found_count = len(not_found)
+        
+        # Validate invariants
+        invariant1_pass = (attempted + excluded) == payload_records
+        invariant2_pass = (matched + not_found_count) == attempted
+        
+        invariant_check = {
+            "rules": [
+                {
+                    "name": "attempted + excluded = payload_records",
+                    "values": f"{attempted} + {excluded} = {payload_records}",
+                    "status": "PASS" if invariant1_pass else "FAIL"
+                },
+                {
+                    "name": "matched_in_db + not_found_in_db = attempted",
+                    "values": f"{matched} + {not_found_count} = {attempted}",
+                    "status": "PASS" if invariant2_pass else "FAIL"
+                }
+            ],
+            "overall_status": "PASS" if (invariant1_pass and invariant2_pass) else "FAIL"
+        }
         
         # Determine overall status
-        if total_diffs == 0 and len(not_found) == 0:
+        if total_diffs == 0 and not_found_count == 0:
             overall_status = "PASS"
             decision = "DB is 100% aligned with override payload for all authoritative fields"
         else:
@@ -182,8 +212,8 @@ def compare_batch(batch_id: str) -> Dict[str, Any]:
             issues = []
             if total_diffs > 0:
                 issues.append(f"{total_diffs} field differences across {len(diffs)} records")
-            if len(not_found) > 0:
-                issues.append(f"{len(not_found)} handles not found in DB")
+            if not_found_count > 0:
+                issues.append(f"{not_found_count} handles not found in DB")
             decision = f"Discrepancies found: {'; '.join(issues)}"
         
         return {
@@ -193,12 +223,15 @@ def compare_batch(batch_id: str) -> Dict[str, Any]:
             "overall_status": overall_status,
             "decision": decision,
             "summary": {
-                "payload_records": len(payload_rows),
+                "payload_records": payload_records,
+                "excluded": excluded,
+                "attempted": attempted,
                 "matched_in_db": matched,
-                "not_found_in_db": len(not_found),
+                "not_found_in_db": not_found_count,
                 "records_with_diffs": len(diffs),
                 "total_field_diffs": total_diffs
             },
+            "invariant_check": invariant_check,
             "field_diff_counts": field_diff_counts,
             "authoritative_fields": AUTHORITATIVE_FIELDS,
             "not_found": not_found[:10],
@@ -224,6 +257,7 @@ def compare_batch_summary(batch_id: str) -> Dict[str, Any]:
         "overall_status": full["overall_status"],
         "decision": full["decision"],
         "summary": full["summary"],
+        "invariant_check": full["invariant_check"],
         "field_diff_counts": full["field_diff_counts"]
     }
 
