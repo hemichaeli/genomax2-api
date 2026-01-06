@@ -1,5 +1,5 @@
 """
-GenoMAX² Excel Override Module v1
+GenoMAX² Excel Override Module v2
 Implements Option D: Primary ingredient for classification + Aggregate safety/evidence
 
 FLOW:
@@ -8,7 +8,14 @@ FLOW:
 3. Map payload to DB modules via shopify_handle
 4. Dry-run diff report
 5. Execute override in single transaction
-6. QC verification
+6. Persist payload snapshot for QA verification
+7. QC verification via batch-aware compare
+
+CHANGES FROM v1:
+- Added catalog_override_payload_snapshot_v1 table
+- Payload is persisted during execute for later QA compare
+- Added /override/batches endpoint to list batches
+- Added /override/payload/{batch_id} endpoint to retrieve snapshot
 """
 
 import os
@@ -16,7 +23,7 @@ import json
 import uuid
 from datetime import datetime
 from typing import Dict, Any, List, Optional, Tuple
-from fastapi import APIRouter, HTTPException, UploadFile, File
+from fastapi import APIRouter, HTTPException, UploadFile, File, Query
 import psycopg2
 from psycopg2.extras import RealDictCursor
 import pandas as pd
@@ -101,8 +108,7 @@ PRIMARY_INGREDIENT_MAP = {
     'vitamin-d3-2000iu-softgel-capsules': 'Vitamin D3',
 }
 
-# Fields to override from Excel
-# NOTE: evidence_rationale does NOT exist in os_modules_v3_1 - excluded from override
+# Authoritative fields for override (evidence_rationale excluded - column not in DB)
 OVERRIDE_FIELDS = [
     'os_layer',
     'biological_domain',  # mapped from biological_subsystem
@@ -110,7 +116,6 @@ OVERRIDE_FIELDS = [
     'safety_notes',
     'contraindications',
     'dosing_protocol',  # mapped from dosage_context_note
-    # 'evidence_rationale' - column does not exist in DB
 ]
 
 
@@ -259,6 +264,40 @@ def migrate_override_tables() -> Dict[str, Any]:
             )
         """)
         
+        # Create payload snapshot table for QA verification
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS catalog_override_payload_snapshot_v1 (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                batch_id UUID NOT NULL,
+                supliful_sku VARCHAR(200) NOT NULL,
+                os_environment VARCHAR(20) NOT NULL,
+                shopify_handle VARCHAR(200),
+                os_layer VARCHAR(50),
+                biological_domain VARCHAR(100),
+                suggested_use_full TEXT,
+                safety_notes TEXT,
+                contraindications TEXT,
+                dosing_protocol TEXT,
+                primary_ingredient VARCHAR(200),
+                all_ingredients TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(batch_id, supliful_sku, os_environment)
+            )
+        """)
+        
+        # Create batch metadata table
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS catalog_override_batch_v1 (
+                batch_id UUID PRIMARY KEY,
+                status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+                payload_count INTEGER,
+                modules_updated INTEGER,
+                errors_count INTEGER,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                completed_at TIMESTAMPTZ
+            )
+        """)
+        
         # Create indexes
         cur.execute("""
             CREATE INDEX IF NOT EXISTS idx_catalog_override_log_batch_id 
@@ -268,6 +307,14 @@ def migrate_override_tables() -> Dict[str, Any]:
             CREATE INDEX IF NOT EXISTS idx_catalog_override_log_module 
             ON catalog_override_log_v1 (module_code, os_environment)
         """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_catalog_override_payload_batch 
+            ON catalog_override_payload_snapshot_v1 (batch_id)
+        """)
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_catalog_override_payload_sku 
+            ON catalog_override_payload_snapshot_v1 (supliful_sku, os_environment)
+        """)
         
         conn.commit()
         cur.close()
@@ -275,10 +322,16 @@ def migrate_override_tables() -> Dict[str, Any]:
         
         return {
             "status": "success",
-            "tables_created": ["catalog_override_log_v1"],
+            "tables_created": [
+                "catalog_override_log_v1",
+                "catalog_override_payload_snapshot_v1",
+                "catalog_override_batch_v1"
+            ],
             "indexes_created": [
                 "idx_catalog_override_log_batch_id",
-                "idx_catalog_override_log_module"
+                "idx_catalog_override_log_module",
+                "idx_catalog_override_payload_batch",
+                "idx_catalog_override_payload_sku"
             ]
         }
         
@@ -394,7 +447,7 @@ async def override_dry_run(file: UploadFile = File(...)) -> Dict[str, Any]:
         
         cur = conn.cursor()
         
-        # Get current DB values (evidence_rationale column does not exist)
+        # Get current DB values
         cur.execute("""
             SELECT module_code, shopify_handle, os_environment, 
                    os_layer, biological_domain, suggested_use_full,
@@ -432,7 +485,7 @@ async def override_dry_run(file: UploadFile = File(...)) -> Dict[str, Any]:
             matched += 1
             db_row = db_by_handle[key]
             
-            # Field mappings: Excel -> DB (evidence_rationale excluded - column doesn't exist)
+            # Field mappings: Excel -> DB
             field_mappings = {
                 'os_layer': ('os_layer', record.get('os_layer', '')),
                 'biological_domain': ('biological_subsystem', record.get('biological_subsystem', '')),
@@ -493,6 +546,7 @@ async def override_dry_run(file: UploadFile = File(...)) -> Dict[str, Any]:
 async def override_execute(file: UploadFile = File(...), confirm: bool = False) -> Dict[str, Any]:
     """
     Execute the override. Requires confirm=True to proceed.
+    Persists payload snapshot for QA verification.
     """
     if not confirm:
         return {
@@ -520,7 +574,7 @@ async def override_execute(file: UploadFile = File(...), confirm: bool = False) 
         batch_id = str(uuid.uuid4())
         cur = conn.cursor()
         
-        # Ensure log table exists
+        # Ensure tables exist
         cur.execute("""
             CREATE TABLE IF NOT EXISTS catalog_override_log_v1 (
                 id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -535,7 +589,71 @@ async def override_execute(file: UploadFile = File(...), confirm: bool = False) 
             )
         """)
         
-        # Start transaction
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS catalog_override_payload_snapshot_v1 (
+                id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                batch_id UUID NOT NULL,
+                supliful_sku VARCHAR(200) NOT NULL,
+                os_environment VARCHAR(20) NOT NULL,
+                shopify_handle VARCHAR(200),
+                os_layer VARCHAR(50),
+                biological_domain VARCHAR(100),
+                suggested_use_full TEXT,
+                safety_notes TEXT,
+                contraindications TEXT,
+                dosing_protocol TEXT,
+                primary_ingredient VARCHAR(200),
+                all_ingredients TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                UNIQUE(batch_id, supliful_sku, os_environment)
+            )
+        """)
+        
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS catalog_override_batch_v1 (
+                batch_id UUID PRIMARY KEY,
+                status VARCHAR(20) NOT NULL DEFAULT 'PENDING',
+                payload_count INTEGER,
+                modules_updated INTEGER,
+                errors_count INTEGER,
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                completed_at TIMESTAMPTZ
+            )
+        """)
+        
+        # Register batch
+        cur.execute("""
+            INSERT INTO catalog_override_batch_v1 (batch_id, status, payload_count)
+            VALUES (%s, 'IN_PROGRESS', %s)
+        """, (batch_id, len(payload)))
+        
+        # Persist payload snapshot
+        for record in payload:
+            sku = record['supliful_sku']
+            env = record['os_environment']
+            handle = get_expected_handle(sku, env)
+            
+            cur.execute("""
+                INSERT INTO catalog_override_payload_snapshot_v1
+                (batch_id, supliful_sku, os_environment, shopify_handle,
+                 os_layer, biological_domain, suggested_use_full,
+                 safety_notes, contraindications, dosing_protocol,
+                 primary_ingredient, all_ingredients)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (batch_id, supliful_sku, os_environment) DO NOTHING
+            """, (
+                batch_id, sku, env, handle,
+                record.get('os_layer', ''),
+                record.get('biological_subsystem', ''),
+                record.get('suggested_use', ''),
+                record.get('safety_notes', ''),
+                record.get('contraindications', ''),
+                record.get('dosage_context_note', ''),
+                record.get('primary_ingredient', ''),
+                record.get('all_ingredients', '')
+            ))
+        
+        # Execute updates
         updated_count = 0
         field_updates = {f: 0 for f in OVERRIDE_FIELDS}
         errors = []
@@ -549,7 +667,7 @@ async def override_execute(file: UploadFile = File(...), confirm: bool = False) 
                 continue
             
             try:
-                # Get current values for logging (evidence_rationale excluded - column doesn't exist)
+                # Get current values for logging
                 cur.execute("""
                     SELECT module_code, os_layer, biological_domain, 
                            suggested_use_full, safety_notes, contraindications,
@@ -564,7 +682,7 @@ async def override_execute(file: UploadFile = File(...), confirm: bool = False) 
                 
                 module_code = existing['module_code']
                 
-                # Build update and log changes (evidence_rationale excluded)
+                # Build update and log changes
                 updates = []
                 params = []
                 
@@ -614,6 +732,16 @@ async def override_execute(file: UploadFile = File(...), confirm: bool = False) 
                     'error': str(e)
                 })
         
+        # Update batch status
+        cur.execute("""
+            UPDATE catalog_override_batch_v1
+            SET status = 'COMPLETED', 
+                modules_updated = %s, 
+                errors_count = %s,
+                completed_at = NOW()
+            WHERE batch_id = %s
+        """, (updated_count, len(errors), batch_id))
+        
         conn.commit()
         cur.close()
         conn.close()
@@ -627,7 +755,8 @@ async def override_execute(file: UploadFile = File(...), confirm: bool = False) 
                 "errors": len(errors)
             },
             "field_updates": field_updates,
-            "errors": errors[:10] if errors else []
+            "errors": errors[:10] if errors else [],
+            "qa_verify_url": f"/api/v1/qa/compare/batch/{batch_id}"
         }
         
     except Exception as e:
@@ -672,3 +801,91 @@ def get_override_logs(batch_id: str) -> Dict[str, Any]:
         except:
             pass
         raise HTTPException(status_code=500, detail=f"Log fetch error: {str(e)}")
+
+
+@router.get("/override/batches")
+def list_override_batches(limit: int = Query(default=10, le=50)) -> Dict[str, Any]:
+    """List recent override batches."""
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT batch_id, status, payload_count, modules_updated, 
+                   errors_count, created_at, completed_at
+            FROM catalog_override_batch_v1
+            ORDER BY created_at DESC
+            LIMIT %s
+        """, (limit,))
+        
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        
+        return {
+            "batch_count": len(rows),
+            "batches": [dict(r) for r in rows]
+        }
+        
+    except Exception as e:
+        try:
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Batch list error: {str(e)}")
+
+
+@router.get("/override/payload/{batch_id}")
+def get_override_payload(batch_id: str) -> Dict[str, Any]:
+    """Get the payload snapshot for a specific batch."""
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        cur = conn.cursor()
+        
+        # Get batch metadata
+        cur.execute("""
+            SELECT status, payload_count, modules_updated, errors_count, 
+                   created_at, completed_at
+            FROM catalog_override_batch_v1
+            WHERE batch_id = %s
+        """, (batch_id,))
+        batch = cur.fetchone()
+        
+        if not batch:
+            raise HTTPException(status_code=404, detail=f"Batch {batch_id} not found")
+        
+        # Get payload records
+        cur.execute("""
+            SELECT supliful_sku, os_environment, shopify_handle,
+                   os_layer, biological_domain, suggested_use_full,
+                   safety_notes, contraindications, dosing_protocol,
+                   primary_ingredient, all_ingredients
+            FROM catalog_override_payload_snapshot_v1
+            WHERE batch_id = %s
+            ORDER BY supliful_sku, os_environment
+        """, (batch_id,))
+        
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        
+        return {
+            "batch_id": batch_id,
+            "batch_metadata": dict(batch),
+            "payload_count": len(rows),
+            "payload": [dict(r) for r in rows]
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        try:
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Payload fetch error: {str(e)}")
