@@ -1,5 +1,5 @@
 """
-GenoMAX² QA Audit Module v2.2
+GenoMAX² QA Audit Module v2.3
 Post-Migration Validation for os_modules_v3_1
 
 SPLIT AUDIT MODES:
@@ -23,11 +23,14 @@ v2.1 CHANGES:
 
 v2.2 CHANGES:
 - Added /api/v1/qa/copy/clean/count endpoint (count-only)
+
+v2.3 CHANGES:
+- Enhanced /copy/clean/count for dashboard use (single query, all counts)
 """
 
 import os
 import re
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Union
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 import psycopg2
@@ -75,6 +78,58 @@ READY_FOR_DESIGN_CHECKS = [
 # ============================================================================
 # CLEAN COPY ENDPOINTS
 # ============================================================================
+
+@router.get("/copy/clean/count")
+def clean_copy_count_only() -> Dict[str, Union[int, float]]:
+    """
+    Fast dashboard endpoint for clean copy metrics.
+    
+    Single optimized query - no examples, no heavy calculations.
+    Returns all counts needed for dashboard display.
+    """
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        cur = conn.cursor()
+        # Single query that computes everything
+        cur.execute("""
+            SELECT 
+                COUNT(*) AS total,
+                COUNT(*) FILTER (
+                    WHERE front_label_text IS NOT NULL 
+                      AND BTRIM(front_label_text) <> ''
+                      AND back_label_text IS NOT NULL 
+                      AND BTRIM(back_label_text) <> ''
+                      AND front_label_text !~* '(TBD|MISSING|REVIEW|PLACEHOLDER)'
+                      AND back_label_text !~* '(TBD|MISSING|REVIEW|PLACEHOLDER)'
+                ) AS clean
+            FROM os_modules_v3_1
+        """)
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        
+        total = row["total"]
+        clean = row["clean"]
+        dirty = total - clean
+        
+        return {
+            "total": total,
+            "clean": clean,
+            "dirty": dirty,
+            "clean_pct": round(100 * clean / total, 1) if total > 0 else 0,
+            "dirty_pct": round(100 * dirty / total, 1) if total > 0 else 0
+        }
+        
+    except Exception as e:
+        try:
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Clean copy count error: {str(e)}")
+
 
 @router.get("/copy/clean/summary")
 def clean_copy_summary() -> Dict[str, Any]:
@@ -234,41 +289,6 @@ def clean_copy_summary() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=f"Clean copy audit error: {str(e)}")
 
 
-@router.get("/copy/clean/count")
-def clean_copy_count_only() -> Dict[str, int]:
-    """
-    Quick count-only endpoint for clean copy modules.
-    Returns just the count for dashboards and monitoring.
-    """
-    conn = get_db()
-    if not conn:
-        raise HTTPException(status_code=500, detail="Database connection failed")
-    
-    try:
-        cur = conn.cursor()
-        cur.execute("""
-            SELECT COUNT(*) AS count FROM os_modules_v3_1
-            WHERE front_label_text IS NOT NULL 
-              AND BTRIM(front_label_text) <> ''
-              AND back_label_text IS NOT NULL 
-              AND BTRIM(back_label_text) <> ''
-              AND front_label_text !~* '(TBD|MISSING|REVIEW|PLACEHOLDER)'
-              AND back_label_text !~* '(TBD|MISSING|REVIEW|PLACEHOLDER)'
-        """)
-        clean_copy_count = cur.fetchone()["count"]
-        cur.close()
-        conn.close()
-        
-        return {"clean_copy_count": clean_copy_count}
-        
-    except Exception as e:
-        try:
-            conn.close()
-        except:
-            pass
-        raise HTTPException(status_code=500, detail=f"Clean copy count error: {str(e)}")
-
-
 # ============================================================================
 # MAIN AUDIT ENDPOINTS
 # ============================================================================
@@ -291,7 +311,7 @@ def audit_os_modules(mode: Optional[str] = Query(default=None)) -> Dict[str, Any
         raise HTTPException(status_code=500, detail="Database connection failed")
     
     results = {
-        "audit_version": "2.2.0",
+        "audit_version": "2.3.0",
         "table": "os_modules_v3_1",
         "mode": mode or "all",
         "checks": {},
