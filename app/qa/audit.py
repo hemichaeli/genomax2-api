@@ -1,21 +1,28 @@
 """
-GenoMAX² QA Audit Module
+GenoMAX² QA Audit Module v2
 Post-Migration Validation for os_modules_v3_1
 
-Validates:
-- A1-A4: Schema and uniqueness checks
-- B1-B3: Core field validation
-- D1-D2: OS-environment pairing
-- E1-E2: New modules verification  
-- F1: Index verification
+SPLIT AUDIT MODES:
+1. DB_INTEGRITY - Schema, uniqueness, environment values (should always PASS)
+2. READY_FOR_DESIGN - Requires link/net_quantity/fda_disclaimer/no placeholders 
+   (will FAIL until Supliful API integration)
 
-Returns comprehensive JSON report with PASS/FAIL status.
+Individual checks:
+- A1-A4: Schema and uniqueness checks (DB_INTEGRITY)
+- B1: os_environment validation (DB_INTEGRITY)
+- B2: Placeholder check (READY_FOR_DESIGN)
+- B3: Required fields check (READY_FOR_DESIGN)
+- D1-D2: OS-environment pairing (DB_INTEGRITY)
+- E1-E2: New modules verification (DB_INTEGRITY)
+- F1: Index verification (DB_INTEGRITY)
+
+Returns comprehensive JSON report with PASS/FAIL status per mode.
 """
 
 import os
 import re
 from typing import Dict, Any, List, Optional
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -39,10 +46,37 @@ class FixDuplicatesRequest(BaseModel):
     keep_module_code: str
 
 
+# Check classification by audit mode
+DB_INTEGRITY_CHECKS = [
+    "A1_new_columns",
+    "A2_total_modules", 
+    "A3_shopify_handle_unique",
+    "A4_module_code_unique",
+    "B1_os_environment_valid",
+    "D1_single_environment_products",
+    "D2_pairing_statistics",
+    "E1_new_modules_list",
+    "E2_new_modules_count",
+    "F1_supliful_handle_index",
+]
+
+READY_FOR_DESIGN_CHECKS = [
+    "B2_no_placeholders",
+    "B3_required_fields",
+]
+
+
 @router.get("/audit/os-modules")
-def audit_os_modules() -> Dict[str, Any]:
+def audit_os_modules(mode: Optional[str] = Query(default=None)) -> Dict[str, Any]:
     """
     Complete QA audit for os_modules_v3_1 table.
+    
+    Parameters:
+    - mode: Optional filter for audit scope
+      - "integrity" - Only DB integrity checks (should PASS)
+      - "design" - Only ready-for-design checks (may FAIL until Supliful API)
+      - None/omitted - All checks
+    
     Returns PASS/FAIL status for each check category.
     """
     conn = get_db()
@@ -50,8 +84,9 @@ def audit_os_modules() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail="Database connection failed")
     
     results = {
-        "audit_version": "1.0.0",
+        "audit_version": "2.0.0",
         "table": "os_modules_v3_1",
+        "mode": mode or "all",
         "checks": {},
         "summary": {
             "total_checks": 0,
@@ -59,264 +94,320 @@ def audit_os_modules() -> Dict[str, Any]:
             "failed": 0,
             "warnings": 0
         },
+        "integrity_summary": {
+            "total_checks": 0,
+            "passed": 0,
+            "failed": 0,
+            "status": "PENDING"
+        },
+        "design_summary": {
+            "total_checks": 0,
+            "passed": 0,
+            "failed": 0,
+            "status": "PENDING"
+        },
         "overall_status": "PENDING"
     }
     
     try:
         cur = conn.cursor()
         
-        # ========== PART A: Schema & Base DB Checks ==========
+        # ========== PART A: Schema & Base DB Checks (DB_INTEGRITY) ==========
         
-        # A1: Verify new columns exist
-        cur.execute("""
-            SELECT column_name, data_type
-            FROM information_schema.columns
-            WHERE table_name = 'os_modules_v3_1'
-              AND column_name IN ('net_quantity','supliful_handle')
-            ORDER BY column_name
-        """)
-        a1_rows = cur.fetchall()
-        a1_columns = [r["column_name"] for r in a1_rows]
-        results["checks"]["A1_new_columns"] = {
-            "description": "Verify net_quantity and supliful_handle columns exist",
-            "expected": ["net_quantity", "supliful_handle"],
-            "found": a1_columns,
-            "status": "PASS" if len(a1_columns) == 2 else "FAIL"
-        }
+        if mode in (None, "integrity"):
+            # A1: Verify new columns exist
+            cur.execute("""
+                SELECT column_name, data_type
+                FROM information_schema.columns
+                WHERE table_name = 'os_modules_v3_1'
+                  AND column_name IN ('net_quantity','supliful_handle')
+                ORDER BY column_name
+            """)
+            a1_rows = cur.fetchall()
+            a1_columns = [r["column_name"] for r in a1_rows]
+            results["checks"]["A1_new_columns"] = {
+                "description": "Verify net_quantity and supliful_handle columns exist",
+                "expected": ["net_quantity", "supliful_handle"],
+                "found": a1_columns,
+                "status": "PASS" if len(a1_columns) == 2 else "FAIL",
+                "mode": "DB_INTEGRITY"
+            }
+            
+            # A2: Total module count
+            cur.execute("SELECT COUNT(*) AS total FROM os_modules_v3_1")
+            a2_count = cur.fetchone()["total"]
+            results["checks"]["A2_total_modules"] = {
+                "description": "Total module count (expected 210 after migration)",
+                "expected": 210,
+                "found": a2_count,
+                "status": "PASS" if a2_count == 210 else "FAIL",
+                "mode": "DB_INTEGRITY"
+            }
+            
+            # A3: shopify_handle uniqueness (excluding DUPLICATE_INACTIVE)
+            cur.execute("""
+                SELECT shopify_handle, COUNT(*) AS c
+                FROM os_modules_v3_1
+                WHERE supplier_status IS NULL OR supplier_status != 'DUPLICATE_INACTIVE'
+                GROUP BY shopify_handle
+                HAVING COUNT(*) > 1
+                ORDER BY c DESC, shopify_handle
+                LIMIT 10
+            """)
+            a3_dups = cur.fetchall()
+            results["checks"]["A3_shopify_handle_unique"] = {
+                "description": "No duplicate shopify_handle values (excluding DUPLICATE_INACTIVE)",
+                "duplicates_found": len(a3_dups),
+                "duplicates": [dict(r) for r in a3_dups] if a3_dups else [],
+                "status": "PASS" if len(a3_dups) == 0 else "FAIL",
+                "mode": "DB_INTEGRITY"
+            }
+            
+            # A4: module_code uniqueness
+            cur.execute("""
+                SELECT module_code, COUNT(*) AS c
+                FROM os_modules_v3_1
+                GROUP BY module_code
+                HAVING COUNT(*) > 1
+                ORDER BY c DESC, module_code
+                LIMIT 10
+            """)
+            a4_dups = cur.fetchall()
+            results["checks"]["A4_module_code_unique"] = {
+                "description": "No duplicate module_code values",
+                "duplicates_found": len(a4_dups),
+                "duplicates": [dict(r) for r in a4_dups] if a4_dups else [],
+                "status": "PASS" if len(a4_dups) == 0 else "FAIL",
+                "mode": "DB_INTEGRITY"
+            }
+            
+            # B1: os_environment valid values
+            cur.execute("""
+                SELECT os_environment, COUNT(*) AS count
+                FROM os_modules_v3_1
+                GROUP BY os_environment
+                ORDER BY COUNT(*) DESC
+            """)
+            b1_envs = cur.fetchall()
+            b1_env_names = [r["os_environment"] for r in b1_envs]
+            valid_envs = {"MAXimo²", "MAXima²"}
+            invalid_envs = [e for e in b1_env_names if e not in valid_envs]
+            results["checks"]["B1_os_environment_valid"] = {
+                "description": "os_environment contains only MAXimo² and MAXima²",
+                "expected": list(valid_envs),
+                "found": [dict(r) for r in b1_envs],
+                "invalid_values": invalid_envs,
+                "status": "PASS" if len(invalid_envs) == 0 else "FAIL",
+                "mode": "DB_INTEGRITY"
+            }
         
-        # A2: Total module count
-        cur.execute("SELECT COUNT(*) AS total FROM os_modules_v3_1")
-        a2_count = cur.fetchone()["total"]
-        results["checks"]["A2_total_modules"] = {
-            "description": "Total module count (expected 210 after migration)",
-            "expected": 210,
-            "found": a2_count,
-            "status": "PASS" if a2_count == 210 else "FAIL"
-        }
+        # ========== PART B2-B3: Design Readiness Checks (READY_FOR_DESIGN) ==========
         
-        # A3: shopify_handle uniqueness (excluding DUPLICATE_INACTIVE)
-        cur.execute("""
-            SELECT shopify_handle, COUNT(*) AS c
-            FROM os_modules_v3_1
-            WHERE supplier_status != 'DUPLICATE_INACTIVE'
-            GROUP BY shopify_handle
-            HAVING COUNT(*) > 1
-            ORDER BY c DESC, shopify_handle
-            LIMIT 10
-        """)
-        a3_dups = cur.fetchall()
-        results["checks"]["A3_shopify_handle_unique"] = {
-            "description": "No duplicate shopify_handle values (excluding DUPLICATE_INACTIVE)",
-            "duplicates_found": len(a3_dups),
-            "duplicates": [dict(r) for r in a3_dups] if a3_dups else [],
-            "status": "PASS" if len(a3_dups) == 0 else "FAIL"
-        }
-        
-        # A4: module_code uniqueness
-        cur.execute("""
-            SELECT module_code, COUNT(*) AS c
-            FROM os_modules_v3_1
-            GROUP BY module_code
-            HAVING COUNT(*) > 1
-            ORDER BY c DESC, module_code
-            LIMIT 10
-        """)
-        a4_dups = cur.fetchall()
-        results["checks"]["A4_module_code_unique"] = {
-            "description": "No duplicate module_code values",
-            "duplicates_found": len(a4_dups),
-            "duplicates": [dict(r) for r in a4_dups] if a4_dups else [],
-            "status": "PASS" if len(a4_dups) == 0 else "FAIL"
-        }
-        
-        # ========== PART B: Core Field Validation ==========
-        
-        # B1: os_environment valid values
-        cur.execute("""
-            SELECT os_environment, COUNT(*) AS count
-            FROM os_modules_v3_1
-            GROUP BY os_environment
-            ORDER BY COUNT(*) DESC
-        """)
-        b1_envs = cur.fetchall()
-        b1_env_names = [r["os_environment"] for r in b1_envs]
-        valid_envs = {"MAXimo²", "MAXima²"}
-        invalid_envs = [e for e in b1_env_names if e not in valid_envs]
-        results["checks"]["B1_os_environment_valid"] = {
-            "description": "os_environment contains only MAXimo² and MAXima²",
-            "expected": list(valid_envs),
-            "found": [dict(r) for r in b1_envs],
-            "invalid_values": invalid_envs,
-            "status": "PASS" if len(invalid_envs) == 0 else "FAIL"
-        }
-        
-        # B2: Placeholder check
-        cur.execute("""
-            SELECT shopify_handle, os_environment, module_code,
-                   front_label_text, back_label_text, fda_disclaimer, net_quantity
-            FROM os_modules_v3_1
-            WHERE
-              COALESCE(front_label_text,'') ~* '\\m(TBD|MISSING|REVIEW|PLACEHOLDER)\\M'
-              OR COALESCE(back_label_text,'') ~* '\\m(TBD|MISSING|REVIEW|PLACEHOLDER)\\M'
-              OR COALESCE(fda_disclaimer,'') ~* '\\m(TBD|MISSING|REVIEW|PLACEHOLDER)\\M'
-              OR COALESCE(net_quantity,'') ~* '\\m(TBD|MISSING|REVIEW|PLACEHOLDER)\\M'
-            ORDER BY shopify_handle, os_environment
-            LIMIT 50
-        """)
-        b2_placeholders = cur.fetchall()
-        results["checks"]["B2_no_placeholders"] = {
-            "description": "No TBD/MISSING/REVIEW/PLACEHOLDER in text fields",
-            "placeholders_found": len(b2_placeholders),
-            "examples": [
+        if mode in (None, "design"):
+            # B2: Placeholder check
+            cur.execute("""
+                SELECT shopify_handle, os_environment, module_code,
+                       front_label_text, back_label_text, fda_disclaimer, net_quantity
+                FROM os_modules_v3_1
+                WHERE
+                  COALESCE(front_label_text,'') ~* '\\m(TBD|MISSING|REVIEW|PLACEHOLDER)\\M'
+                  OR COALESCE(back_label_text,'') ~* '\\m(TBD|MISSING|REVIEW|PLACEHOLDER)\\M'
+                  OR COALESCE(fda_disclaimer,'') ~* '\\m(TBD|MISSING|REVIEW|PLACEHOLDER)\\M'
+                  OR COALESCE(net_quantity,'') ~* '\\m(TBD|MISSING|REVIEW|PLACEHOLDER)\\M'
+                ORDER BY shopify_handle, os_environment
+                LIMIT 50
+            """)
+            b2_placeholders = cur.fetchall()
+            results["checks"]["B2_no_placeholders"] = {
+                "description": "No TBD/MISSING/REVIEW/PLACEHOLDER in text fields",
+                "placeholders_found": len(b2_placeholders),
+                "examples": [
+                    {
+                        "shopify_handle": r["shopify_handle"],
+                        "os_environment": r["os_environment"],
+                        "module_code": r["module_code"]
+                    } for r in b2_placeholders[:10]
+                ],
+                "status": "PASS" if len(b2_placeholders) == 0 else "FAIL",
+                "mode": "READY_FOR_DESIGN",
+                "note": "Expected to FAIL until Supliful API populates fields"
+            }
+            
+            # B3: Required fields check (READY_FOR_DESIGN gate)
+            cur.execute("""
+                SELECT
+                  SUM(CASE WHEN NOT (product_name IS NOT NULL AND TRIM(product_name) <> '') THEN 1 ELSE 0 END) AS missing_product_name,
+                  SUM(CASE WHEN NOT ((url IS NOT NULL AND TRIM(url) <> '') OR (supplier_page_url IS NOT NULL AND TRIM(supplier_page_url) <> '')) THEN 1 ELSE 0 END) AS missing_link,
+                  SUM(CASE WHEN NOT (net_quantity IS NOT NULL AND TRIM(net_quantity) <> '') THEN 1 ELSE 0 END) AS missing_net_quantity,
+                  SUM(CASE WHEN NOT (front_label_text IS NOT NULL AND TRIM(front_label_text) <> '') THEN 1 ELSE 0 END) AS missing_front_label,
+                  SUM(CASE WHEN NOT (back_label_text IS NOT NULL AND TRIM(back_label_text) <> '') THEN 1 ELSE 0 END) AS missing_back_label,
+                  SUM(CASE WHEN NOT (fda_disclaimer IS NOT NULL AND TRIM(fda_disclaimer) <> '') THEN 1 ELSE 0 END) AS missing_fda_disclaimer
+                FROM os_modules_v3_1
+            """)
+            b3_summary = cur.fetchone()
+            b3_all_zero = all(v == 0 for v in b3_summary.values())
+            results["checks"]["B3_required_fields"] = {
+                "description": "READY_FOR_DESIGN required fields populated",
+                "missing_counts": dict(b3_summary),
+                "status": "PASS" if b3_all_zero else "FAIL",
+                "mode": "READY_FOR_DESIGN",
+                "note": "Expected to FAIL until Supliful API provides link/net_quantity/fda_disclaimer"
+            }
+            
+            # B3b: Detailed list of modules missing required fields (limited)
+            cur.execute("""
+                SELECT shopify_handle, os_environment, module_code
+                FROM os_modules_v3_1
+                WHERE
+                  NOT (product_name IS NOT NULL AND TRIM(product_name) <> '')
+                  OR NOT ((url IS NOT NULL AND TRIM(url) <> '') OR (supplier_page_url IS NOT NULL AND TRIM(supplier_page_url) <> ''))
+                  OR NOT (net_quantity IS NOT NULL AND TRIM(net_quantity) <> '')
+                  OR NOT (front_label_text IS NOT NULL AND TRIM(front_label_text) <> '')
+                  OR NOT (back_label_text IS NOT NULL AND TRIM(back_label_text) <> '')
+                  OR NOT (fda_disclaimer IS NOT NULL AND TRIM(fda_disclaimer) <> '')
+                ORDER BY shopify_handle, os_environment
+                LIMIT 20
+            """)
+            b3b_missing = cur.fetchall()
+            results["checks"]["B3_required_fields"]["modules_with_missing_fields"] = [
                 {
                     "shopify_handle": r["shopify_handle"],
                     "os_environment": r["os_environment"],
                     "module_code": r["module_code"]
-                } for r in b2_placeholders[:10]
-            ],
-            "status": "PASS" if len(b2_placeholders) == 0 else "FAIL"
-        }
+                } for r in b3b_missing
+            ]
         
-        # B3: Required fields check (READY_FOR_DESIGN gate)
-        cur.execute("""
-            SELECT
-              SUM(CASE WHEN NOT (product_name IS NOT NULL AND TRIM(product_name) <> '') THEN 1 ELSE 0 END) AS missing_product_name,
-              SUM(CASE WHEN NOT ((url IS NOT NULL AND TRIM(url) <> '') OR (supplier_page_url IS NOT NULL AND TRIM(supplier_page_url) <> '')) THEN 1 ELSE 0 END) AS missing_link,
-              SUM(CASE WHEN NOT (net_quantity IS NOT NULL AND TRIM(net_quantity) <> '') THEN 1 ELSE 0 END) AS missing_net_quantity,
-              SUM(CASE WHEN NOT (front_label_text IS NOT NULL AND TRIM(front_label_text) <> '') THEN 1 ELSE 0 END) AS missing_front_label,
-              SUM(CASE WHEN NOT (back_label_text IS NOT NULL AND TRIM(back_label_text) <> '') THEN 1 ELSE 0 END) AS missing_back_label,
-              SUM(CASE WHEN NOT (fda_disclaimer IS NOT NULL AND TRIM(fda_disclaimer) <> '') THEN 1 ELSE 0 END) AS missing_fda_disclaimer
-            FROM os_modules_v3_1
-        """)
-        b3_summary = cur.fetchone()
-        b3_all_zero = all(v == 0 for v in b3_summary.values())
-        results["checks"]["B3_required_fields"] = {
-            "description": "READY_FOR_DESIGN required fields populated",
-            "missing_counts": dict(b3_summary),
-            "status": "PASS" if b3_all_zero else "FAIL"
-        }
+        # ========== PART D: OS-Environment Pairing (DB_INTEGRITY) ==========
         
-        # B3b: Detailed list of modules missing required fields (limited)
-        cur.execute("""
-            SELECT shopify_handle, os_environment, module_code
-            FROM os_modules_v3_1
-            WHERE
-              NOT (product_name IS NOT NULL AND TRIM(product_name) <> '')
-              OR NOT ((url IS NOT NULL AND TRIM(url) <> '') OR (supplier_page_url IS NOT NULL AND TRIM(supplier_page_url) <> ''))
-              OR NOT (net_quantity IS NOT NULL AND TRIM(net_quantity) <> '')
-              OR NOT (front_label_text IS NOT NULL AND TRIM(front_label_text) <> '')
-              OR NOT (back_label_text IS NOT NULL AND TRIM(back_label_text) <> '')
-              OR NOT (fda_disclaimer IS NOT NULL AND TRIM(fda_disclaimer) <> '')
-            ORDER BY shopify_handle, os_environment
-            LIMIT 20
-        """)
-        b3b_missing = cur.fetchall()
-        results["checks"]["B3_required_fields"]["modules_with_missing_fields"] = [
-            {
-                "shopify_handle": r["shopify_handle"],
-                "os_environment": r["os_environment"],
-                "module_code": r["module_code"]
-            } for r in b3b_missing
-        ]
-        
-        # ========== PART D: OS-Environment Pairing ==========
-        
-        # D1: Single-environment products
-        cur.execute("""
-            SELECT supliful_handle, COUNT(DISTINCT os_environment) AS env_count,
-                   STRING_AGG(DISTINCT os_environment, ', ') AS environments
-            FROM os_modules_v3_1
-            WHERE supliful_handle IS NOT NULL
-            GROUP BY supliful_handle
-            HAVING COUNT(DISTINCT os_environment) = 1
-            ORDER BY supliful_handle
-        """)
-        d1_single = cur.fetchall()
-        results["checks"]["D1_single_environment_products"] = {
-            "description": "Products with only one os_environment (may be intentional)",
-            "count": len(d1_single),
-            "products": [dict(r) for r in d1_single],
-            "status": "INFO"  # Not necessarily a failure
-        }
-        
-        # D2: Pairing statistics
-        cur.execute("""
-            SELECT 
-              COUNT(*) FILTER (WHERE env_count = 2) AS properly_paired,
-              COUNT(*) FILTER (WHERE env_count = 1) AS single_env,
-              COUNT(*) FILTER (WHERE env_count > 2) AS over_paired
-            FROM (
-              SELECT supliful_handle, COUNT(DISTINCT os_environment) AS env_count
-              FROM os_modules_v3_1
-              WHERE supliful_handle IS NOT NULL
-              GROUP BY supliful_handle
-            ) sub
-        """)
-        d2_stats = cur.fetchone()
-        results["checks"]["D2_pairing_statistics"] = {
-            "description": "Product environment pairing summary",
-            "properly_paired": d2_stats["properly_paired"],
-            "single_environment": d2_stats["single_env"],
-            "over_paired": d2_stats["over_paired"],
-            "status": "PASS" if d2_stats["over_paired"] == 0 else "WARNING"
-        }
-        
-        # ========== PART E: New Modules Verification ==========
-        
-        # E1: New modules list
-        cur.execute("""
-            SELECT module_code, shopify_handle, os_environment, os_layer, 
-                   biological_domain, supliful_handle
-            FROM os_modules_v3_1
-            WHERE module_code LIKE 'NEW-%'
-            ORDER BY supliful_handle, os_environment
-        """)
-        e1_new = cur.fetchall()
-        results["checks"]["E1_new_modules_list"] = {
-            "description": "Modules inserted during migration (module_code LIKE 'NEW-%')",
-            "count": len(e1_new),
-            "expected_count": 8,
-            "modules": [dict(r) for r in e1_new],
-            "status": "PASS" if len(e1_new) == 8 else "FAIL"
-        }
-        
-        # E2: New modules count verification
-        results["checks"]["E2_new_modules_count"] = {
-            "description": "Exactly 8 new modules inserted",
-            "expected": 8,
-            "found": len(e1_new),
-            "status": "PASS" if len(e1_new) == 8 else "FAIL"
-        }
-        
-        # ========== PART F: Index Verification ==========
-        
-        # F1: supliful_handle index
-        cur.execute("""
-            SELECT indexname, indexdef
-            FROM pg_indexes
-            WHERE tablename = 'os_modules_v3_1'
-              AND indexname = 'idx_os_modules_v3_1_supliful_handle'
-        """)
-        f1_index = cur.fetchone()
-        results["checks"]["F1_supliful_handle_index"] = {
-            "description": "Index idx_os_modules_v3_1_supliful_handle exists",
-            "found": dict(f1_index) if f1_index else None,
-            "status": "PASS" if f1_index else "FAIL"
-        }
+        if mode in (None, "integrity"):
+            # D1: Single-environment products
+            cur.execute("""
+                SELECT supliful_handle, COUNT(DISTINCT os_environment) AS env_count,
+                       STRING_AGG(DISTINCT os_environment, ', ') AS environments
+                FROM os_modules_v3_1
+                WHERE supliful_handle IS NOT NULL
+                GROUP BY supliful_handle
+                HAVING COUNT(DISTINCT os_environment) = 1
+                ORDER BY supliful_handle
+            """)
+            d1_single = cur.fetchall()
+            results["checks"]["D1_single_environment_products"] = {
+                "description": "Products with only one os_environment (may be intentional)",
+                "count": len(d1_single),
+                "products": [dict(r) for r in d1_single],
+                "status": "INFO",
+                "mode": "DB_INTEGRITY"
+            }
+            
+            # D2: Pairing statistics
+            cur.execute("""
+                SELECT 
+                  COUNT(*) FILTER (WHERE env_count = 2) AS properly_paired,
+                  COUNT(*) FILTER (WHERE env_count = 1) AS single_env,
+                  COUNT(*) FILTER (WHERE env_count > 2) AS over_paired
+                FROM (
+                  SELECT supliful_handle, COUNT(DISTINCT os_environment) AS env_count
+                  FROM os_modules_v3_1
+                  WHERE supliful_handle IS NOT NULL
+                  GROUP BY supliful_handle
+                ) sub
+            """)
+            d2_stats = cur.fetchone()
+            results["checks"]["D2_pairing_statistics"] = {
+                "description": "Product environment pairing summary",
+                "properly_paired": d2_stats["properly_paired"],
+                "single_environment": d2_stats["single_env"],
+                "over_paired": d2_stats["over_paired"],
+                "status": "PASS" if d2_stats["over_paired"] == 0 else "WARNING",
+                "mode": "DB_INTEGRITY"
+            }
+            
+            # ========== PART E: New Modules Verification (DB_INTEGRITY) ==========
+            
+            # E1: New modules list
+            cur.execute("""
+                SELECT module_code, shopify_handle, os_environment, os_layer, 
+                       biological_domain, supliful_handle
+                FROM os_modules_v3_1
+                WHERE module_code LIKE 'NEW-%'
+                ORDER BY supliful_handle, os_environment
+            """)
+            e1_new = cur.fetchall()
+            results["checks"]["E1_new_modules_list"] = {
+                "description": "Modules inserted during migration (module_code LIKE 'NEW-%')",
+                "count": len(e1_new),
+                "expected_count": 8,
+                "modules": [dict(r) for r in e1_new],
+                "status": "PASS" if len(e1_new) == 8 else "FAIL",
+                "mode": "DB_INTEGRITY"
+            }
+            
+            # E2: New modules count verification
+            results["checks"]["E2_new_modules_count"] = {
+                "description": "Exactly 8 new modules inserted",
+                "expected": 8,
+                "found": len(e1_new),
+                "status": "PASS" if len(e1_new) == 8 else "FAIL",
+                "mode": "DB_INTEGRITY"
+            }
+            
+            # ========== PART F: Index Verification (DB_INTEGRITY) ==========
+            
+            # F1: supliful_handle index
+            cur.execute("""
+                SELECT indexname, indexdef
+                FROM pg_indexes
+                WHERE tablename = 'os_modules_v3_1'
+                  AND indexname = 'idx_os_modules_v3_1_supliful_handle'
+            """)
+            f1_index = cur.fetchone()
+            results["checks"]["F1_supliful_handle_index"] = {
+                "description": "Index idx_os_modules_v3_1_supliful_handle exists",
+                "found": dict(f1_index) if f1_index else None,
+                "status": "PASS" if f1_index else "FAIL",
+                "mode": "DB_INTEGRITY"
+            }
         
         cur.close()
         conn.close()
         
-        # ========== Calculate Summary ==========
+        # ========== Calculate Summary by Mode ==========
         for check_name, check_result in results["checks"].items():
             results["summary"]["total_checks"] += 1
             status = check_result.get("status", "UNKNOWN")
+            check_mode = check_result.get("mode", "UNKNOWN")
+            
             if status == "PASS":
                 results["summary"]["passed"] += 1
             elif status == "FAIL":
                 results["summary"]["failed"] += 1
             elif status in ("WARNING", "INFO"):
                 results["summary"]["warnings"] += 1
+            
+            # Track by mode
+            if check_mode == "DB_INTEGRITY":
+                results["integrity_summary"]["total_checks"] += 1
+                if status == "PASS":
+                    results["integrity_summary"]["passed"] += 1
+                elif status == "FAIL":
+                    results["integrity_summary"]["failed"] += 1
+            elif check_mode == "READY_FOR_DESIGN":
+                results["design_summary"]["total_checks"] += 1
+                if status == "PASS":
+                    results["design_summary"]["passed"] += 1
+                elif status == "FAIL":
+                    results["design_summary"]["failed"] += 1
+        
+        # Mode-specific status
+        if results["integrity_summary"]["total_checks"] > 0:
+            results["integrity_summary"]["status"] = (
+                "PASS" if results["integrity_summary"]["failed"] == 0 else "FAIL"
+            )
+        
+        if results["design_summary"]["total_checks"] > 0:
+            results["design_summary"]["status"] = (
+                "PASS" if results["design_summary"]["failed"] == 0 else "FAIL"
+            )
         
         # Overall status
         if results["summary"]["failed"] == 0:
@@ -335,20 +426,57 @@ def audit_os_modules() -> Dict[str, Any]:
 
 
 @router.get("/audit/os-modules/summary")
-def audit_os_modules_summary() -> Dict[str, Any]:
+def audit_os_modules_summary(mode: Optional[str] = Query(default=None)) -> Dict[str, Any]:
     """
     Quick summary of os_modules_v3_1 audit status.
+    
+    Parameters:
+    - mode: "integrity" or "design" to filter, None for all
     """
-    full_audit = audit_os_modules()
+    full_audit = audit_os_modules(mode=mode)
+    
+    failed_integrity = [
+        name for name, check in full_audit["checks"].items()
+        if check.get("status") == "FAIL" and check.get("mode") == "DB_INTEGRITY"
+    ]
+    
+    failed_design = [
+        name for name, check in full_audit["checks"].items()
+        if check.get("status") == "FAIL" and check.get("mode") == "READY_FOR_DESIGN"
+    ]
+    
     return {
         "table": full_audit["table"],
+        "audit_version": full_audit["audit_version"],
+        "mode": full_audit["mode"],
         "overall_status": full_audit["overall_status"],
+        "integrity_status": full_audit["integrity_summary"]["status"],
+        "design_status": full_audit["design_summary"]["status"],
         "summary": full_audit["summary"],
-        "failed_checks": [
-            name for name, check in full_audit["checks"].items()
-            if check.get("status") == "FAIL"
-        ]
+        "integrity_summary": full_audit["integrity_summary"],
+        "design_summary": full_audit["design_summary"],
+        "failed_integrity_checks": failed_integrity,
+        "failed_design_checks": failed_design,
+        "note": "DB_INTEGRITY should PASS. READY_FOR_DESIGN expected to FAIL until Supliful API integration."
     }
+
+
+@router.get("/audit/os-modules/integrity")
+def audit_integrity_only() -> Dict[str, Any]:
+    """
+    Run only DB integrity checks (schema, uniqueness, pairing).
+    These should always PASS after successful migration.
+    """
+    return audit_os_modules(mode="integrity")
+
+
+@router.get("/audit/os-modules/design")
+def audit_design_only() -> Dict[str, Any]:
+    """
+    Run only ready-for-design checks (placeholders, required fields).
+    Expected to FAIL until Supliful API integration provides missing data.
+    """
+    return audit_os_modules(mode="design")
 
 
 @router.get("/audit/os-modules/duplicates/{shopify_handle}")
