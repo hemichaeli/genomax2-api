@@ -4,8 +4,8 @@ One-time endpoint to run migrations via API
 """
 
 import os
-from typing import Dict, Any
-from fastapi import APIRouter, HTTPException
+from typing import Dict, Any, List
+from fastapi import APIRouter, HTTPException, Body
 import psycopg2
 from psycopg2.extras import RealDictCursor
 
@@ -15,6 +15,28 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Standard DSHEA disclaimer (singular form - UI handles plural based on claim count)
 FDA_DISCLAIMER_TEXT = "This statement has not been evaluated by the Food and Drug Administration. This product is not intended to diagnose, treat, cure, or prevent any disease."
+
+# =============================================================================
+# TOPICAL ALLOWLIST - Explicit list of handles approved as TOPICAL (cosmetics)
+# =============================================================================
+# RULE: Only products on this list can be marked as TOPICAL.
+# To add products: Update this list and redeploy, then run migration 005.
+#
+# Criteria for TOPICAL:
+# - Applied externally to skin/body (not ingested)
+# - Examples: soaps, lotions, balms, ointments, serums, moisturizers
+#
+# NOT TOPICAL (remain SUPPLEMENT):
+# - Coffee creamers (ingested)
+# - Oral supplements in cream/gel form
+# - Any product with "Musculoskeletal Integrity" biological domain
+# =============================================================================
+TOPICAL_ALLOWLIST: List[str] = [
+    # Currently empty - no TOPICAL products in catalog
+    # Example entries (uncomment when adding real products):
+    # 'kojic-acid-turmeric-soap-maxima',
+    # 'kojic-acid-turmeric-soap-maximo',
+]
 
 
 def get_db():
@@ -344,3 +366,344 @@ def check_migration_004() -> Dict[str, Any]:
         except:
             pass
         raise HTTPException(status_code=500, detail=f"Check error: {str(e)}")
+
+
+# =============================================================================
+# MIGRATION 005: Mark TOPICAL products from allowlist
+# =============================================================================
+
+@router.get("/topical/candidates")
+def get_topical_candidates() -> Dict[str, Any]:
+    """
+    Step 1: Read-only scan for potential TOPICAL products.
+    
+    Searches for keywords: soap, lotion, balm, ointment, salve, serum, moisturizer, topical
+    
+    Returns candidates for review - does NOT update anything.
+    Compare against TOPICAL_ALLOWLIST before running migration 005.
+    """
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        cur = conn.cursor()
+        
+        # Search patterns for potential TOPICAL products
+        cur.execute("""
+            SELECT module_code, shopify_handle, product_name, 
+                   os_layer, biological_domain, disclaimer_applicability
+            FROM os_modules_v3_1
+            WHERE LOWER(product_name) LIKE '%soap%'
+               OR LOWER(product_name) LIKE '%lotion%'
+               OR LOWER(product_name) LIKE '%balm%'
+               OR LOWER(product_name) LIKE '%ointment%'
+               OR LOWER(product_name) LIKE '%salve%'
+               OR LOWER(product_name) LIKE '%serum%'
+               OR LOWER(product_name) LIKE '%moisturizer%'
+               OR LOWER(product_name) LIKE '%topical%'
+               OR LOWER(shopify_handle) LIKE '%soap%'
+               OR LOWER(shopify_handle) LIKE '%lotion%'
+               OR LOWER(shopify_handle) LIKE '%balm%'
+               OR LOWER(shopify_handle) LIKE '%ointment%'
+               OR LOWER(shopify_handle) LIKE '%salve%'
+               OR LOWER(shopify_handle) LIKE '%serum%'
+               OR LOWER(shopify_handle) LIKE '%moisturizer%'
+               OR LOWER(shopify_handle) LIKE '%topical%'
+            ORDER BY shopify_handle
+        """)
+        candidates = [dict(r) for r in cur.fetchall()]
+        
+        cur.close()
+        conn.close()
+        
+        # Check which are in allowlist
+        in_allowlist = [c for c in candidates if c['shopify_handle'] in TOPICAL_ALLOWLIST]
+        not_in_allowlist = [c for c in candidates if c['shopify_handle'] not in TOPICAL_ALLOWLIST]
+        
+        return {
+            "scan_type": "read_only",
+            "keywords_searched": ["soap", "lotion", "balm", "ointment", "salve", "serum", "moisturizer", "topical"],
+            "total_candidates": len(candidates),
+            "in_allowlist": len(in_allowlist),
+            "not_in_allowlist": len(not_in_allowlist),
+            "allowlist_entries": TOPICAL_ALLOWLIST,
+            "candidates_in_allowlist": in_allowlist,
+            "candidates_not_in_allowlist": not_in_allowlist,
+            "note": "Review candidates_not_in_allowlist. If they should be TOPICAL, add to TOPICAL_ALLOWLIST in runner.py and redeploy."
+        }
+        
+    except Exception as e:
+        try:
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Scan error: {str(e)}")
+
+
+@router.post("/run/005-mark-topical")
+def run_migration_005() -> Dict[str, Any]:
+    """
+    Run migration 005: Mark products in TOPICAL_ALLOWLIST as TOPICAL.
+    
+    DETERMINISTIC BEHAVIOR:
+    - Only updates handles explicitly listed in TOPICAL_ALLOWLIST
+    - Skips handles not found in database (logs them)
+    - Safe to run multiple times (idempotent)
+    
+    To add TOPICAL products:
+    1. Run GET /topical/candidates to review candidates
+    2. Update TOPICAL_ALLOWLIST in runner.py
+    3. Redeploy
+    4. Run this migration
+    """
+    if not TOPICAL_ALLOWLIST:
+        return {
+            "status": "skipped",
+            "migration": "005-mark-topical",
+            "reason": "TOPICAL_ALLOWLIST is empty",
+            "action_required": "Add shopify_handle values to TOPICAL_ALLOWLIST in runner.py and redeploy",
+            "updated_count": 0
+        }
+    
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    results = []
+    
+    try:
+        cur = conn.cursor()
+        
+        # Before state
+        cur.execute("""
+            SELECT disclaimer_applicability, COUNT(*) as count
+            FROM os_modules_v3_1
+            GROUP BY disclaimer_applicability
+        """)
+        before_state = {r['disclaimer_applicability']: r['count'] for r in cur.fetchall()}
+        results.append(f"Before: {before_state}")
+        
+        # Check which handles exist
+        cur.execute("""
+            SELECT shopify_handle FROM os_modules_v3_1
+            WHERE shopify_handle = ANY(%s)
+        """, (TOPICAL_ALLOWLIST,))
+        found_handles = [r['shopify_handle'] for r in cur.fetchall()]
+        not_found = [h for h in TOPICAL_ALLOWLIST if h not in found_handles]
+        
+        if not_found:
+            results.append(f"WARNING: Handles not found in DB: {not_found}")
+        
+        # Update only handles in allowlist that exist
+        if found_handles:
+            cur.execute("""
+                UPDATE os_modules_v3_1
+                SET disclaimer_applicability = 'TOPICAL',
+                    updated_at = NOW()
+                WHERE shopify_handle = ANY(%s)
+                  AND disclaimer_applicability != 'TOPICAL'
+            """, (found_handles,))
+            updated_count = cur.rowcount
+            results.append(f"Updated {updated_count} modules to TOPICAL")
+        else:
+            updated_count = 0
+            results.append("No matching handles found to update")
+        
+        # After state
+        cur.execute("""
+            SELECT disclaimer_applicability, COUNT(*) as count
+            FROM os_modules_v3_1
+            GROUP BY disclaimer_applicability
+        """)
+        after_state = {r['disclaimer_applicability']: r['count'] for r in cur.fetchall()}
+        results.append(f"After: {after_state}")
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        return {
+            "status": "success",
+            "migration": "005-mark-topical",
+            "allowlist": TOPICAL_ALLOWLIST,
+            "found_in_db": found_handles,
+            "not_found_in_db": not_found,
+            "updated_count": updated_count,
+            "steps": results
+        }
+        
+    except Exception as e:
+        try:
+            conn.rollback()
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Migration error: {str(e)}")
+
+
+@router.get("/status/005-mark-topical")
+def check_migration_005() -> Dict[str, Any]:
+    """Check TOPICAL marking status and distribution."""
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        cur = conn.cursor()
+        
+        # Distribution
+        cur.execute("""
+            SELECT disclaimer_applicability, COUNT(*) as count
+            FROM os_modules_v3_1
+            GROUP BY disclaimer_applicability
+            ORDER BY count DESC
+        """)
+        distribution = [dict(r) for r in cur.fetchall()]
+        
+        # TOPICAL modules detail
+        cur.execute("""
+            SELECT module_code, shopify_handle, product_name, 
+                   biological_domain,
+                   CASE WHEN fda_disclaimer IS NOT NULL AND BTRIM(fda_disclaimer) <> '' 
+                        THEN 'has_disclaimer' ELSE 'no_disclaimer' END AS disclaimer_status
+            FROM os_modules_v3_1
+            WHERE disclaimer_applicability = 'TOPICAL'
+            ORDER BY shopify_handle
+            LIMIT 20
+        """)
+        topical_modules = [dict(r) for r in cur.fetchall()]
+        
+        # TOPICAL with disclaimer (allowed but not required)
+        cur.execute("""
+            SELECT COUNT(*) as count
+            FROM os_modules_v3_1
+            WHERE disclaimer_applicability = 'TOPICAL'
+              AND fda_disclaimer IS NOT NULL 
+              AND BTRIM(fda_disclaimer) <> ''
+        """)
+        topical_with_disclaimer = cur.fetchone()['count']
+        
+        # Allowlist coverage
+        cur.execute("""
+            SELECT shopify_handle FROM os_modules_v3_1
+            WHERE shopify_handle = ANY(%s)
+              AND disclaimer_applicability = 'TOPICAL'
+        """, (TOPICAL_ALLOWLIST,))
+        allowlist_applied = [r['shopify_handle'] for r in cur.fetchall()]
+        allowlist_pending = [h for h in TOPICAL_ALLOWLIST if h not in allowlist_applied]
+        
+        cur.close()
+        conn.close()
+        
+        topical_count = next((d['count'] for d in distribution if d['disclaimer_applicability'] == 'TOPICAL'), 0)
+        
+        return {
+            "migration": "005-mark-topical",
+            "distribution": distribution,
+            "topical_count": topical_count,
+            "topical_with_disclaimer": topical_with_disclaimer,
+            "topical_without_disclaimer": topical_count - topical_with_disclaimer,
+            "allowlist": {
+                "total_entries": len(TOPICAL_ALLOWLIST),
+                "applied": allowlist_applied,
+                "pending": allowlist_pending
+            },
+            "topical_modules_sample": topical_modules,
+            "note": "TOPICAL modules are exempt from fda_disclaimer requirement in QA Design Gate"
+        }
+        
+    except Exception as e:
+        try:
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Status error: {str(e)}")
+
+
+# =============================================================================
+# STEP 4: SANITY CHECK ENDPOINT
+# =============================================================================
+
+@router.get("/sanity-check/topical")
+def topical_sanity_check() -> Dict[str, Any]:
+    """
+    Step 4: Dedicated QA sanity check for TOPICAL products.
+    
+    Returns:
+    - Total TOPICAL count
+    - TOPICAL with/without fda_disclaimer (both allowed)
+    - Sample of up to 20 TOPICAL modules
+    - Comparison against allowlist
+    """
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        cur = conn.cursor()
+        
+        # Counts
+        cur.execute("""
+            SELECT 
+                COUNT(*) FILTER (WHERE disclaimer_applicability = 'TOPICAL') AS topical_total,
+                COUNT(*) FILTER (
+                    WHERE disclaimer_applicability = 'TOPICAL'
+                      AND fda_disclaimer IS NOT NULL 
+                      AND BTRIM(fda_disclaimer) <> ''
+                ) AS topical_with_disclaimer,
+                COUNT(*) FILTER (
+                    WHERE disclaimer_applicability = 'TOPICAL'
+                      AND (fda_disclaimer IS NULL OR BTRIM(fda_disclaimer) = '')
+                ) AS topical_without_disclaimer,
+                COUNT(*) FILTER (WHERE disclaimer_applicability = 'SUPPLEMENT') AS supplement_total
+            FROM os_modules_v3_1
+        """)
+        counts = dict(cur.fetchone())
+        
+        # TOPICAL samples
+        cur.execute("""
+            SELECT module_code, shopify_handle, product_name, os_environment,
+                   biological_domain,
+                   CASE WHEN fda_disclaimer IS NOT NULL AND BTRIM(fda_disclaimer) <> '' 
+                        THEN true ELSE false END AS has_fda_disclaimer
+            FROM os_modules_v3_1
+            WHERE disclaimer_applicability = 'TOPICAL'
+            ORDER BY shopify_handle, os_environment
+            LIMIT 20
+        """)
+        samples = [dict(r) for r in cur.fetchall()]
+        
+        cur.close()
+        conn.close()
+        
+        # Allowlist analysis
+        allowlist_in_db = [s['shopify_handle'] for s in samples if s['shopify_handle'] in TOPICAL_ALLOWLIST]
+        unexpected_topical = [s['shopify_handle'] for s in samples if s['shopify_handle'] not in TOPICAL_ALLOWLIST]
+        
+        return {
+            "sanity_check": "topical",
+            "counts": counts,
+            "allowlist": {
+                "defined_count": len(TOPICAL_ALLOWLIST),
+                "entries": TOPICAL_ALLOWLIST
+            },
+            "validation": {
+                "from_allowlist": len(allowlist_in_db),
+                "unexpected_topical": unexpected_topical,
+                "status": "OK" if not unexpected_topical else "WARNING"
+            },
+            "samples": samples,
+            "rules": {
+                "fda_disclaimer_required": False,
+                "fda_disclaimer_allowed": True,
+                "note": "TOPICAL products are exempt from DSHEA disclaimer requirement"
+            }
+        }
+        
+    except Exception as e:
+        try:
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Sanity check error: {str(e)}")
