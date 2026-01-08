@@ -1,6 +1,7 @@
 """
-GenoMAX2 API Server Entry Point v3.11.2
+GenoMAX2 API Server Entry Point v3.12.0
 Adds Bloodwork Engine v1 endpoints with route debugging.
+Adds Migration Runner endpoints.
 
 Use this file for Railway deployment:
   uvicorn main:app --host 0.0.0.0 --port $PORT
@@ -16,6 +17,16 @@ try:
     print("✅ Bloodwork Engine v1 endpoints registered successfully")
 except Exception as e:
     print(f"❌ ERROR loading Bloodwork Engine: {type(e).__name__}: {e}")
+    import traceback
+    traceback.print_exc()
+
+# ===== MIGRATION RUNNER =====
+try:
+    from app.migrations.runner import router as migrations_router
+    app.include_router(migrations_router)
+    print("✅ Migration Runner endpoints registered successfully")
+except Exception as e:
+    print(f"❌ ERROR loading Migration Runner: {type(e).__name__}: {e}")
     import traceback
     traceback.print_exc()
 
