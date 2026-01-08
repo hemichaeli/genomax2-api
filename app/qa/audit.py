@@ -1,5 +1,5 @@
 """
-GenoMAX² QA Audit Module v2.3
+GenoMAX² QA Audit Module v2.4
 Post-Migration Validation for os_modules_v3_1
 
 SPLIT AUDIT MODES:
@@ -11,21 +11,17 @@ Individual checks:
 - A1-A4: Schema and uniqueness checks (DB_INTEGRITY)
 - B1: os_environment validation (DB_INTEGRITY)
 - B2: Placeholder check (READY_FOR_DESIGN)
-- B3: Required fields check (READY_FOR_DESIGN)
+- B3: Required fields check (READY_FOR_DESIGN) - NOW RESPECTS disclaimer_applicability
 - D1-D2: OS-environment pairing (DB_INTEGRITY)
 - E1-E2: New modules verification (DB_INTEGRITY)
 - F1: Index verification (DB_INTEGRITY)
 
 Returns comprehensive JSON report with PASS/FAIL status per mode.
 
-v2.1 CHANGES:
-- Added /api/v1/qa/copy/clean/summary endpoint for clean copy audit
-
-v2.2 CHANGES:
-- Added /api/v1/qa/copy/clean/count endpoint (count-only)
-
-v2.3 CHANGES:
-- Enhanced /copy/clean/count for dashboard use (single query, all counts)
+v2.4 CHANGES:
+- B3 now respects disclaimer_applicability:
+  - SUPPLEMENT modules require fda_disclaimer
+  - TOPICAL modules exempt from fda_disclaimer requirement
 """
 
 import os
@@ -311,7 +307,7 @@ def audit_os_modules(mode: Optional[str] = Query(default=None)) -> Dict[str, Any
         raise HTTPException(status_code=500, detail="Database connection failed")
     
     results = {
-        "audit_version": "2.3.0",
+        "audit_version": "2.4.0",
         "table": "os_modules_v3_1",
         "mode": mode or "all",
         "checks": {},
@@ -347,16 +343,16 @@ def audit_os_modules(mode: Optional[str] = Query(default=None)) -> Dict[str, Any
                 SELECT column_name, data_type
                 FROM information_schema.columns
                 WHERE table_name = 'os_modules_v3_1'
-                  AND column_name IN ('net_quantity','supliful_handle')
+                  AND column_name IN ('net_quantity','supliful_handle','disclaimer_symbol','disclaimer_applicability')
                 ORDER BY column_name
             """)
             a1_rows = cur.fetchall()
             a1_columns = [r["column_name"] for r in a1_rows]
             results["checks"]["A1_new_columns"] = {
-                "description": "Verify net_quantity and supliful_handle columns exist",
-                "expected": ["net_quantity", "supliful_handle"],
+                "description": "Verify required columns exist",
+                "expected": ["disclaimer_applicability", "disclaimer_symbol", "net_quantity", "supliful_handle"],
                 "found": a1_columns,
-                "status": "PASS" if len(a1_columns) == 2 else "FAIL",
+                "status": "PASS" if len(a1_columns) == 4 else "FAIL",
                 "mode": "DB_INTEGRITY"
             }
             
@@ -461,6 +457,9 @@ def audit_os_modules(mode: Optional[str] = Query(default=None)) -> Dict[str, Any
             }
             
             # B3: Required fields check (READY_FOR_DESIGN gate)
+            # NOW RESPECTS disclaimer_applicability:
+            # - SUPPLEMENT modules require fda_disclaimer
+            # - TOPICAL modules exempt from fda_disclaimer
             cur.execute("""
                 SELECT
                   SUM(CASE WHEN NOT (product_name IS NOT NULL AND BTRIM(product_name) <> '') THEN 1 ELSE 0 END) AS missing_product_name,
@@ -468,22 +467,44 @@ def audit_os_modules(mode: Optional[str] = Query(default=None)) -> Dict[str, Any
                   SUM(CASE WHEN NOT (net_quantity IS NOT NULL AND BTRIM(net_quantity) <> '') THEN 1 ELSE 0 END) AS missing_net_quantity,
                   SUM(CASE WHEN NOT (front_label_text IS NOT NULL AND BTRIM(front_label_text) <> '') THEN 1 ELSE 0 END) AS missing_front_label,
                   SUM(CASE WHEN NOT (back_label_text IS NOT NULL AND BTRIM(back_label_text) <> '') THEN 1 ELSE 0 END) AS missing_back_label,
-                  SUM(CASE WHEN NOT (fda_disclaimer IS NOT NULL AND BTRIM(fda_disclaimer) <> '') THEN 1 ELSE 0 END) AS missing_fda_disclaimer
+                  SUM(CASE 
+                    WHEN disclaimer_applicability = 'SUPPLEMENT' 
+                         AND NOT (fda_disclaimer IS NOT NULL AND BTRIM(fda_disclaimer) <> '') 
+                    THEN 1 
+                    ELSE 0 
+                  END) AS missing_fda_disclaimer_supplement,
+                  SUM(CASE WHEN disclaimer_applicability = 'TOPICAL' THEN 1 ELSE 0 END) AS topical_count
                 FROM os_modules_v3_1
             """)
             b3_summary = cur.fetchone()
-            b3_all_zero = all(v == 0 for v in b3_summary.values())
+            # Check all required fields (fda_disclaimer only for SUPPLEMENT)
+            b3_all_zero = (
+                b3_summary["missing_product_name"] == 0 and
+                b3_summary["missing_link"] == 0 and
+                b3_summary["missing_net_quantity"] == 0 and
+                b3_summary["missing_front_label"] == 0 and
+                b3_summary["missing_back_label"] == 0 and
+                b3_summary["missing_fda_disclaimer_supplement"] == 0
+            )
             results["checks"]["B3_required_fields"] = {
-                "description": "READY_FOR_DESIGN required fields populated",
-                "missing_counts": dict(b3_summary),
+                "description": "READY_FOR_DESIGN required fields populated (respects disclaimer_applicability)",
+                "missing_counts": {
+                    "missing_product_name": b3_summary["missing_product_name"],
+                    "missing_link": b3_summary["missing_link"],
+                    "missing_net_quantity": b3_summary["missing_net_quantity"],
+                    "missing_front_label": b3_summary["missing_front_label"],
+                    "missing_back_label": b3_summary["missing_back_label"],
+                    "missing_fda_disclaimer_supplement": b3_summary["missing_fda_disclaimer_supplement"],
+                },
+                "topical_modules_exempt": b3_summary["topical_count"],
                 "status": "PASS" if b3_all_zero else "FAIL",
                 "mode": "READY_FOR_DESIGN",
-                "note": "Expected to FAIL until Supliful API provides link/net_quantity/fda_disclaimer"
+                "note": "TOPICAL modules exempt from fda_disclaimer requirement"
             }
             
             # B3b: Detailed list of modules missing required fields (limited)
             cur.execute("""
-                SELECT shopify_handle, os_environment, module_code
+                SELECT shopify_handle, os_environment, module_code, disclaimer_applicability
                 FROM os_modules_v3_1
                 WHERE
                   NOT (product_name IS NOT NULL AND BTRIM(product_name) <> '')
@@ -491,7 +512,7 @@ def audit_os_modules(mode: Optional[str] = Query(default=None)) -> Dict[str, Any
                   OR NOT (net_quantity IS NOT NULL AND BTRIM(net_quantity) <> '')
                   OR NOT (front_label_text IS NOT NULL AND BTRIM(front_label_text) <> '')
                   OR NOT (back_label_text IS NOT NULL AND BTRIM(back_label_text) <> '')
-                  OR NOT (fda_disclaimer IS NOT NULL AND BTRIM(fda_disclaimer) <> '')
+                  OR (disclaimer_applicability = 'SUPPLEMENT' AND NOT (fda_disclaimer IS NOT NULL AND BTRIM(fda_disclaimer) <> ''))
                 ORDER BY shopify_handle, os_environment
                 LIMIT 20
             """)
@@ -500,7 +521,8 @@ def audit_os_modules(mode: Optional[str] = Query(default=None)) -> Dict[str, Any
                 {
                     "shopify_handle": r["shopify_handle"],
                     "os_environment": r["os_environment"],
-                    "module_code": r["module_code"]
+                    "module_code": r["module_code"],
+                    "disclaimer_applicability": r["disclaimer_applicability"]
                 } for r in b3b_missing
             ]
         
@@ -834,7 +856,9 @@ def audit_os_modules_export() -> Dict[str, Any]:
               back_label_text,
               fda_disclaimer,
               supliful_handle,
-              biological_domain
+              biological_domain,
+              disclaimer_applicability,
+              disclaimer_symbol
             FROM os_modules_v3_1
             ORDER BY shopify_handle, os_environment
         """)
@@ -849,7 +873,8 @@ def audit_os_modules_export() -> Dict[str, Any]:
                 "module_code", "shopify_handle", "product_name", "product_link",
                 "os_environment", "os_layer", "net_quantity_label",
                 "front_label_text", "back_label_text", "fda_disclaimer",
-                "supliful_handle", "biological_domain"
+                "supliful_handle", "biological_domain",
+                "disclaimer_applicability", "disclaimer_symbol"
             ],
             "data": [dict(r) for r in rows]
         }
