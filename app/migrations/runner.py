@@ -13,6 +13,9 @@ router = APIRouter(prefix="/api/v1/migrations", tags=["Migrations"])
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+# Standard DSHEA disclaimer (singular form - UI handles plural based on claim count)
+FDA_DISCLAIMER_TEXT = "This statement has not been evaluated by the Food and Drug Administration. This product is not intended to diagnose, treat, cure, or prevent any disease."
+
 
 def get_db():
     try:
@@ -185,6 +188,154 @@ def check_migration_003() -> Dict[str, Any]:
             "has_constraint": has_constraint,
             "has_index": has_index,
             "data_distribution": data_sample
+        }
+        
+    except Exception as e:
+        try:
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Check error: {str(e)}")
+
+
+@router.post("/run/004-fill-fda-disclaimer")
+def run_migration_004() -> Dict[str, Any]:
+    """
+    Run migration 004: Fill fda_disclaimer for all SUPPLEMENT modules.
+    
+    - Only fills modules where disclaimer_applicability = 'SUPPLEMENT'
+    - Only fills if fda_disclaimer is NULL or empty
+    - Uses standard DSHEA disclaimer text (singular form)
+    - UI layer handles singular/plural based on claim count
+    
+    Safe to run multiple times (idempotent).
+    """
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    results = []
+    
+    try:
+        cur = conn.cursor()
+        
+        # Count current state
+        cur.execute("""
+            SELECT 
+                COUNT(*) FILTER (WHERE disclaimer_applicability = 'SUPPLEMENT') AS supplement_count,
+                COUNT(*) FILTER (WHERE disclaimer_applicability = 'TOPICAL') AS topical_count,
+                COUNT(*) FILTER (
+                    WHERE disclaimer_applicability = 'SUPPLEMENT'
+                      AND (fda_disclaimer IS NULL OR BTRIM(fda_disclaimer) = '')
+                ) AS supplement_missing_disclaimer,
+                COUNT(*) FILTER (
+                    WHERE disclaimer_applicability = 'SUPPLEMENT'
+                      AND fda_disclaimer IS NOT NULL 
+                      AND BTRIM(fda_disclaimer) <> ''
+                ) AS supplement_has_disclaimer
+            FROM os_modules_v3_1
+        """)
+        before_state = dict(cur.fetchone())
+        results.append(f"Before: {before_state}")
+        
+        # Fill fda_disclaimer for SUPPLEMENT modules only
+        cur.execute("""
+            UPDATE os_modules_v3_1
+            SET fda_disclaimer = %s,
+                updated_at = NOW()
+            WHERE disclaimer_applicability = 'SUPPLEMENT'
+              AND (fda_disclaimer IS NULL OR BTRIM(fda_disclaimer) = '')
+        """, (FDA_DISCLAIMER_TEXT,))
+        updated_count = cur.rowcount
+        results.append(f"Updated {updated_count} SUPPLEMENT modules with FDA disclaimer")
+        
+        # Verify
+        cur.execute("""
+            SELECT 
+                COUNT(*) FILTER (
+                    WHERE disclaimer_applicability = 'SUPPLEMENT'
+                      AND (fda_disclaimer IS NULL OR BTRIM(fda_disclaimer) = '')
+                ) AS supplement_still_missing,
+                COUNT(*) FILTER (
+                    WHERE disclaimer_applicability = 'SUPPLEMENT'
+                      AND fda_disclaimer IS NOT NULL 
+                      AND BTRIM(fda_disclaimer) <> ''
+                ) AS supplement_has_disclaimer
+            FROM os_modules_v3_1
+        """)
+        after_state = dict(cur.fetchone())
+        results.append(f"After: {after_state}")
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        return {
+            "status": "success",
+            "migration": "004-fill-fda-disclaimer",
+            "updated_count": updated_count,
+            "disclaimer_text": FDA_DISCLAIMER_TEXT,
+            "steps": results,
+            "note": "UI layer handles singular/plural based on claim count"
+        }
+        
+    except Exception as e:
+        try:
+            conn.rollback()
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Migration error: {str(e)}")
+
+
+@router.get("/status/004-fill-fda-disclaimer")
+def check_migration_004() -> Dict[str, Any]:
+    """Check FDA disclaimer fill status."""
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        cur = conn.cursor()
+        
+        cur.execute("""
+            SELECT 
+                disclaimer_applicability,
+                COUNT(*) AS total,
+                COUNT(*) FILTER (
+                    WHERE fda_disclaimer IS NOT NULL AND BTRIM(fda_disclaimer) <> ''
+                ) AS has_disclaimer,
+                COUNT(*) FILTER (
+                    WHERE fda_disclaimer IS NULL OR BTRIM(fda_disclaimer) = ''
+                ) AS missing_disclaimer
+            FROM os_modules_v3_1
+            GROUP BY disclaimer_applicability
+        """)
+        breakdown = [dict(r) for r in cur.fetchall()]
+        
+        # Sample disclaimers
+        cur.execute("""
+            SELECT module_code, shopify_handle, disclaimer_applicability, 
+                   SUBSTRING(fda_disclaimer, 1, 80) AS disclaimer_preview
+            FROM os_modules_v3_1
+            WHERE fda_disclaimer IS NOT NULL AND BTRIM(fda_disclaimer) <> ''
+            LIMIT 5
+        """)
+        samples = [dict(r) for r in cur.fetchall()]
+        
+        cur.close()
+        conn.close()
+        
+        # Check if all SUPPLEMENT modules have disclaimer
+        supplement_data = next((b for b in breakdown if b['disclaimer_applicability'] == 'SUPPLEMENT'), None)
+        all_filled = supplement_data and supplement_data['missing_disclaimer'] == 0 if supplement_data else True
+        
+        return {
+            "migration": "004-fill-fda-disclaimer",
+            "applied": all_filled,
+            "breakdown_by_applicability": breakdown,
+            "samples": samples,
+            "expected_disclaimer": FDA_DISCLAIMER_TEXT[:80] + "..."
         }
         
     except Exception as e:
