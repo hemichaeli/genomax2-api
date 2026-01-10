@@ -1,5 +1,5 @@
 """
-GenoMAX² QA Audit Module v2.4
+GenoMAX² QA Audit Module v2.5
 Post-Migration Validation for os_modules_v3_1
 
 SPLIT AUDIT MODES:
@@ -18,6 +18,10 @@ Individual checks:
 
 Returns comprehensive JSON report with PASS/FAIL status per mode.
 
+v2.5 CHANGES:
+- Added GET /net-qty/missing endpoint for backfill operations
+- Returns modules missing net_quantity with deterministic supplier URLs
+
 v2.4 CHANGES:
 - B3 now respects disclaimer_applicability:
   - SUPPLEMENT modules require fda_disclaimer
@@ -35,6 +39,9 @@ from psycopg2.extras import RealDictCursor
 router = APIRouter(prefix="/api/v1/qa", tags=["QA Audit"])
 
 DATABASE_URL = os.getenv("DATABASE_URL")
+
+# Supliful catalog base URL for constructing supplier URLs
+SUPLIFUL_CATALOG_BASE = "https://supliful.com/catalog/"
 
 
 def get_db():
@@ -69,6 +76,183 @@ READY_FOR_DESIGN_CHECKS = [
     "B2_no_placeholders",
     "B3_required_fields",
 ]
+
+
+# ============================================================================
+# NET QUANTITY MISSING ENDPOINT (for backfill operations)
+# ============================================================================
+
+@router.get("/net-qty/missing")
+def get_missing_net_quantity() -> Dict[str, Any]:
+    """
+    Returns modules missing net_quantity with deterministic supplier URLs.
+    
+    Used by one-time backfill script to scrape Product Amount from Supliful.
+    
+    URL selection logic (deterministic):
+    1. product_link if non-empty (direct Supliful URL)
+    2. Construct from supliful_handle: https://supliful.com/catalog/{handle}
+    3. url field if looks like Supliful catalog URL
+    4. NULL with reason MISSING_SUPPLIER_URL
+    
+    Returns:
+    - total_missing: Count of modules missing net_quantity
+    - missing_with_url: Count that have a supplier URL
+    - missing_without_url: Count without supplier URL (cannot scrape)
+    - modules: List with module_code, shopify_handle, supplier_url, reason
+    """
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        cur = conn.cursor()
+        
+        # Get all modules missing net_quantity with URL resolution
+        cur.execute("""
+            SELECT
+                module_code,
+                shopify_handle,
+                os_environment,
+                product_name,
+                product_link,
+                supliful_handle,
+                url,
+                supplier_page_url
+            FROM os_modules_v3_1
+            WHERE net_quantity IS NULL OR BTRIM(net_quantity) = ''
+            ORDER BY shopify_handle, os_environment
+        """)
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+        
+        modules = []
+        missing_with_url = 0
+        missing_without_url = 0
+        
+        for row in rows:
+            supplier_url = None
+            reason = "MISSING_SUPPLIER_URL"
+            
+            # URL selection logic (deterministic priority)
+            product_link = (row.get("product_link") or "").strip()
+            supliful_handle = (row.get("supliful_handle") or "").strip()
+            url_field = (row.get("url") or "").strip()
+            supplier_page_url = (row.get("supplier_page_url") or "").strip()
+            
+            # Priority 1: product_link (direct Supliful URL)
+            if product_link and "supliful.com" in product_link.lower():
+                supplier_url = product_link
+                reason = "OK"
+            # Priority 2: Construct from supliful_handle
+            elif supliful_handle:
+                supplier_url = f"{SUPLIFUL_CATALOG_BASE}{supliful_handle}"
+                reason = "OK"
+            # Priority 3: supplier_page_url
+            elif supplier_page_url and "supliful.com" in supplier_page_url.lower():
+                supplier_url = supplier_page_url
+                reason = "OK"
+            # Priority 4: url field if looks like Supliful catalog
+            elif url_field and "supliful.com/catalog" in url_field.lower():
+                supplier_url = url_field
+                reason = "OK"
+            
+            if reason == "OK":
+                missing_with_url += 1
+            else:
+                missing_without_url += 1
+            
+            modules.append({
+                "module_code": row["module_code"],
+                "shopify_handle": row["shopify_handle"],
+                "os_environment": row["os_environment"],
+                "product_name": row["product_name"],
+                "supplier_url": supplier_url,
+                "reason": reason
+            })
+        
+        return {
+            "total_missing": len(modules),
+            "missing_with_url": missing_with_url,
+            "missing_without_url": missing_without_url,
+            "modules": modules,
+            "note": "Use supplier_url to scrape Product Amount from Supliful catalog pages"
+        }
+        
+    except Exception as e:
+        try:
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Query error: {str(e)}")
+
+
+@router.post("/net-qty/update")
+def update_net_quantity(module_code: str = Query(...), net_quantity: str = Query(...)) -> Dict[str, Any]:
+    """
+    Update net_quantity for a single module.
+    
+    Used by backfill script after extracting Product Amount from Supliful.
+    
+    Parameters:
+    - module_code: Module to update
+    - net_quantity: Extracted value (max 64 chars)
+    
+    Validation:
+    - net_quantity must be non-empty
+    - net_quantity max length 64 characters
+    - module_code must exist
+    """
+    # Validation
+    net_quantity = net_quantity.strip()
+    if not net_quantity:
+        raise HTTPException(status_code=400, detail="net_quantity cannot be empty")
+    if len(net_quantity) > 64:
+        raise HTTPException(status_code=400, detail=f"net_quantity exceeds 64 chars: {len(net_quantity)}")
+    
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        cur = conn.cursor()
+        
+        # Verify module exists
+        cur.execute("SELECT module_code FROM os_modules_v3_1 WHERE module_code = %s", (module_code,))
+        if not cur.fetchone():
+            cur.close()
+            conn.close()
+            raise HTTPException(status_code=404, detail=f"Module not found: {module_code}")
+        
+        # Update
+        cur.execute("""
+            UPDATE os_modules_v3_1
+            SET net_quantity = %s, updated_at = NOW()
+            WHERE module_code = %s
+            RETURNING module_code, net_quantity
+        """, (net_quantity, module_code))
+        
+        updated = cur.fetchone()
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        return {
+            "status": "success",
+            "module_code": updated["module_code"],
+            "net_quantity": updated["net_quantity"]
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        try:
+            conn.rollback()
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Update error: {str(e)}")
 
 
 # ============================================================================
@@ -307,7 +491,7 @@ def audit_os_modules(mode: Optional[str] = Query(default=None)) -> Dict[str, Any
         raise HTTPException(status_code=500, detail="Database connection failed")
     
     results = {
-        "audit_version": "2.4.0",
+        "audit_version": "2.5.0",
         "table": "os_modules_v3_1",
         "mode": mode or "all",
         "checks": {},
@@ -463,7 +647,7 @@ def audit_os_modules(mode: Optional[str] = Query(default=None)) -> Dict[str, Any
             cur.execute("""
                 SELECT
                   SUM(CASE WHEN NOT (product_name IS NOT NULL AND BTRIM(product_name) <> '') THEN 1 ELSE 0 END) AS missing_product_name,
-                  SUM(CASE WHEN NOT ((url IS NOT NULL AND BTRIM(url) <> '') OR (supplier_page_url IS NOT NULL AND BTRIM(supplier_page_url) <> '')) THEN 1 ELSE 0 END) AS missing_link,
+                  SUM(CASE WHEN NOT ((url IS NOT NULL AND BTRIM(url) <> '') OR (supplier_page_url IS NOT NULL AND BTRIM(supplier_page_url) <> '') OR (product_link IS NOT NULL AND BTRIM(product_link) <> '') OR (supliful_handle IS NOT NULL AND BTRIM(supliful_handle) <> '')) THEN 1 ELSE 0 END) AS missing_link,
                   SUM(CASE WHEN NOT (net_quantity IS NOT NULL AND BTRIM(net_quantity) <> '') THEN 1 ELSE 0 END) AS missing_net_quantity,
                   SUM(CASE WHEN NOT (front_label_text IS NOT NULL AND BTRIM(front_label_text) <> '') THEN 1 ELSE 0 END) AS missing_front_label,
                   SUM(CASE WHEN NOT (back_label_text IS NOT NULL AND BTRIM(back_label_text) <> '') THEN 1 ELSE 0 END) AS missing_back_label,
@@ -508,7 +692,7 @@ def audit_os_modules(mode: Optional[str] = Query(default=None)) -> Dict[str, Any
                 FROM os_modules_v3_1
                 WHERE
                   NOT (product_name IS NOT NULL AND BTRIM(product_name) <> '')
-                  OR NOT ((url IS NOT NULL AND BTRIM(url) <> '') OR (supplier_page_url IS NOT NULL AND BTRIM(supplier_page_url) <> ''))
+                  OR NOT ((url IS NOT NULL AND BTRIM(url) <> '') OR (supplier_page_url IS NOT NULL AND BTRIM(supplier_page_url) <> '') OR (product_link IS NOT NULL AND BTRIM(product_link) <> '') OR (supliful_handle IS NOT NULL AND BTRIM(supliful_handle) <> ''))
                   OR NOT (net_quantity IS NOT NULL AND BTRIM(net_quantity) <> '')
                   OR NOT (front_label_text IS NOT NULL AND BTRIM(front_label_text) <> '')
                   OR NOT (back_label_text IS NOT NULL AND BTRIM(back_label_text) <> '')
@@ -848,7 +1032,7 @@ def audit_os_modules_export() -> Dict[str, Any]:
               module_code,
               shopify_handle,
               product_name,
-              COALESCE(url, supplier_page_url) AS product_link,
+              COALESCE(product_link, url, supplier_page_url) AS product_link,
               os_environment,
               os_layer,
               net_quantity AS net_quantity_label,
