@@ -1,5 +1,5 @@
 """
-GenoMAX² QA Audit Module v2.5
+GenoMAX² QA Audit Module v2.5.1
 Post-Migration Validation for os_modules_v3_1
 
 SPLIT AUDIT MODES:
@@ -7,25 +7,9 @@ SPLIT AUDIT MODES:
 2. READY_FOR_DESIGN - Requires link/net_quantity/fda_disclaimer/no placeholders 
    (will FAIL until Supliful API integration)
 
-Individual checks:
-- A1-A4: Schema and uniqueness checks (DB_INTEGRITY)
-- B1: os_environment validation (DB_INTEGRITY)
-- B2: Placeholder check (READY_FOR_DESIGN)
-- B3: Required fields check (READY_FOR_DESIGN) - NOW RESPECTS disclaimer_applicability
-- D1-D2: OS-environment pairing (DB_INTEGRITY)
-- E1-E2: New modules verification (DB_INTEGRITY)
-- F1: Index verification (DB_INTEGRITY)
-
-Returns comprehensive JSON report with PASS/FAIL status per mode.
-
-v2.5 CHANGES:
-- Added GET /net-qty/missing endpoint for backfill operations
-- Returns modules missing net_quantity with deterministic supplier URLs
-
-v2.4 CHANGES:
-- B3 now respects disclaimer_applicability:
-  - SUPPLEMENT modules require fda_disclaimer
-  - TOPICAL modules exempt from fda_disclaimer requirement
+v2.5.1: Fixed column references (product_link does not exist, use url/supplier_page_url)
+v2.5: Added GET /net-qty/missing endpoint for backfill operations
+v2.4: B3 respects disclaimer_applicability (TOPICAL exempt from fda_disclaimer)
 """
 
 import os
@@ -58,26 +42,6 @@ class FixDuplicatesRequest(BaseModel):
     keep_module_code: str
 
 
-# Check classification by audit mode
-DB_INTEGRITY_CHECKS = [
-    "A1_new_columns",
-    "A2_total_modules", 
-    "A3_shopify_handle_unique",
-    "A4_module_code_unique",
-    "B1_os_environment_valid",
-    "D1_single_environment_products",
-    "D2_pairing_statistics",
-    "E1_new_modules_list",
-    "E2_new_modules_count",
-    "F1_supliful_handle_index",
-]
-
-READY_FOR_DESIGN_CHECKS = [
-    "B2_no_placeholders",
-    "B3_required_fields",
-]
-
-
 # ============================================================================
 # NET QUANTITY MISSING ENDPOINT (for backfill operations)
 # ============================================================================
@@ -87,19 +51,11 @@ def get_missing_net_quantity() -> Dict[str, Any]:
     """
     Returns modules missing net_quantity with deterministic supplier URLs.
     
-    Used by one-time backfill script to scrape Product Amount from Supliful.
-    
     URL selection logic (deterministic):
-    1. product_link if non-empty (direct Supliful URL)
-    2. Construct from supliful_handle: https://supliful.com/catalog/{handle}
+    1. Construct from supliful_handle: https://supliful.com/catalog/{handle}
+    2. supplier_page_url if looks like Supliful URL
     3. url field if looks like Supliful catalog URL
     4. NULL with reason MISSING_SUPPLIER_URL
-    
-    Returns:
-    - total_missing: Count of modules missing net_quantity
-    - missing_with_url: Count that have a supplier URL
-    - missing_without_url: Count without supplier URL (cannot scrape)
-    - modules: List with module_code, shopify_handle, supplier_url, reason
     """
     conn = get_db()
     if not conn:
@@ -108,14 +64,12 @@ def get_missing_net_quantity() -> Dict[str, Any]:
     try:
         cur = conn.cursor()
         
-        # Get all modules missing net_quantity with URL resolution
         cur.execute("""
             SELECT
                 module_code,
                 shopify_handle,
                 os_environment,
                 product_name,
-                product_link,
                 supliful_handle,
                 url,
                 supplier_page_url
@@ -135,25 +89,16 @@ def get_missing_net_quantity() -> Dict[str, Any]:
             supplier_url = None
             reason = "MISSING_SUPPLIER_URL"
             
-            # URL selection logic (deterministic priority)
-            product_link = (row.get("product_link") or "").strip()
             supliful_handle = (row.get("supliful_handle") or "").strip()
             url_field = (row.get("url") or "").strip()
             supplier_page_url = (row.get("supplier_page_url") or "").strip()
             
-            # Priority 1: product_link (direct Supliful URL)
-            if product_link and "supliful.com" in product_link.lower():
-                supplier_url = product_link
-                reason = "OK"
-            # Priority 2: Construct from supliful_handle
-            elif supliful_handle:
+            if supliful_handle:
                 supplier_url = f"{SUPLIFUL_CATALOG_BASE}{supliful_handle}"
                 reason = "OK"
-            # Priority 3: supplier_page_url
             elif supplier_page_url and "supliful.com" in supplier_page_url.lower():
                 supplier_url = supplier_page_url
                 reason = "OK"
-            # Priority 4: url field if looks like Supliful catalog
             elif url_field and "supliful.com/catalog" in url_field.lower():
                 supplier_url = url_field
                 reason = "OK"
@@ -190,21 +135,7 @@ def get_missing_net_quantity() -> Dict[str, Any]:
 
 @router.post("/net-qty/update")
 def update_net_quantity(module_code: str = Query(...), net_quantity: str = Query(...)) -> Dict[str, Any]:
-    """
-    Update net_quantity for a single module.
-    
-    Used by backfill script after extracting Product Amount from Supliful.
-    
-    Parameters:
-    - module_code: Module to update
-    - net_quantity: Extracted value (max 64 chars)
-    
-    Validation:
-    - net_quantity must be non-empty
-    - net_quantity max length 64 characters
-    - module_code must exist
-    """
-    # Validation
+    """Update net_quantity for a single module."""
     net_quantity = net_quantity.strip()
     if not net_quantity:
         raise HTTPException(status_code=400, detail="net_quantity cannot be empty")
@@ -217,15 +148,12 @@ def update_net_quantity(module_code: str = Query(...), net_quantity: str = Query
     
     try:
         cur = conn.cursor()
-        
-        # Verify module exists
         cur.execute("SELECT module_code FROM os_modules_v3_1 WHERE module_code = %s", (module_code,))
         if not cur.fetchone():
             cur.close()
             conn.close()
             raise HTTPException(status_code=404, detail=f"Module not found: {module_code}")
         
-        # Update
         cur.execute("""
             UPDATE os_modules_v3_1
             SET net_quantity = %s, updated_at = NOW()
@@ -238,11 +166,7 @@ def update_net_quantity(module_code: str = Query(...), net_quantity: str = Query
         cur.close()
         conn.close()
         
-        return {
-            "status": "success",
-            "module_code": updated["module_code"],
-            "net_quantity": updated["net_quantity"]
-        }
+        return {"status": "success", "module_code": updated["module_code"], "net_quantity": updated["net_quantity"]}
         
     except HTTPException:
         raise
@@ -261,19 +185,13 @@ def update_net_quantity(module_code: str = Query(...), net_quantity: str = Query
 
 @router.get("/copy/clean/count")
 def clean_copy_count_only() -> Dict[str, Union[int, float]]:
-    """
-    Fast dashboard endpoint for clean copy metrics.
-    
-    Single optimized query - no examples, no heavy calculations.
-    Returns all counts needed for dashboard display.
-    """
+    """Fast dashboard endpoint for clean copy metrics."""
     conn = get_db()
     if not conn:
         raise HTTPException(status_code=500, detail="Database connection failed")
     
     try:
         cur = conn.cursor()
-        # Single query that computes everything
         cur.execute("""
             SELECT 
                 COUNT(*) AS total,
@@ -313,16 +231,7 @@ def clean_copy_count_only() -> Dict[str, Union[int, float]]:
 
 @router.get("/copy/clean/summary")
 def clean_copy_summary() -> Dict[str, Any]:
-    """
-    Clean Copy Summary for os_modules_v3_1.
-    
-    Definition - A module has "clean copy" if:
-    - front_label_text is NOT NULL and NOT empty
-    - back_label_text is NOT NULL and NOT empty
-    - Neither field contains placeholders (TBD|MISSING|REVIEW|PLACEHOLDER, case-insensitive)
-    
-    Returns counts with mathematical invariant validation.
-    """
+    """Clean Copy Summary for os_modules_v3_1."""
     conn = get_db()
     if not conn:
         raise HTTPException(status_code=500, detail="Database connection failed")
@@ -330,25 +239,21 @@ def clean_copy_summary() -> Dict[str, Any]:
     try:
         cur = conn.cursor()
         
-        # Total modules
         cur.execute("SELECT COUNT(*) AS total FROM os_modules_v3_1")
         total_modules = cur.fetchone()["total"]
         
-        # Missing front_label_text
         cur.execute("""
             SELECT COUNT(*) AS count FROM os_modules_v3_1
             WHERE front_label_text IS NULL OR BTRIM(front_label_text) = ''
         """)
         missing_front = cur.fetchone()["count"]
         
-        # Missing back_label_text
         cur.execute("""
             SELECT COUNT(*) AS count FROM os_modules_v3_1
             WHERE back_label_text IS NULL OR BTRIM(back_label_text) = ''
         """)
         missing_back = cur.fetchone()["count"]
         
-        # Placeholders in front OR back (only in non-empty fields)
         cur.execute("""
             SELECT COUNT(*) AS count FROM os_modules_v3_1
             WHERE (
@@ -361,7 +266,6 @@ def clean_copy_summary() -> Dict[str, Any]:
         """)
         placeholders_front_or_back = cur.fetchone()["count"]
         
-        # Missing front OR back (union)
         cur.execute("""
             SELECT COUNT(*) AS count FROM os_modules_v3_1
             WHERE front_label_text IS NULL OR BTRIM(front_label_text) = ''
@@ -369,7 +273,6 @@ def clean_copy_summary() -> Dict[str, Any]:
         """)
         missing_front_or_back = cur.fetchone()["count"]
         
-        # Overlap: missing AND has placeholders (modules counted in both categories)
         cur.execute("""
             SELECT COUNT(*) AS count FROM os_modules_v3_1
             WHERE (front_label_text IS NULL OR BTRIM(front_label_text) = ''
@@ -384,7 +287,6 @@ def clean_copy_summary() -> Dict[str, Any]:
         """)
         overlap_missing_and_placeholders = cur.fetchone()["count"]
         
-        # Clean copy count (direct query for accuracy)
         cur.execute("""
             SELECT COUNT(*) AS count FROM os_modules_v3_1
             WHERE front_label_text IS NOT NULL 
@@ -396,7 +298,6 @@ def clean_copy_summary() -> Dict[str, Any]:
         """)
         clean_copy_count = cur.fetchone()["count"]
         
-        # Get examples of modules with placeholders
         cur.execute("""
             SELECT module_code, shopify_handle, os_environment
             FROM os_modules_v3_1
@@ -412,7 +313,6 @@ def clean_copy_summary() -> Dict[str, Any]:
         """)
         placeholder_examples = [dict(r) for r in cur.fetchall()]
         
-        # Get examples of modules missing front or back
         cur.execute("""
             SELECT module_code, shopify_handle, os_environment,
                    CASE WHEN front_label_text IS NULL OR BTRIM(front_label_text) = '' THEN 'front' ELSE '' END AS missing_front,
@@ -428,11 +328,7 @@ def clean_copy_summary() -> Dict[str, Any]:
         cur.close()
         conn.close()
         
-        # Calculate dirty count using inclusion-exclusion principle
-        # dirty = missing_front_or_back + placeholders_front_or_back - overlap
         dirty_count = missing_front_or_back + placeholders_front_or_back - overlap_missing_and_placeholders
-        
-        # Validate invariant: clean + dirty = total
         invariant_pass = (clean_copy_count + dirty_count) == total_modules
         
         return {
@@ -475,44 +371,19 @@ def clean_copy_summary() -> Dict[str, Any]:
 
 @router.get("/audit/os-modules")
 def audit_os_modules(mode: Optional[str] = Query(default=None)) -> Dict[str, Any]:
-    """
-    Complete QA audit for os_modules_v3_1 table.
-    
-    Parameters:
-    - mode: Optional filter for audit scope
-      - "integrity" - Only DB integrity checks (should PASS)
-      - "design" - Only ready-for-design checks (may FAIL until Supliful API)
-      - None/omitted - All checks
-    
-    Returns PASS/FAIL status for each check category.
-    """
+    """Complete QA audit for os_modules_v3_1 table."""
     conn = get_db()
     if not conn:
         raise HTTPException(status_code=500, detail="Database connection failed")
     
     results = {
-        "audit_version": "2.5.0",
+        "audit_version": "2.5.1",
         "table": "os_modules_v3_1",
         "mode": mode or "all",
         "checks": {},
-        "summary": {
-            "total_checks": 0,
-            "passed": 0,
-            "failed": 0,
-            "warnings": 0
-        },
-        "integrity_summary": {
-            "total_checks": 0,
-            "passed": 0,
-            "failed": 0,
-            "status": "PENDING"
-        },
-        "design_summary": {
-            "total_checks": 0,
-            "passed": 0,
-            "failed": 0,
-            "status": "PENDING"
-        },
+        "summary": {"total_checks": 0, "passed": 0, "failed": 0, "warnings": 0},
+        "integrity_summary": {"total_checks": 0, "passed": 0, "failed": 0, "status": "PENDING"},
+        "design_summary": {"total_checks": 0, "passed": 0, "failed": 0, "status": "PENDING"},
         "overall_status": "PENDING"
     }
     
@@ -551,7 +422,7 @@ def audit_os_modules(mode: Optional[str] = Query(default=None)) -> Dict[str, Any
                 "mode": "DB_INTEGRITY"
             }
             
-            # A3: shopify_handle uniqueness (excluding DUPLICATE_INACTIVE)
+            # A3: shopify_handle uniqueness
             cur.execute("""
                 SELECT shopify_handle, COUNT(*) AS c
                 FROM os_modules_v3_1
@@ -607,112 +478,7 @@ def audit_os_modules(mode: Optional[str] = Query(default=None)) -> Dict[str, Any
                 "status": "PASS" if len(invalid_envs) == 0 else "FAIL",
                 "mode": "DB_INTEGRITY"
             }
-        
-        # ========== PART B2-B3: Design Readiness Checks (READY_FOR_DESIGN) ==========
-        
-        if mode in (None, "design"):
-            # B2: Placeholder check
-            cur.execute("""
-                SELECT shopify_handle, os_environment, module_code,
-                       front_label_text, back_label_text, fda_disclaimer, net_quantity
-                FROM os_modules_v3_1
-                WHERE
-                  COALESCE(front_label_text,'') ~* '\\m(TBD|MISSING|REVIEW|PLACEHOLDER)\\M'
-                  OR COALESCE(back_label_text,'') ~* '\\m(TBD|MISSING|REVIEW|PLACEHOLDER)\\M'
-                  OR COALESCE(fda_disclaimer,'') ~* '\\m(TBD|MISSING|REVIEW|PLACEHOLDER)\\M'
-                  OR COALESCE(net_quantity,'') ~* '\\m(TBD|MISSING|REVIEW|PLACEHOLDER)\\M'
-                ORDER BY shopify_handle, os_environment
-                LIMIT 50
-            """)
-            b2_placeholders = cur.fetchall()
-            results["checks"]["B2_no_placeholders"] = {
-                "description": "No TBD/MISSING/REVIEW/PLACEHOLDER in text fields",
-                "placeholders_found": len(b2_placeholders),
-                "examples": [
-                    {
-                        "shopify_handle": r["shopify_handle"],
-                        "os_environment": r["os_environment"],
-                        "module_code": r["module_code"]
-                    } for r in b2_placeholders[:10]
-                ],
-                "status": "PASS" if len(b2_placeholders) == 0 else "FAIL",
-                "mode": "READY_FOR_DESIGN",
-                "note": "Expected to FAIL until Supliful API populates fields"
-            }
             
-            # B3: Required fields check (READY_FOR_DESIGN gate)
-            # NOW RESPECTS disclaimer_applicability:
-            # - SUPPLEMENT modules require fda_disclaimer
-            # - TOPICAL modules exempt from fda_disclaimer
-            cur.execute("""
-                SELECT
-                  SUM(CASE WHEN NOT (product_name IS NOT NULL AND BTRIM(product_name) <> '') THEN 1 ELSE 0 END) AS missing_product_name,
-                  SUM(CASE WHEN NOT ((url IS NOT NULL AND BTRIM(url) <> '') OR (supplier_page_url IS NOT NULL AND BTRIM(supplier_page_url) <> '') OR (product_link IS NOT NULL AND BTRIM(product_link) <> '') OR (supliful_handle IS NOT NULL AND BTRIM(supliful_handle) <> '')) THEN 1 ELSE 0 END) AS missing_link,
-                  SUM(CASE WHEN NOT (net_quantity IS NOT NULL AND BTRIM(net_quantity) <> '') THEN 1 ELSE 0 END) AS missing_net_quantity,
-                  SUM(CASE WHEN NOT (front_label_text IS NOT NULL AND BTRIM(front_label_text) <> '') THEN 1 ELSE 0 END) AS missing_front_label,
-                  SUM(CASE WHEN NOT (back_label_text IS NOT NULL AND BTRIM(back_label_text) <> '') THEN 1 ELSE 0 END) AS missing_back_label,
-                  SUM(CASE 
-                    WHEN disclaimer_applicability = 'SUPPLEMENT' 
-                         AND NOT (fda_disclaimer IS NOT NULL AND BTRIM(fda_disclaimer) <> '') 
-                    THEN 1 
-                    ELSE 0 
-                  END) AS missing_fda_disclaimer_supplement,
-                  SUM(CASE WHEN disclaimer_applicability = 'TOPICAL' THEN 1 ELSE 0 END) AS topical_count
-                FROM os_modules_v3_1
-            """)
-            b3_summary = cur.fetchone()
-            # Check all required fields (fda_disclaimer only for SUPPLEMENT)
-            b3_all_zero = (
-                b3_summary["missing_product_name"] == 0 and
-                b3_summary["missing_link"] == 0 and
-                b3_summary["missing_net_quantity"] == 0 and
-                b3_summary["missing_front_label"] == 0 and
-                b3_summary["missing_back_label"] == 0 and
-                b3_summary["missing_fda_disclaimer_supplement"] == 0
-            )
-            results["checks"]["B3_required_fields"] = {
-                "description": "READY_FOR_DESIGN required fields populated (respects disclaimer_applicability)",
-                "missing_counts": {
-                    "missing_product_name": b3_summary["missing_product_name"],
-                    "missing_link": b3_summary["missing_link"],
-                    "missing_net_quantity": b3_summary["missing_net_quantity"],
-                    "missing_front_label": b3_summary["missing_front_label"],
-                    "missing_back_label": b3_summary["missing_back_label"],
-                    "missing_fda_disclaimer_supplement": b3_summary["missing_fda_disclaimer_supplement"],
-                },
-                "topical_modules_exempt": b3_summary["topical_count"],
-                "status": "PASS" if b3_all_zero else "FAIL",
-                "mode": "READY_FOR_DESIGN",
-                "note": "TOPICAL modules exempt from fda_disclaimer requirement"
-            }
-            
-            # B3b: Detailed list of modules missing required fields (limited)
-            cur.execute("""
-                SELECT shopify_handle, os_environment, module_code, disclaimer_applicability
-                FROM os_modules_v3_1
-                WHERE
-                  NOT (product_name IS NOT NULL AND BTRIM(product_name) <> '')
-                  OR NOT ((url IS NOT NULL AND BTRIM(url) <> '') OR (supplier_page_url IS NOT NULL AND BTRIM(supplier_page_url) <> '') OR (product_link IS NOT NULL AND BTRIM(product_link) <> '') OR (supliful_handle IS NOT NULL AND BTRIM(supliful_handle) <> ''))
-                  OR NOT (net_quantity IS NOT NULL AND BTRIM(net_quantity) <> '')
-                  OR NOT (front_label_text IS NOT NULL AND BTRIM(front_label_text) <> '')
-                  OR NOT (back_label_text IS NOT NULL AND BTRIM(back_label_text) <> '')
-                  OR (disclaimer_applicability = 'SUPPLEMENT' AND NOT (fda_disclaimer IS NOT NULL AND BTRIM(fda_disclaimer) <> ''))
-                ORDER BY shopify_handle, os_environment
-                LIMIT 20
-            """)
-            b3b_missing = cur.fetchall()
-            results["checks"]["B3_required_fields"]["modules_with_missing_fields"] = [
-                {
-                    "shopify_handle": r["shopify_handle"],
-                    "os_environment": r["os_environment"],
-                    "module_code": r["module_code"],
-                    "disclaimer_applicability": r["disclaimer_applicability"]
-                } for r in b3b_missing
-            ]
-        
-        # ========== PART D: OS-Environment Pairing (DB_INTEGRITY) ==========
-        
-        if mode in (None, "integrity"):
             # D1: Single-environment products
             cur.execute("""
                 SELECT supliful_handle, COUNT(DISTINCT os_environment) AS env_count,
@@ -755,8 +521,6 @@ def audit_os_modules(mode: Optional[str] = Query(default=None)) -> Dict[str, Any
                 "mode": "DB_INTEGRITY"
             }
             
-            # ========== PART E: New Modules Verification (DB_INTEGRITY) ==========
-            
             # E1: New modules list
             cur.execute("""
                 SELECT module_code, shopify_handle, os_environment, os_layer, 
@@ -784,8 +548,6 @@ def audit_os_modules(mode: Optional[str] = Query(default=None)) -> Dict[str, Any
                 "mode": "DB_INTEGRITY"
             }
             
-            # ========== PART F: Index Verification (DB_INTEGRITY) ==========
-            
             # F1: supliful_handle index
             cur.execute("""
                 SELECT indexname, indexdef
@@ -800,6 +562,105 @@ def audit_os_modules(mode: Optional[str] = Query(default=None)) -> Dict[str, Any
                 "status": "PASS" if f1_index else "FAIL",
                 "mode": "DB_INTEGRITY"
             }
+        
+        # ========== PART B2-B3: Design Readiness Checks (READY_FOR_DESIGN) ==========
+        
+        if mode in (None, "design"):
+            # B2: Placeholder check
+            cur.execute("""
+                SELECT shopify_handle, os_environment, module_code,
+                       front_label_text, back_label_text, fda_disclaimer, net_quantity
+                FROM os_modules_v3_1
+                WHERE
+                  COALESCE(front_label_text,'') ~* '\\m(TBD|MISSING|REVIEW|PLACEHOLDER)\\M'
+                  OR COALESCE(back_label_text,'') ~* '\\m(TBD|MISSING|REVIEW|PLACEHOLDER)\\M'
+                  OR COALESCE(fda_disclaimer,'') ~* '\\m(TBD|MISSING|REVIEW|PLACEHOLDER)\\M'
+                  OR COALESCE(net_quantity,'') ~* '\\m(TBD|MISSING|REVIEW|PLACEHOLDER)\\M'
+                ORDER BY shopify_handle, os_environment
+                LIMIT 50
+            """)
+            b2_placeholders = cur.fetchall()
+            results["checks"]["B2_no_placeholders"] = {
+                "description": "No TBD/MISSING/REVIEW/PLACEHOLDER in text fields",
+                "placeholders_found": len(b2_placeholders),
+                "examples": [
+                    {
+                        "shopify_handle": r["shopify_handle"],
+                        "os_environment": r["os_environment"],
+                        "module_code": r["module_code"]
+                    } for r in b2_placeholders[:10]
+                ],
+                "status": "PASS" if len(b2_placeholders) == 0 else "FAIL",
+                "mode": "READY_FOR_DESIGN",
+                "note": "Expected to FAIL until Supliful API populates fields"
+            }
+            
+            # B3: Required fields check (READY_FOR_DESIGN gate)
+            # Note: No product_link column - use url, supplier_page_url, supliful_handle
+            cur.execute("""
+                SELECT
+                  SUM(CASE WHEN NOT (product_name IS NOT NULL AND BTRIM(product_name) <> '') THEN 1 ELSE 0 END) AS missing_product_name,
+                  SUM(CASE WHEN NOT ((url IS NOT NULL AND BTRIM(url) <> '') OR (supplier_page_url IS NOT NULL AND BTRIM(supplier_page_url) <> '') OR (supliful_handle IS NOT NULL AND BTRIM(supliful_handle) <> '')) THEN 1 ELSE 0 END) AS missing_link,
+                  SUM(CASE WHEN NOT (net_quantity IS NOT NULL AND BTRIM(net_quantity) <> '') THEN 1 ELSE 0 END) AS missing_net_quantity,
+                  SUM(CASE WHEN NOT (front_label_text IS NOT NULL AND BTRIM(front_label_text) <> '') THEN 1 ELSE 0 END) AS missing_front_label,
+                  SUM(CASE WHEN NOT (back_label_text IS NOT NULL AND BTRIM(back_label_text) <> '') THEN 1 ELSE 0 END) AS missing_back_label,
+                  SUM(CASE 
+                    WHEN disclaimer_applicability = 'SUPPLEMENT' 
+                         AND NOT (fda_disclaimer IS NOT NULL AND BTRIM(fda_disclaimer) <> '') 
+                    THEN 1 
+                    ELSE 0 
+                  END) AS missing_fda_disclaimer_supplement,
+                  SUM(CASE WHEN disclaimer_applicability = 'TOPICAL' THEN 1 ELSE 0 END) AS topical_count
+                FROM os_modules_v3_1
+            """)
+            b3_summary = cur.fetchone()
+            b3_all_zero = (
+                b3_summary["missing_product_name"] == 0 and
+                b3_summary["missing_link"] == 0 and
+                b3_summary["missing_net_quantity"] == 0 and
+                b3_summary["missing_front_label"] == 0 and
+                b3_summary["missing_back_label"] == 0 and
+                b3_summary["missing_fda_disclaimer_supplement"] == 0
+            )
+            results["checks"]["B3_required_fields"] = {
+                "description": "READY_FOR_DESIGN required fields populated (respects disclaimer_applicability)",
+                "missing_counts": {
+                    "missing_product_name": b3_summary["missing_product_name"],
+                    "missing_link": b3_summary["missing_link"],
+                    "missing_net_quantity": b3_summary["missing_net_quantity"],
+                    "missing_front_label": b3_summary["missing_front_label"],
+                    "missing_back_label": b3_summary["missing_back_label"],
+                    "missing_fda_disclaimer_supplement": b3_summary["missing_fda_disclaimer_supplement"],
+                },
+                "topical_modules_exempt": b3_summary["topical_count"],
+                "status": "PASS" if b3_all_zero else "FAIL",
+                "mode": "READY_FOR_DESIGN",
+                "note": "TOPICAL modules exempt from fda_disclaimer requirement"
+            }
+            
+            # B3b: Detailed list of modules missing required fields
+            cur.execute("""
+                SELECT shopify_handle, os_environment, module_code, disclaimer_applicability
+                FROM os_modules_v3_1
+                WHERE
+                  NOT (product_name IS NOT NULL AND BTRIM(product_name) <> '')
+                  OR NOT ((url IS NOT NULL AND BTRIM(url) <> '') OR (supplier_page_url IS NOT NULL AND BTRIM(supplier_page_url) <> '') OR (supliful_handle IS NOT NULL AND BTRIM(supliful_handle) <> ''))
+                  OR NOT (net_quantity IS NOT NULL AND BTRIM(net_quantity) <> '')
+                  OR NOT (front_label_text IS NOT NULL AND BTRIM(front_label_text) <> '')
+                  OR NOT (back_label_text IS NOT NULL AND BTRIM(back_label_text) <> '')
+                  OR (disclaimer_applicability = 'SUPPLEMENT' AND NOT (fda_disclaimer IS NOT NULL AND BTRIM(fda_disclaimer) <> ''))
+                ORDER BY shopify_handle, os_environment
+                LIMIT 20
+            """)
+            b3b_missing = cur.fetchall()
+            results["checks"]["B3_required_fields"]["modules_with_missing_fields"] = [
+                {
+                    "shopify_handle": r["shopify_handle"],
+                    "os_environment": r["os_environment"],
+                    "module_code": r["module_code"],
+                    "disclaimer_applicability": r["disclaimer_applicability"]
+                } for r in b3b_missing
+            ]
         
         cur.close()
         conn.close()
@@ -817,7 +678,6 @@ def audit_os_modules(mode: Optional[str] = Query(default=None)) -> Dict[str, Any
             elif status in ("WARNING", "INFO"):
                 results["summary"]["warnings"] += 1
             
-            # Track by mode
             if check_mode == "DB_INTEGRITY":
                 results["integrity_summary"]["total_checks"] += 1
                 if status == "PASS":
@@ -831,7 +691,6 @@ def audit_os_modules(mode: Optional[str] = Query(default=None)) -> Dict[str, Any
                 elif status == "FAIL":
                     results["design_summary"]["failed"] += 1
         
-        # Mode-specific status
         if results["integrity_summary"]["total_checks"] > 0:
             results["integrity_summary"]["status"] = (
                 "PASS" if results["integrity_summary"]["failed"] == 0 else "FAIL"
@@ -842,11 +701,7 @@ def audit_os_modules(mode: Optional[str] = Query(default=None)) -> Dict[str, Any
                 "PASS" if results["design_summary"]["failed"] == 0 else "FAIL"
             )
         
-        # Overall status
-        if results["summary"]["failed"] == 0:
-            results["overall_status"] = "PASS"
-        else:
-            results["overall_status"] = "FAIL"
+        results["overall_status"] = "PASS" if results["summary"]["failed"] == 0 else "FAIL"
         
         return results
         
@@ -860,12 +715,7 @@ def audit_os_modules(mode: Optional[str] = Query(default=None)) -> Dict[str, Any
 
 @router.get("/audit/os-modules/summary")
 def audit_os_modules_summary(mode: Optional[str] = Query(default=None)) -> Dict[str, Any]:
-    """
-    Quick summary of os_modules_v3_1 audit status.
-    
-    Parameters:
-    - mode: "integrity" or "design" to filter, None for all
-    """
+    """Quick summary of os_modules_v3_1 audit status."""
     full_audit = audit_os_modules(mode=mode)
     
     failed_integrity = [
@@ -896,28 +746,19 @@ def audit_os_modules_summary(mode: Optional[str] = Query(default=None)) -> Dict[
 
 @router.get("/audit/os-modules/integrity")
 def audit_integrity_only() -> Dict[str, Any]:
-    """
-    Run only DB integrity checks (schema, uniqueness, pairing).
-    These should always PASS after successful migration.
-    """
+    """Run only DB integrity checks."""
     return audit_os_modules(mode="integrity")
 
 
 @router.get("/audit/os-modules/design")
 def audit_design_only() -> Dict[str, Any]:
-    """
-    Run only ready-for-design checks (placeholders, required fields).
-    Expected to FAIL until Supliful API integration provides missing data.
-    """
+    """Run only ready-for-design checks."""
     return audit_os_modules(mode="design")
 
 
 @router.get("/audit/os-modules/duplicates/{shopify_handle}")
 def get_duplicate_details(shopify_handle: str) -> Dict[str, Any]:
-    """
-    Get full details of duplicate shopify_handle records.
-    Use this to investigate and decide which record to keep.
-    """
+    """Get full details of duplicate shopify_handle records."""
     conn = get_db()
     if not conn:
         raise HTTPException(status_code=500, detail="Database connection failed")
@@ -956,10 +797,7 @@ def get_duplicate_details(shopify_handle: str) -> Dict[str, Any]:
 
 @router.post("/audit/os-modules/fix-duplicates")
 def fix_duplicates(request: FixDuplicatesRequest) -> Dict[str, Any]:
-    """
-    Mark duplicate shopify_handle records as DUPLICATE_INACTIVE.
-    Keeps the specified module_code active, marks others as inactive.
-    """
+    """Mark duplicate shopify_handle records as DUPLICATE_INACTIVE."""
     conn = get_db()
     if not conn:
         raise HTTPException(status_code=500, detail="Database connection failed")
@@ -967,7 +805,6 @@ def fix_duplicates(request: FixDuplicatesRequest) -> Dict[str, Any]:
     try:
         cur = conn.cursor()
         
-        # First verify the keep_module_code exists for this shopify_handle
         cur.execute("""
             SELECT module_code FROM os_modules_v3_1
             WHERE shopify_handle = %s AND module_code = %s
@@ -981,7 +818,6 @@ def fix_duplicates(request: FixDuplicatesRequest) -> Dict[str, Any]:
                 detail=f"Module {request.keep_module_code} not found for shopify_handle {request.shopify_handle}"
             )
         
-        # Mark all other records as DUPLICATE_INACTIVE
         cur.execute("""
             UPDATE os_modules_v3_1
             SET supplier_status = 'DUPLICATE_INACTIVE',
@@ -1017,22 +853,20 @@ def fix_duplicates(request: FixDuplicatesRequest) -> Dict[str, Any]:
 
 @router.get("/audit/os-modules/export")
 def audit_os_modules_export() -> Dict[str, Any]:
-    """
-    Export os_modules_v3_1 data for Designer View comparison.
-    Returns all modules with fields needed for Excel comparison.
-    """
+    """Export os_modules_v3_1 data for Designer View comparison."""
     conn = get_db()
     if not conn:
         raise HTTPException(status_code=500, detail="Database connection failed")
     
     try:
         cur = conn.cursor()
+        # Note: No product_link column - use COALESCE of available URL columns
         cur.execute("""
             SELECT
               module_code,
               shopify_handle,
               product_name,
-              COALESCE(product_link, url, supplier_page_url) AS product_link,
+              COALESCE(url, supplier_page_url) AS product_link,
               os_environment,
               os_layer,
               net_quantity AS net_quantity_label,
