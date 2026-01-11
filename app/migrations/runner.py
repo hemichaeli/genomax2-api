@@ -1,7 +1,7 @@
-"""
-GenoMAX² Migration Runner
-One-time endpoint to run migrations via API
-"""
+# =============================================================================
+# GenoMAX² Migration Runner
+# One-time endpoint to run migrations via API
+# =============================================================================
 
 import os
 from typing import Dict, Any, List
@@ -628,13 +628,18 @@ def check_migration_005() -> Dict[str, Any]:
 @router.post("/run/006-supplier-status-columns")
 def run_migration_006() -> Dict[str, Any]:
     """
-    Run migration 006: Add supplier_status tracking columns.
+    Run migration 006: Add supplier_status tracking columns with data normalization.
     
     Adds columns for tracking product availability from Supliful:
     - supplier_status: ACTIVE/DISCONTINUED/UNAVAILABLE (default ACTIVE)
     - supplier_http_status: HTTP status code from last check (404, 503, etc.)
     - supplier_status_details: Additional details/notes
     - supplier_checked_at: Timestamp of last status check
+    
+    DATA NORMALIZATION (applied BEFORE constraint):
+    - UNKNOWN, unknown, NULL, empty -> ACTIVE (default assumption)
+    - INACTIVE, DUPLICATE_INACTIVE -> DISCONTINUED (no longer available)
+    - ACTIVE, DISCONTINUED, UNAVAILABLE -> kept as-is
     
     Safe to run multiple times (idempotent).
     """
@@ -647,59 +652,103 @@ def run_migration_006() -> Dict[str, Any]:
     try:
         cur = conn.cursor()
         
-        # 1) Add supplier_status column
+        # 1) Add supplier_status column (without constraint first)
         cur.execute("""
             ALTER TABLE public.os_modules_v3_1
-            ADD COLUMN IF NOT EXISTS supplier_status VARCHAR(20) DEFAULT 'ACTIVE'
+            ADD COLUMN IF NOT EXISTS supplier_status VARCHAR(20)
         """)
-        results.append("Added supplier_status column (default ACTIVE)")
+        results.append("Added/verified supplier_status column")
         
         # 2) Add supplier_http_status column
         cur.execute("""
             ALTER TABLE public.os_modules_v3_1
             ADD COLUMN IF NOT EXISTS supplier_http_status INTEGER
         """)
-        results.append("Added supplier_http_status column")
+        results.append("Added/verified supplier_http_status column")
         
         # 3) Add supplier_status_details column
         cur.execute("""
             ALTER TABLE public.os_modules_v3_1
             ADD COLUMN IF NOT EXISTS supplier_status_details TEXT
         """)
-        results.append("Added supplier_status_details column")
+        results.append("Added/verified supplier_status_details column")
         
         # 4) Add supplier_checked_at column
         cur.execute("""
             ALTER TABLE public.os_modules_v3_1
             ADD COLUMN IF NOT EXISTS supplier_checked_at TIMESTAMPTZ
         """)
-        results.append("Added supplier_checked_at column")
+        results.append("Added/verified supplier_checked_at column")
         
-        # 5) Backfill existing rows with ACTIVE
+        # 5) Get current distribution BEFORE normalization
+        cur.execute("""
+            SELECT supplier_status, COUNT(*) as count
+            FROM os_modules_v3_1
+            GROUP BY supplier_status
+            ORDER BY count DESC
+        """)
+        before_dist = {r['supplier_status']: r['count'] for r in cur.fetchall()}
+        results.append(f"Before normalization: {before_dist}")
+        
+        # 6) NORMALIZE DATA - Map legacy values to valid statuses
+        # UNKNOWN, unknown, NULL -> ACTIVE
         cur.execute("""
             UPDATE public.os_modules_v3_1
             SET supplier_status = 'ACTIVE'
-            WHERE supplier_status IS NULL
+            WHERE supplier_status IS NULL 
+               OR UPPER(BTRIM(supplier_status)) = 'UNKNOWN'
+               OR BTRIM(supplier_status) = ''
         """)
-        backfill_count = cur.rowcount
-        results.append(f"Backfilled {backfill_count} rows with ACTIVE status")
+        unknown_to_active = cur.rowcount
+        results.append(f"Normalized {unknown_to_active} NULL/UNKNOWN/empty to ACTIVE")
         
-        # 6) Add CHECK constraint for valid status values
+        # INACTIVE, DUPLICATE_INACTIVE -> DISCONTINUED
+        cur.execute("""
+            UPDATE public.os_modules_v3_1
+            SET supplier_status = 'DISCONTINUED'
+            WHERE UPPER(BTRIM(supplier_status)) IN ('INACTIVE', 'DUPLICATE_INACTIVE')
+        """)
+        inactive_to_discontinued = cur.rowcount
+        results.append(f"Normalized {inactive_to_discontinued} INACTIVE/DUPLICATE_INACTIVE to DISCONTINUED")
+        
+        # 7) Get distribution AFTER normalization
+        cur.execute("""
+            SELECT supplier_status, COUNT(*) as count
+            FROM os_modules_v3_1
+            GROUP BY supplier_status
+            ORDER BY count DESC
+        """)
+        after_dist = {r['supplier_status']: r['count'] for r in cur.fetchall()}
+        results.append(f"After normalization: {after_dist}")
+        
+        # 8) Set column default
+        cur.execute("""
+            ALTER TABLE public.os_modules_v3_1
+            ALTER COLUMN supplier_status SET DEFAULT 'ACTIVE'
+        """)
+        results.append("Set default ACTIVE for supplier_status")
+        
+        # 9) Drop existing constraint if it exists (to recreate cleanly)
         cur.execute("""
             SELECT 1 FROM pg_constraint
             WHERE conname = 'chk_os_modules_v3_1_supplier_status'
         """)
-        if not cur.fetchone():
+        if cur.fetchone():
             cur.execute("""
                 ALTER TABLE public.os_modules_v3_1
-                ADD CONSTRAINT chk_os_modules_v3_1_supplier_status
-                CHECK (supplier_status IN ('ACTIVE', 'DISCONTINUED', 'UNAVAILABLE'))
+                DROP CONSTRAINT chk_os_modules_v3_1_supplier_status
             """)
-            results.append("Added CHECK constraint for supplier_status")
-        else:
-            results.append("CHECK constraint already exists")
+            results.append("Dropped existing CHECK constraint for recreation")
         
-        # 7) Index on supplier_status
+        # 10) Add CHECK constraint (now safe after normalization)
+        cur.execute("""
+            ALTER TABLE public.os_modules_v3_1
+            ADD CONSTRAINT chk_os_modules_v3_1_supplier_status
+            CHECK (supplier_status IN ('ACTIVE', 'DISCONTINUED', 'UNAVAILABLE'))
+        """)
+        results.append("Added CHECK constraint for supplier_status")
+        
+        # 11) Index on supplier_status
         cur.execute("""
             SELECT 1 FROM pg_indexes
             WHERE schemaname = 'public'
@@ -722,6 +771,12 @@ def run_migration_006() -> Dict[str, Any]:
         return {
             "status": "success",
             "migration": "006-supplier-status-columns",
+            "normalization": {
+                "before": before_dist,
+                "after": after_dist,
+                "unknown_to_active": unknown_to_active,
+                "inactive_to_discontinued": inactive_to_discontinued
+            },
             "steps": results
         }
         
