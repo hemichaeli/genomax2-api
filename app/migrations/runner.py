@@ -622,6 +622,189 @@ def check_migration_005() -> Dict[str, Any]:
 
 
 # =============================================================================
+# MIGRATION 006: Add supplier_status columns for tracking discontinued products
+# =============================================================================
+
+@router.post("/run/006-supplier-status-columns")
+def run_migration_006() -> Dict[str, Any]:
+    """
+    Run migration 006: Add supplier_status tracking columns.
+    
+    Adds columns for tracking product availability from Supliful:
+    - supplier_status: ACTIVE/DISCONTINUED/UNAVAILABLE (default ACTIVE)
+    - supplier_http_status: HTTP status code from last check (404, 503, etc.)
+    - supplier_status_details: Additional details/notes
+    - supplier_checked_at: Timestamp of last status check
+    
+    Safe to run multiple times (idempotent).
+    """
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    results = []
+    
+    try:
+        cur = conn.cursor()
+        
+        # 1) Add supplier_status column
+        cur.execute("""
+            ALTER TABLE public.os_modules_v3_1
+            ADD COLUMN IF NOT EXISTS supplier_status VARCHAR(20) DEFAULT 'ACTIVE'
+        """)
+        results.append("Added supplier_status column (default ACTIVE)")
+        
+        # 2) Add supplier_http_status column
+        cur.execute("""
+            ALTER TABLE public.os_modules_v3_1
+            ADD COLUMN IF NOT EXISTS supplier_http_status INTEGER
+        """)
+        results.append("Added supplier_http_status column")
+        
+        # 3) Add supplier_status_details column
+        cur.execute("""
+            ALTER TABLE public.os_modules_v3_1
+            ADD COLUMN IF NOT EXISTS supplier_status_details TEXT
+        """)
+        results.append("Added supplier_status_details column")
+        
+        # 4) Add supplier_checked_at column
+        cur.execute("""
+            ALTER TABLE public.os_modules_v3_1
+            ADD COLUMN IF NOT EXISTS supplier_checked_at TIMESTAMPTZ
+        """)
+        results.append("Added supplier_checked_at column")
+        
+        # 5) Backfill existing rows with ACTIVE
+        cur.execute("""
+            UPDATE public.os_modules_v3_1
+            SET supplier_status = 'ACTIVE'
+            WHERE supplier_status IS NULL
+        """)
+        backfill_count = cur.rowcount
+        results.append(f"Backfilled {backfill_count} rows with ACTIVE status")
+        
+        # 6) Add CHECK constraint for valid status values
+        cur.execute("""
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'chk_os_modules_v3_1_supplier_status'
+        """)
+        if not cur.fetchone():
+            cur.execute("""
+                ALTER TABLE public.os_modules_v3_1
+                ADD CONSTRAINT chk_os_modules_v3_1_supplier_status
+                CHECK (supplier_status IN ('ACTIVE', 'DISCONTINUED', 'UNAVAILABLE'))
+            """)
+            results.append("Added CHECK constraint for supplier_status")
+        else:
+            results.append("CHECK constraint already exists")
+        
+        # 7) Index on supplier_status
+        cur.execute("""
+            SELECT 1 FROM pg_indexes
+            WHERE schemaname = 'public'
+              AND tablename = 'os_modules_v3_1'
+              AND indexname = 'idx_os_modules_v3_1_supplier_status'
+        """)
+        if not cur.fetchone():
+            cur.execute("""
+                CREATE INDEX idx_os_modules_v3_1_supplier_status
+                ON public.os_modules_v3_1 (supplier_status)
+            """)
+            results.append("Created index on supplier_status")
+        else:
+            results.append("Index already exists")
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        return {
+            "status": "success",
+            "migration": "006-supplier-status-columns",
+            "steps": results
+        }
+        
+    except Exception as e:
+        try:
+            conn.rollback()
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Migration error: {str(e)}")
+
+
+@router.get("/status/006-supplier-status-columns")
+def check_migration_006() -> Dict[str, Any]:
+    """Check if migration 006 has been applied."""
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        cur = conn.cursor()
+        
+        # Check columns exist
+        cur.execute("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'os_modules_v3_1'
+              AND column_name IN ('supplier_status', 'supplier_http_status', 
+                                  'supplier_status_details', 'supplier_checked_at')
+        """)
+        columns = [r['column_name'] for r in cur.fetchall()]
+        
+        # Check constraint
+        cur.execute("""
+            SELECT 1 FROM pg_constraint
+            WHERE conname = 'chk_os_modules_v3_1_supplier_status'
+        """)
+        has_constraint = cur.fetchone() is not None
+        
+        # Check index
+        cur.execute("""
+            SELECT 1 FROM pg_indexes
+            WHERE indexname = 'idx_os_modules_v3_1_supplier_status'
+        """)
+        has_index = cur.fetchone() is not None
+        
+        # Distribution
+        if 'supplier_status' in columns:
+            cur.execute("""
+                SELECT supplier_status, COUNT(*) as count
+                FROM os_modules_v3_1
+                GROUP BY supplier_status
+                ORDER BY count DESC
+            """)
+            distribution = [dict(r) for r in cur.fetchall()]
+        else:
+            distribution = []
+        
+        cur.close()
+        conn.close()
+        
+        expected_columns = ['supplier_status', 'supplier_http_status', 
+                          'supplier_status_details', 'supplier_checked_at']
+        applied = all(c in columns for c in expected_columns) and has_constraint
+        
+        return {
+            "migration": "006-supplier-status-columns",
+            "applied": applied,
+            "columns_expected": expected_columns,
+            "columns_found": columns,
+            "has_constraint": has_constraint,
+            "has_index": has_index,
+            "status_distribution": distribution
+        }
+        
+    except Exception as e:
+        try:
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Check error: {str(e)}")
+
+
+# =============================================================================
 # STEP 4: SANITY CHECK ENDPOINT
 # =============================================================================
 
