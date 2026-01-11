@@ -24,7 +24,7 @@ Process:
 DETERMINISTIC RULES:
 - Only modules missing net_quantity are processed
 - Only modules with valid supplier_url are scraped
-- Extraction uses exact text matching for "Product Amount"
+- Extraction uses pattern matching for amount labels
 - No fuzzy matching
 """
 
@@ -51,7 +51,7 @@ MAX_RETRIES = 2
 RETRY_BACKOFF_BASE = 2  # Exponential backoff
 
 # Validation
-MAX_NET_QUANTITY_LENGTH = 64
+MAX_NET_QUANTITY_LENGTH = 100
 
 
 def fetch_missing_modules() -> Dict:
@@ -66,91 +66,52 @@ def extract_product_amount(html_content: str) -> Optional[str]:
     """
     Extract Product Amount from Supliful catalog page HTML.
     
-    Extraction rules (STRICT):
-    1. Search for element containing exact text "Product Amount" (case-sensitive first)
-    2. Locate the nearest value container (sibling or adjacent element)
-    3. If multiple candidates, choose shortest non-empty value
-    4. Return None if ambiguous or not found
+    Handles variations:
+    - <strong>Product Amount</strong>:VALUE
+    - <strong>Product amount (oz/lbs/g)</strong>:VALUE  
+    - <strong>Amount</strong>:VALUE
+    - Case insensitive matching
+    
+    Returns:
+        Extracted value or None if not found
     """
     soup = BeautifulSoup(html_content, 'html.parser')
     
-    # Strategy 1: Look for "Product Amount" label and adjacent value
-    # Common patterns on Supliful pages
+    # Find all <strong> tags that might be amount labels
+    for strong in soup.find_all('strong'):
+        label = strong.get_text(strip=True).lower()
+        
+        # Match variations of amount labels
+        # "amount", "product amount", "product amount (oz/lbs/g)"
+        if 'amount' in label:
+            parent = strong.parent
+            if parent:
+                full_text = parent.get_text(strip=True)
+                
+                # Handle "Label:Value" pattern  
+                if ':' in full_text:
+                    # Split only on first colon
+                    parts = full_text.split(':', 1)
+                    if len(parts) == 2:
+                        value = parts[1].strip()
+                        # Skip if it's just the format hint or empty
+                        if value and value != '(oz/lbs/g)' and not value.startswith('(oz'):
+                            # Validate length
+                            if len(value) <= MAX_NET_QUANTITY_LENGTH:
+                                return value
     
-    # Try case-sensitive first
-    patterns_to_try = [
-        "Product Amount",
-        "product amount",
-        "Product amount",
+    # Fallback: Try regex on raw HTML for common patterns
+    patterns = [
+        r'<strong>(?:Product\s+)?Amount(?:\s*\([^)]+\))?</strong>\s*:\s*([^<]+)',
+        r'(?:Product\s+)?Amount[:\s]+(\d+\s*(?:caps?|tablets?|softgels?|strips?|oz|ml|g|ct|count)[^\n<]*)',
     ]
     
-    for pattern in patterns_to_try:
-        # Find all elements containing the label
-        label_elements = soup.find_all(string=re.compile(re.escape(pattern), re.IGNORECASE))
-        
-        for label_el in label_elements:
-            parent = label_el.parent
-            if not parent:
-                continue
-            
-            # Check for value in common structures
-            
-            # Pattern A: Label and value in same container with separator
-            # e.g., "Product Amount: 60 Capsules"
-            full_text = parent.get_text(strip=True)
-            if ':' in full_text:
-                parts = full_text.split(':', 1)
-                if len(parts) == 2:
-                    value = parts[1].strip()
-                    if value and len(value) <= MAX_NET_QUANTITY_LENGTH:
-                        return value
-            
-            # Pattern B: Value in next sibling element
-            next_sib = parent.find_next_sibling()
-            if next_sib:
-                value = next_sib.get_text(strip=True)
-                if value and len(value) <= MAX_NET_QUANTITY_LENGTH:
-                    return value
-            
-            # Pattern C: Value in adjacent element within same parent
-            grandparent = parent.parent
-            if grandparent:
-                # Look for adjacent elements
-                for sibling in grandparent.children:
-                    if sibling == parent:
-                        continue
-                    if hasattr(sibling, 'get_text'):
-                        text = sibling.get_text(strip=True)
-                        # Skip if it's another label
-                        if text and 'amount' not in text.lower() and len(text) <= MAX_NET_QUANTITY_LENGTH:
-                            # Validate it looks like a quantity (has numbers or common units)
-                            if re.search(r'\d+|capsule|tablet|gummy|scoop|oz|ml|mg|g\b', text, re.IGNORECASE):
-                                return text
-    
-    # Strategy 2: Look for specific data attributes or structured data
-    # Some sites use data-* attributes or JSON-LD
-    
-    # Try finding any element with "amount" in class/id
-    amount_elements = soup.find_all(attrs={'class': re.compile(r'amount', re.IGNORECASE)})
-    for el in amount_elements:
-        text = el.get_text(strip=True)
-        if text and len(text) <= MAX_NET_QUANTITY_LENGTH:
-            if re.search(r'\d+', text):  # Has numbers
-                return text
-    
-    # Strategy 3: Look in product description/details section
-    # Find structured product info
-    for dl in soup.find_all(['dl', 'table']):
-        rows = dl.find_all(['dt', 'th', 'tr'])
-        for row in rows:
-            text = row.get_text(strip=True).lower()
-            if 'product amount' in text or 'quantity' in text or 'size' in text:
-                # Get the corresponding value
-                next_el = row.find_next(['dd', 'td'])
-                if next_el:
-                    value = next_el.get_text(strip=True)
-                    if value and len(value) <= MAX_NET_QUANTITY_LENGTH:
-                        return value
+    for pattern in patterns:
+        match = re.search(pattern, html_content, re.IGNORECASE)
+        if match:
+            value = match.group(1).strip()
+            if value and len(value) > 1 and len(value) <= MAX_NET_QUANTITY_LENGTH:
+                return value
     
     return None
 
@@ -182,7 +143,7 @@ def fetch_and_extract(url: str, retries: int = MAX_RETRIES) -> Tuple[Optional[st
             last_error = f"Timeout after {REQUEST_TIMEOUT_SECONDS}s"
         except requests.exceptions.HTTPError as e:
             last_error = f"HTTP {e.response.status_code}"
-            if e.response.status_code in (404, 410):  # Not found / Gone
+            if e.response.status_code in (404, 410, 503):  # Not found / Gone / Service unavailable
                 return (None, last_error)  # Don't retry for these
         except requests.exceptions.RequestException as e:
             last_error = str(e)
@@ -232,6 +193,9 @@ def run_backfill(dry_run: bool = False) -> Dict:
         "extracted": 0,
         "updated": 0,
         "failed": 0,
+        "failed_404": 0,
+        "failed_503": 0,
+        "failed_extract": 0,
         "still_missing_after": 0,
         "failures": [],
         "successes": []
@@ -304,6 +268,14 @@ def run_backfill(dry_run: bool = False) -> Dict:
                 print(f"    Update FAILED: {update_error}")
         else:
             report["failed"] += 1
+            # Categorize failure type
+            if error and "404" in error:
+                report["failed_404"] += 1
+            elif error and "503" in error:
+                report["failed_503"] += 1
+            else:
+                report["failed_extract"] += 1
+            
             report["failures"].append({
                 "module_code": module_code,
                 "supplier_url": supplier_url,
@@ -346,7 +318,10 @@ def run_backfill(dry_run: bool = False) -> Dict:
     print(f"  Attempted:             {report['attempted']}")
     print(f"  Extracted:             {report['extracted']}")
     print(f"  Updated:               {report['updated']}")
-    print(f"  Failed:                {report['failed']}")
+    print(f"  Failed total:          {report['failed']}")
+    print(f"    - 404 (removed):     {report['failed_404']}")
+    print(f"    - 503 (unavailable): {report['failed_503']}")
+    print(f"    - Extract failed:    {report['failed_extract']}")
     print(f"  Still missing after:   {report['still_missing_after']}")
     print("=" * 60)
     
