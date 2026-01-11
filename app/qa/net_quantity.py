@@ -1,18 +1,29 @@
 """
-GenoMAX² QA Net Quantity Module v1.0
-Endpoint for identifying modules missing net_quantity field.
+GenoMAX² QA Net Quantity Module v1.1
+Endpoint for identifying modules missing net_quantity field and managing supplier status.
 
 GET /api/v1/qa/net-qty/missing
 - Returns all modules where net_quantity IS NULL or empty
 - Includes deterministic supplier URL for scraping
 - Supports one-time backfill workflow
 
+POST /api/v1/qa/net-qty/update
+- Update net_quantity for a single module
+
+POST /api/v1/qa/net-qty/mark-discontinued
+- Mark modules as DISCONTINUED with 404 status
+
+GET /api/v1/qa/net-qty/discontinued
+- List all discontinued modules
+
 v1.0 - Initial implementation
+v1.1 - Added supplier status endpoints
 """
 
 import os
+from datetime import datetime, timezone
 from typing import Dict, Any, List, Optional
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 import psycopg2
 from psycopg2.extras import RealDictCursor
@@ -36,6 +47,7 @@ class MissingNetQuantityModule(BaseModel):
     shopify_handle: Optional[str]
     os_environment: Optional[str]
     product_name: Optional[str]
+    supliful_handle: Optional[str]
     supplier_url: Optional[str]
     reason: str
 
@@ -45,6 +57,18 @@ class MissingNetQuantityResponse(BaseModel):
     missing_with_url: int
     missing_without_url: int
     modules: List[MissingNetQuantityModule]
+    note: str
+
+
+class DiscontinuedModule(BaseModel):
+    module_code: str
+    supplier_url: str
+    http_status: int = 404
+    details: Optional[str] = None
+
+
+class MarkDiscontinuedRequest(BaseModel):
+    modules: List[DiscontinuedModule]
 
 
 @router.get("/missing", response_model=MissingNetQuantityResponse)
@@ -54,9 +78,10 @@ def get_missing_net_quantity() -> Dict[str, Any]:
     
     Returns modules where net_quantity IS NULL or empty string.
     For each module, provides a deterministic supplier URL for scraping:
-    - supplier_page_url (preferred)
-    - url (fallback)
-    - null if neither available
+    1. supplier_page_url (preferred)
+    2. url (fallback)
+    3. Build from supliful_handle: https://supliful.com/catalog/{handle}
+    4. null if none available
     
     Used by one-time backfill script to populate net_quantity.
     """
@@ -68,22 +93,27 @@ def get_missing_net_quantity() -> Dict[str, Any]:
         cur = conn.cursor()
         
         # Query all modules missing net_quantity with deterministic URL selection
+        # Priority: supplier_page_url > url > supliful_handle-based URL
         cur.execute("""
             SELECT
                 module_code,
                 shopify_handle,
                 os_environment,
                 product_name,
+                supliful_handle,
                 CASE
                     WHEN supplier_page_url IS NOT NULL AND BTRIM(supplier_page_url) <> '' 
                         THEN supplier_page_url
                     WHEN url IS NOT NULL AND BTRIM(url) <> '' 
                         THEN url
+                    WHEN supliful_handle IS NOT NULL AND BTRIM(supliful_handle) <> ''
+                        THEN 'https://supliful.com/catalog/' || supliful_handle
                     ELSE NULL
                 END AS supplier_url,
                 CASE
                     WHEN (supplier_page_url IS NOT NULL AND BTRIM(supplier_page_url) <> '')
-                        OR (url IS NOT NULL AND BTRIM(url) <> '') 
+                        OR (url IS NOT NULL AND BTRIM(url) <> '')
+                        OR (supliful_handle IS NOT NULL AND BTRIM(supliful_handle) <> '')
                         THEN 'OK'
                     ELSE 'MISSING_SUPPLIER_URL'
                 END AS reason
@@ -107,6 +137,7 @@ def get_missing_net_quantity() -> Dict[str, Any]:
                 "shopify_handle": row["shopify_handle"],
                 "os_environment": row["os_environment"],
                 "product_name": row["product_name"],
+                "supliful_handle": row.get("supliful_handle"),
                 "supplier_url": row["supplier_url"],
                 "reason": row["reason"]
             }
@@ -121,6 +152,180 @@ def get_missing_net_quantity() -> Dict[str, Any]:
             "total_missing": len(modules),
             "missing_with_url": missing_with_url,
             "missing_without_url": missing_without_url,
+            "modules": modules,
+            "note": "Use supplier_url to scrape Product Amount from Supliful catalog pages"
+        }
+        
+    except Exception as e:
+        try:
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Query error: {str(e)}")
+
+
+@router.post("/update")
+def update_net_quantity(
+    module_code: str = Query(..., description="Module code to update"),
+    net_quantity: str = Query(..., description="Net quantity value (full raw string)")
+) -> Dict[str, Any]:
+    """
+    Update net_quantity for a single module.
+    
+    Only updates if net_quantity is currently NULL or empty.
+    Stores the FULL raw Product Amount string including slashes and multiple units.
+    """
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        cur = conn.cursor()
+        
+        # Only update if currently missing
+        cur.execute("""
+            UPDATE os_modules_v3_1
+            SET net_quantity = %s, updated_at = NOW()
+            WHERE module_code = %s
+              AND (net_quantity IS NULL OR BTRIM(net_quantity) = '')
+        """, (net_quantity.strip(), module_code))
+        
+        updated = cur.rowcount
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        if updated == 0:
+            return {
+                "status": "no_change",
+                "module_code": module_code,
+                "reason": "Module not found or net_quantity already populated"
+            }
+        
+        return {
+            "status": "success",
+            "module_code": module_code,
+            "net_quantity": net_quantity.strip()
+        }
+        
+    except Exception as e:
+        try:
+            conn.rollback()
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Update error: {str(e)}")
+
+
+@router.post("/mark-discontinued")
+def mark_discontinued(
+    module_codes: List[str] = Query(..., description="List of module codes to mark as discontinued"),
+    http_status: int = Query(404, description="HTTP status code (default 404)"),
+    details: Optional[str] = Query(None, description="Optional details/notes")
+) -> Dict[str, Any]:
+    """
+    Mark modules as DISCONTINUED.
+    
+    Used after scraping to mark products that returned 404.
+    Sets:
+    - supplier_status = 'DISCONTINUED'
+    - supplier_http_status = http_status
+    - supplier_status_details = details
+    - supplier_checked_at = NOW()
+    """
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    if not module_codes:
+        return {"status": "error", "detail": "No module codes provided"}
+    
+    try:
+        cur = conn.cursor()
+        
+        # Build details string
+        status_details = details or f"404 on Supliful catalog - checked {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
+        
+        # Update modules
+        cur.execute("""
+            UPDATE os_modules_v3_1
+            SET supplier_status = 'DISCONTINUED',
+                supplier_http_status = %s,
+                supplier_status_details = %s,
+                supplier_checked_at = NOW(),
+                updated_at = NOW()
+            WHERE module_code = ANY(%s)
+        """, (http_status, status_details, module_codes))
+        
+        updated = cur.rowcount
+        conn.commit()
+        
+        # Get updated modules
+        cur.execute("""
+            SELECT module_code, shopify_handle, supplier_status, supplier_http_status
+            FROM os_modules_v3_1
+            WHERE module_code = ANY(%s)
+        """, (module_codes,))
+        updated_modules = [dict(r) for r in cur.fetchall()]
+        
+        cur.close()
+        conn.close()
+        
+        not_found = [m for m in module_codes if m not in [u['module_code'] for u in updated_modules]]
+        
+        return {
+            "status": "success",
+            "updated_count": updated,
+            "http_status": http_status,
+            "details": status_details,
+            "updated_modules": updated_modules,
+            "not_found": not_found
+        }
+        
+    except Exception as e:
+        try:
+            conn.rollback()
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Update error: {str(e)}")
+
+
+@router.get("/discontinued")
+def get_discontinued() -> Dict[str, Any]:
+    """
+    List all modules marked as DISCONTINUED.
+    """
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        cur = conn.cursor()
+        
+        cur.execute("""
+            SELECT 
+                module_code,
+                shopify_handle,
+                os_environment,
+                product_name,
+                supplier_status,
+                supplier_http_status,
+                supplier_status_details,
+                supplier_checked_at,
+                supplier_page_url,
+                url
+            FROM os_modules_v3_1
+            WHERE supplier_status = 'DISCONTINUED'
+            ORDER BY shopify_handle, os_environment
+        """)
+        
+        modules = [dict(r) for r in cur.fetchall()]
+        cur.close()
+        conn.close()
+        
+        return {
+            "total_discontinued": len(modules),
             "modules": modules
         }
         
@@ -178,6 +383,68 @@ def get_net_quantity_stats() -> Dict[str, Any]:
             "missing": missing,
             "coverage_pct": round(100 * populated / total, 1) if total > 0 else 0,
             "missing_pct": round(100 * missing / total, 1) if total > 0 else 0
+        }
+        
+    except Exception as e:
+        try:
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Stats error: {str(e)}")
+
+
+@router.get("/supplier-stats")
+def get_supplier_stats() -> Dict[str, Any]:
+    """
+    Stats on supplier_status field distribution.
+    """
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        cur = conn.cursor()
+        
+        # Check if column exists
+        cur.execute("""
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'os_modules_v3_1'
+              AND column_name = 'supplier_status'
+        """)
+        
+        if not cur.fetchone():
+            cur.close()
+            conn.close()
+            return {
+                "status": "column_not_found",
+                "message": "supplier_status column does not exist. Run migration 006 first.",
+                "migration_endpoint": "POST /api/v1/migrations/run/006-supplier-status-columns"
+            }
+        
+        cur.execute("""
+            SELECT 
+                supplier_status,
+                COUNT(*) as count
+            FROM os_modules_v3_1
+            GROUP BY supplier_status
+            ORDER BY count DESC
+        """)
+        
+        distribution = [dict(r) for r in cur.fetchall()]
+        
+        cur.execute("""
+            SELECT COUNT(*) as total FROM os_modules_v3_1
+        """)
+        total = cur.fetchone()["total"]
+        
+        cur.close()
+        conn.close()
+        
+        return {
+            "table": "os_modules_v3_1",
+            "field": "supplier_status",
+            "total_modules": total,
+            "distribution": distribution
         }
         
     except Exception as e:
