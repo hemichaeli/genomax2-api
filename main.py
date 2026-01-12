@@ -1,7 +1,6 @@
 """
-GenoMAX2 API Server Entry Point v3.12.0
-Adds Bloodwork Engine v1 endpoints with route debugging.
-Adds Migration Runner endpoints.
+GenoMAX2 API Server Entry Point v3.22.0
+Adds Supplier Catalog Admin endpoints.
 
 Use this file for Railway deployment:
   uvicorn main:app --host 0.0.0.0 --port $PORT
@@ -27,6 +26,16 @@ try:
     print("✅ Migration Runner endpoints registered successfully")
 except Exception as e:
     print(f"❌ ERROR loading Migration Runner: {type(e).__name__}: {e}")
+    import traceback
+    traceback.print_exc()
+
+# ===== SUPPLIER CATALOG ADMIN =====
+try:
+    from app.routers.supplier_catalog_admin import router as supplier_catalog_router
+    app.include_router(supplier_catalog_router)
+    print("✅ Supplier Catalog Admin endpoints registered successfully")
+except Exception as e:
+    print(f"❌ ERROR loading Supplier Catalog Admin: {type(e).__name__}: {e}")
     import traceback
     traceback.print_exc()
 
