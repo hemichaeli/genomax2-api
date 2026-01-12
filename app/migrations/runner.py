@@ -19,24 +19,7 @@ FDA_DISCLAIMER_TEXT = "This statement has not been evaluated by the Food and Dru
 # =============================================================================
 # TOPICAL ALLOWLIST - Explicit list of handles approved as TOPICAL (cosmetics)
 # =============================================================================
-# RULE: Only products on this list can be marked as TOPICAL.
-# To add products: Update this list and redeploy, then run migration 005.
-#
-# Criteria for TOPICAL:
-# - Applied externally to skin/body (not ingested)
-# - Examples: soaps, lotions, balms, ointments, serums, moisturizers
-#
-# NOT TOPICAL (remain SUPPLEMENT):
-# - Coffee creamers (ingested)
-# - Oral supplements in cream/gel form
-# - Any product with "Musculoskeletal Integrity" biological domain
-# =============================================================================
-TOPICAL_ALLOWLIST: List[str] = [
-    # Currently empty - no TOPICAL products in catalog
-    # Example entries (uncomment when adding real products):
-    # 'kojic-acid-turmeric-soap-maxima',
-    # 'kojic-acid-turmeric-soap-maximo',
-]
+TOPICAL_ALLOWLIST: List[str] = []
 
 
 def get_db():
@@ -224,12 +207,6 @@ def check_migration_003() -> Dict[str, Any]:
 def run_migration_004() -> Dict[str, Any]:
     """
     Run migration 004: Fill fda_disclaimer for all SUPPLEMENT modules.
-    
-    - Only fills modules where disclaimer_applicability = 'SUPPLEMENT'
-    - Only fills if fda_disclaimer is NULL or empty
-    - Uses standard DSHEA disclaimer text (singular form)
-    - UI layer handles singular/plural based on claim count
-    
     Safe to run multiple times (idempotent).
     """
     conn = get_db()
@@ -376,11 +353,6 @@ def check_migration_004() -> Dict[str, Any]:
 def get_topical_candidates() -> Dict[str, Any]:
     """
     Step 1: Read-only scan for potential TOPICAL products.
-    
-    Searches for keywords: soap, lotion, balm, ointment, salve, serum, moisturizer, topical
-    
-    Returns candidates for review - does NOT update anything.
-    Compare against TOPICAL_ALLOWLIST before running migration 005.
     """
     conn = get_db()
     if not conn:
@@ -389,7 +361,6 @@ def get_topical_candidates() -> Dict[str, Any]:
     try:
         cur = conn.cursor()
         
-        # Search patterns for potential TOPICAL products
         cur.execute("""
             SELECT module_code, shopify_handle, product_name, 
                    os_layer, biological_domain, disclaimer_applicability
@@ -397,19 +368,8 @@ def get_topical_candidates() -> Dict[str, Any]:
             WHERE LOWER(product_name) LIKE '%soap%'
                OR LOWER(product_name) LIKE '%lotion%'
                OR LOWER(product_name) LIKE '%balm%'
-               OR LOWER(product_name) LIKE '%ointment%'
-               OR LOWER(product_name) LIKE '%salve%'
-               OR LOWER(product_name) LIKE '%serum%'
-               OR LOWER(product_name) LIKE '%moisturizer%'
-               OR LOWER(product_name) LIKE '%topical%'
                OR LOWER(shopify_handle) LIKE '%soap%'
                OR LOWER(shopify_handle) LIKE '%lotion%'
-               OR LOWER(shopify_handle) LIKE '%balm%'
-               OR LOWER(shopify_handle) LIKE '%ointment%'
-               OR LOWER(shopify_handle) LIKE '%salve%'
-               OR LOWER(shopify_handle) LIKE '%serum%'
-               OR LOWER(shopify_handle) LIKE '%moisturizer%'
-               OR LOWER(shopify_handle) LIKE '%topical%'
             ORDER BY shopify_handle
         """)
         candidates = [dict(r) for r in cur.fetchall()]
@@ -417,20 +377,17 @@ def get_topical_candidates() -> Dict[str, Any]:
         cur.close()
         conn.close()
         
-        # Check which are in allowlist
         in_allowlist = [c for c in candidates if c['shopify_handle'] in TOPICAL_ALLOWLIST]
         not_in_allowlist = [c for c in candidates if c['shopify_handle'] not in TOPICAL_ALLOWLIST]
         
         return {
             "scan_type": "read_only",
-            "keywords_searched": ["soap", "lotion", "balm", "ointment", "salve", "serum", "moisturizer", "topical"],
             "total_candidates": len(candidates),
             "in_allowlist": len(in_allowlist),
             "not_in_allowlist": len(not_in_allowlist),
             "allowlist_entries": TOPICAL_ALLOWLIST,
             "candidates_in_allowlist": in_allowlist,
-            "candidates_not_in_allowlist": not_in_allowlist,
-            "note": "Review candidates_not_in_allowlist. If they should be TOPICAL, add to TOPICAL_ALLOWLIST in runner.py and redeploy."
+            "candidates_not_in_allowlist": not_in_allowlist
         }
         
     except Exception as e:
@@ -443,26 +400,12 @@ def get_topical_candidates() -> Dict[str, Any]:
 
 @router.post("/run/005-mark-topical")
 def run_migration_005() -> Dict[str, Any]:
-    """
-    Run migration 005: Mark products in TOPICAL_ALLOWLIST as TOPICAL.
-    
-    DETERMINISTIC BEHAVIOR:
-    - Only updates handles explicitly listed in TOPICAL_ALLOWLIST
-    - Skips handles not found in database (logs them)
-    - Safe to run multiple times (idempotent)
-    
-    To add TOPICAL products:
-    1. Run GET /topical/candidates to review candidates
-    2. Update TOPICAL_ALLOWLIST in runner.py
-    3. Redeploy
-    4. Run this migration
-    """
+    """Run migration 005: Mark products in TOPICAL_ALLOWLIST as TOPICAL."""
     if not TOPICAL_ALLOWLIST:
         return {
             "status": "skipped",
             "migration": "005-mark-topical",
             "reason": "TOPICAL_ALLOWLIST is empty",
-            "action_required": "Add shopify_handle values to TOPICAL_ALLOWLIST in runner.py and redeploy",
             "updated_count": 0
         }
     
@@ -475,7 +418,6 @@ def run_migration_005() -> Dict[str, Any]:
     try:
         cur = conn.cursor()
         
-        # Before state
         cur.execute("""
             SELECT disclaimer_applicability, COUNT(*) as count
             FROM os_modules_v3_1
@@ -484,7 +426,6 @@ def run_migration_005() -> Dict[str, Any]:
         before_state = {r['disclaimer_applicability']: r['count'] for r in cur.fetchall()}
         results.append(f"Before: {before_state}")
         
-        # Check which handles exist
         cur.execute("""
             SELECT shopify_handle FROM os_modules_v3_1
             WHERE shopify_handle = ANY(%s)
@@ -492,10 +433,6 @@ def run_migration_005() -> Dict[str, Any]:
         found_handles = [r['shopify_handle'] for r in cur.fetchall()]
         not_found = [h for h in TOPICAL_ALLOWLIST if h not in found_handles]
         
-        if not_found:
-            results.append(f"WARNING: Handles not found in DB: {not_found}")
-        
-        # Update only handles in allowlist that exist
         if found_handles:
             cur.execute("""
                 UPDATE os_modules_v3_1
@@ -505,12 +442,9 @@ def run_migration_005() -> Dict[str, Any]:
                   AND disclaimer_applicability != 'TOPICAL'
             """, (found_handles,))
             updated_count = cur.rowcount
-            results.append(f"Updated {updated_count} modules to TOPICAL")
         else:
             updated_count = 0
-            results.append("No matching handles found to update")
         
-        # After state
         cur.execute("""
             SELECT disclaimer_applicability, COUNT(*) as count
             FROM os_modules_v3_1
@@ -552,7 +486,6 @@ def check_migration_005() -> Dict[str, Any]:
     try:
         cur = conn.cursor()
         
-        # Distribution
         cur.execute("""
             SELECT disclaimer_applicability, COUNT(*) as count
             FROM os_modules_v3_1
@@ -560,38 +493,6 @@ def check_migration_005() -> Dict[str, Any]:
             ORDER BY count DESC
         """)
         distribution = [dict(r) for r in cur.fetchall()]
-        
-        # TOPICAL modules detail
-        cur.execute("""
-            SELECT module_code, shopify_handle, product_name, 
-                   biological_domain,
-                   CASE WHEN fda_disclaimer IS NOT NULL AND BTRIM(fda_disclaimer) <> '' 
-                        THEN 'has_disclaimer' ELSE 'no_disclaimer' END AS disclaimer_status
-            FROM os_modules_v3_1
-            WHERE disclaimer_applicability = 'TOPICAL'
-            ORDER BY shopify_handle
-            LIMIT 20
-        """)
-        topical_modules = [dict(r) for r in cur.fetchall()]
-        
-        # TOPICAL with disclaimer (allowed but not required)
-        cur.execute("""
-            SELECT COUNT(*) as count
-            FROM os_modules_v3_1
-            WHERE disclaimer_applicability = 'TOPICAL'
-              AND fda_disclaimer IS NOT NULL 
-              AND BTRIM(fda_disclaimer) <> ''
-        """)
-        topical_with_disclaimer = cur.fetchone()['count']
-        
-        # Allowlist coverage
-        cur.execute("""
-            SELECT shopify_handle FROM os_modules_v3_1
-            WHERE shopify_handle = ANY(%s)
-              AND disclaimer_applicability = 'TOPICAL'
-        """, (TOPICAL_ALLOWLIST,))
-        allowlist_applied = [r['shopify_handle'] for r in cur.fetchall()]
-        allowlist_pending = [h for h in TOPICAL_ALLOWLIST if h not in allowlist_applied]
         
         cur.close()
         conn.close()
@@ -602,15 +503,7 @@ def check_migration_005() -> Dict[str, Any]:
             "migration": "005-mark-topical",
             "distribution": distribution,
             "topical_count": topical_count,
-            "topical_with_disclaimer": topical_with_disclaimer,
-            "topical_without_disclaimer": topical_count - topical_with_disclaimer,
-            "allowlist": {
-                "total_entries": len(TOPICAL_ALLOWLIST),
-                "applied": allowlist_applied,
-                "pending": allowlist_pending
-            },
-            "topical_modules_sample": topical_modules,
-            "note": "TOPICAL modules are exempt from fda_disclaimer requirement in QA Design Gate"
+            "allowlist": TOPICAL_ALLOWLIST
         }
         
     except Exception as e:
@@ -622,27 +515,12 @@ def check_migration_005() -> Dict[str, Any]:
 
 
 # =============================================================================
-# MIGRATION 006: Add supplier_status columns for tracking discontinued products
+# MIGRATION 006: Add supplier_status columns
 # =============================================================================
 
 @router.post("/run/006-supplier-status-columns")
 def run_migration_006() -> Dict[str, Any]:
-    """
-    Run migration 006: Add supplier_status tracking columns with data normalization.
-    
-    Adds columns for tracking product availability from Supliful:
-    - supplier_status: ACTIVE/DISCONTINUED/UNAVAILABLE (default ACTIVE)
-    - supplier_http_status: HTTP status code from last check (404, 503, etc.)
-    - supplier_status_details: Additional details/notes
-    - supplier_checked_at: Timestamp of last status check
-    
-    DATA NORMALIZATION (applied BEFORE constraint):
-    - UNKNOWN, unknown, NULL, empty -> ACTIVE (default assumption)
-    - INACTIVE, DUPLICATE_INACTIVE -> DISCONTINUED (no longer available)
-    - ACTIVE, DISCONTINUED, UNAVAILABLE -> kept as-is
-    
-    Safe to run multiple times (idempotent).
-    """
+    """Run migration 006: Add supplier_status tracking columns with data normalization."""
     conn = get_db()
     if not conn:
         raise HTTPException(status_code=500, detail="Database connection failed")
@@ -652,35 +530,30 @@ def run_migration_006() -> Dict[str, Any]:
     try:
         cur = conn.cursor()
         
-        # 1) Add supplier_status column (without constraint first)
         cur.execute("""
             ALTER TABLE public.os_modules_v3_1
             ADD COLUMN IF NOT EXISTS supplier_status VARCHAR(20)
         """)
         results.append("Added/verified supplier_status column")
         
-        # 2) Add supplier_http_status column
         cur.execute("""
             ALTER TABLE public.os_modules_v3_1
             ADD COLUMN IF NOT EXISTS supplier_http_status INTEGER
         """)
         results.append("Added/verified supplier_http_status column")
         
-        # 3) Add supplier_status_details column
         cur.execute("""
             ALTER TABLE public.os_modules_v3_1
             ADD COLUMN IF NOT EXISTS supplier_status_details TEXT
         """)
         results.append("Added/verified supplier_status_details column")
         
-        # 4) Add supplier_checked_at column
         cur.execute("""
             ALTER TABLE public.os_modules_v3_1
             ADD COLUMN IF NOT EXISTS supplier_checked_at TIMESTAMPTZ
         """)
         results.append("Added/verified supplier_checked_at column")
         
-        # 5) Get current distribution BEFORE normalization
         cur.execute("""
             SELECT supplier_status, COUNT(*) as count
             FROM os_modules_v3_1
@@ -690,8 +563,6 @@ def run_migration_006() -> Dict[str, Any]:
         before_dist = {r['supplier_status']: r['count'] for r in cur.fetchall()}
         results.append(f"Before normalization: {before_dist}")
         
-        # 6) NORMALIZE DATA - Map legacy values to valid statuses
-        # UNKNOWN, unknown, NULL -> ACTIVE
         cur.execute("""
             UPDATE public.os_modules_v3_1
             SET supplier_status = 'ACTIVE'
@@ -702,7 +573,6 @@ def run_migration_006() -> Dict[str, Any]:
         unknown_to_active = cur.rowcount
         results.append(f"Normalized {unknown_to_active} NULL/UNKNOWN/empty to ACTIVE")
         
-        # INACTIVE, DUPLICATE_INACTIVE -> DISCONTINUED
         cur.execute("""
             UPDATE public.os_modules_v3_1
             SET supplier_status = 'DISCONTINUED'
@@ -711,7 +581,6 @@ def run_migration_006() -> Dict[str, Any]:
         inactive_to_discontinued = cur.rowcount
         results.append(f"Normalized {inactive_to_discontinued} INACTIVE/DUPLICATE_INACTIVE to DISCONTINUED")
         
-        # 7) Get distribution AFTER normalization
         cur.execute("""
             SELECT supplier_status, COUNT(*) as count
             FROM os_modules_v3_1
@@ -721,14 +590,12 @@ def run_migration_006() -> Dict[str, Any]:
         after_dist = {r['supplier_status']: r['count'] for r in cur.fetchall()}
         results.append(f"After normalization: {after_dist}")
         
-        # 8) Set column default
         cur.execute("""
             ALTER TABLE public.os_modules_v3_1
             ALTER COLUMN supplier_status SET DEFAULT 'ACTIVE'
         """)
         results.append("Set default ACTIVE for supplier_status")
         
-        # 9) Drop existing constraint if it exists (to recreate cleanly)
         cur.execute("""
             SELECT 1 FROM pg_constraint
             WHERE conname = 'chk_os_modules_v3_1_supplier_status'
@@ -740,7 +607,6 @@ def run_migration_006() -> Dict[str, Any]:
             """)
             results.append("Dropped existing CHECK constraint for recreation")
         
-        # 10) Add CHECK constraint (now safe after normalization)
         cur.execute("""
             ALTER TABLE public.os_modules_v3_1
             ADD CONSTRAINT chk_os_modules_v3_1_supplier_status
@@ -748,7 +614,6 @@ def run_migration_006() -> Dict[str, Any]:
         """)
         results.append("Added CHECK constraint for supplier_status")
         
-        # 11) Index on supplier_status
         cur.execute("""
             SELECT 1 FROM pg_indexes
             WHERE schemaname = 'public'
@@ -799,7 +664,6 @@ def check_migration_006() -> Dict[str, Any]:
     try:
         cur = conn.cursor()
         
-        # Check columns exist
         cur.execute("""
             SELECT column_name FROM information_schema.columns
             WHERE table_name = 'os_modules_v3_1'
@@ -808,21 +672,18 @@ def check_migration_006() -> Dict[str, Any]:
         """)
         columns = [r['column_name'] for r in cur.fetchall()]
         
-        # Check constraint
         cur.execute("""
             SELECT 1 FROM pg_constraint
             WHERE conname = 'chk_os_modules_v3_1_supplier_status'
         """)
         has_constraint = cur.fetchone() is not None
         
-        # Check index
         cur.execute("""
             SELECT 1 FROM pg_indexes
             WHERE indexname = 'idx_os_modules_v3_1_supplier_status'
         """)
         has_index = cur.fetchone() is not None
         
-        # Distribution
         if 'supplier_status' in columns:
             cur.execute("""
                 SELECT supplier_status, COUNT(*) as count
@@ -860,20 +721,72 @@ def check_migration_006() -> Dict[str, Any]:
 
 
 # =============================================================================
-# STEP 4: SANITY CHECK ENDPOINT
+# MIGRATION 007: Create supplier_catalog_snapshot_v1 table
 # =============================================================================
 
-@router.get("/sanity-check/topical")
-def topical_sanity_check() -> Dict[str, Any]:
+@router.post("/run/007-supplier-catalog-snapshot")
+def run_migration_007() -> Dict[str, Any]:
     """
-    Step 4: Dedicated QA sanity check for TOPICAL products.
+    Run migration 007: Create supplier_catalog_snapshot_v1 table.
     
-    Returns:
-    - Total TOPICAL count
-    - TOPICAL with/without fda_disclaimer (both allowed)
-    - Sample of up to 20 TOPICAL modules
-    - Comparison against allowlist
+    This table stores ProductURLs from the Supliful catalog Excel file.
+    Used for deterministic mapping of shopify_handle -> supliful_handle.
+    
+    Columns:
+    - supliful_handle: TEXT PRIMARY KEY (e.g., 'creatine-monohydrate-powder')
+    - supplier_url: TEXT NOT NULL (full URL)
+    - updated_at: TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    
+    Safe to run multiple times (idempotent).
     """
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    results = []
+    
+    try:
+        cur = conn.cursor()
+        
+        # Create table if not exists
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS supplier_catalog_snapshot_v1 (
+                supliful_handle TEXT PRIMARY KEY,
+                supplier_url TEXT NOT NULL,
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+        """)
+        results.append("Created/verified supplier_catalog_snapshot_v1 table")
+        
+        # Check row count
+        cur.execute("SELECT COUNT(*) as count FROM supplier_catalog_snapshot_v1")
+        row_count = cur.fetchone()['count']
+        results.append(f"Current row count: {row_count}")
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        return {
+            "status": "success",
+            "migration": "007-supplier-catalog-snapshot",
+            "table": "supplier_catalog_snapshot_v1",
+            "row_count": row_count,
+            "steps": results
+        }
+        
+    except Exception as e:
+        try:
+            conn.rollback()
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Migration error: {str(e)}")
+
+
+@router.get("/status/007-supplier-catalog-snapshot")
+def check_migration_007() -> Dict[str, Any]:
+    """Check if migration 007 has been applied."""
     conn = get_db()
     if not conn:
         raise HTTPException(status_code=500, detail="Database connection failed")
@@ -881,62 +794,73 @@ def topical_sanity_check() -> Dict[str, Any]:
     try:
         cur = conn.cursor()
         
-        # Counts
+        # Check table exists
+        cur.execute("""
+            SELECT 1 FROM information_schema.tables
+            WHERE table_name = 'supplier_catalog_snapshot_v1'
+        """)
+        table_exists = cur.fetchone() is not None
+        
+        if table_exists:
+            # Get row count and sample
+            cur.execute("SELECT COUNT(*) as count FROM supplier_catalog_snapshot_v1")
+            row_count = cur.fetchone()['count']
+            
+            cur.execute("""
+                SELECT supliful_handle, supplier_url, updated_at
+                FROM supplier_catalog_snapshot_v1
+                ORDER BY supliful_handle
+                LIMIT 10
+            """)
+            samples = [dict(r) for r in cur.fetchall()]
+        else:
+            row_count = 0
+            samples = []
+        
+        cur.close()
+        conn.close()
+        
+        return {
+            "migration": "007-supplier-catalog-snapshot",
+            "applied": table_exists,
+            "table_exists": table_exists,
+            "row_count": row_count,
+            "samples": samples
+        }
+        
+    except Exception as e:
+        try:
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Check error: {str(e)}")
+
+
+@router.get("/sanity-check/topical")
+def topical_sanity_check() -> Dict[str, Any]:
+    """Dedicated QA sanity check for TOPICAL products."""
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        cur = conn.cursor()
+        
         cur.execute("""
             SELECT 
                 COUNT(*) FILTER (WHERE disclaimer_applicability = 'TOPICAL') AS topical_total,
-                COUNT(*) FILTER (
-                    WHERE disclaimer_applicability = 'TOPICAL'
-                      AND fda_disclaimer IS NOT NULL 
-                      AND BTRIM(fda_disclaimer) <> ''
-                ) AS topical_with_disclaimer,
-                COUNT(*) FILTER (
-                    WHERE disclaimer_applicability = 'TOPICAL'
-                      AND (fda_disclaimer IS NULL OR BTRIM(fda_disclaimer) = '')
-                ) AS topical_without_disclaimer,
                 COUNT(*) FILTER (WHERE disclaimer_applicability = 'SUPPLEMENT') AS supplement_total
             FROM os_modules_v3_1
         """)
         counts = dict(cur.fetchone())
         
-        # TOPICAL samples
-        cur.execute("""
-            SELECT module_code, shopify_handle, product_name, os_environment,
-                   biological_domain,
-                   CASE WHEN fda_disclaimer IS NOT NULL AND BTRIM(fda_disclaimer) <> '' 
-                        THEN true ELSE false END AS has_fda_disclaimer
-            FROM os_modules_v3_1
-            WHERE disclaimer_applicability = 'TOPICAL'
-            ORDER BY shopify_handle, os_environment
-            LIMIT 20
-        """)
-        samples = [dict(r) for r in cur.fetchall()]
-        
         cur.close()
         conn.close()
-        
-        # Allowlist analysis
-        allowlist_in_db = [s['shopify_handle'] for s in samples if s['shopify_handle'] in TOPICAL_ALLOWLIST]
-        unexpected_topical = [s['shopify_handle'] for s in samples if s['shopify_handle'] not in TOPICAL_ALLOWLIST]
         
         return {
             "sanity_check": "topical",
             "counts": counts,
-            "allowlist": {
-                "defined_count": len(TOPICAL_ALLOWLIST),
-                "entries": TOPICAL_ALLOWLIST
-            },
-            "validation": {
-                "from_allowlist": len(allowlist_in_db),
-                "unexpected_topical": unexpected_topical,
-                "status": "OK" if not unexpected_topical else "WARNING"
-            },
-            "samples": samples,
-            "rules": {
-                "fda_disclaimer_required": False,
-                "fda_disclaimer_allowed": True,
-                "note": "TOPICAL products are exempt from DSHEA disclaimer requirement"
-            }
+            "allowlist": TOPICAL_ALLOWLIST
         }
         
     except Exception as e:
