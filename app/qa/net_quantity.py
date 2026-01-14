@@ -1,5 +1,5 @@
 """
-GenoMAX² QA Net Quantity Module v1.2
+GenoMAX² QA Net Quantity Module v1.3
 Endpoint for identifying modules missing net_quantity field and managing supplier status.
 
 GET /api/v1/qa/net-qty/missing
@@ -19,9 +19,13 @@ POST /api/v1/qa/net-qty/reactivate
 GET /api/v1/qa/net-qty/discontinued
 - List all discontinued modules
 
+GET /api/v1/qa/net-qty/final-report
+- Complete coverage report separating ACTIVE vs DISCONTINUED
+
 v1.0 - Initial implementation
 v1.1 - Added supplier status endpoints
 v1.2 - Added reactivate endpoint
+v1.3 - Added final-report endpoint
 """
 
 import os
@@ -523,3 +527,125 @@ def get_supplier_stats() -> Dict[str, Any]:
         except:
             pass
         raise HTTPException(status_code=500, detail=f"Stats error: {str(e)}")
+
+
+@router.get("/final-report")
+def get_final_report() -> Dict[str, Any]:
+    """
+    Final QA report separating ACTIVE vs DISCONTINUED coverage.
+    
+    Definition of Done:
+    - ACTIVE modules should have ~100% net_quantity coverage
+    - DISCONTINUED modules may have NULL net_quantity (expected)
+    
+    Breakdown categories:
+    - NO_URL_LEGACY: No supplier URL available (legacy data)
+    - DISCONTINUED_404: Product returned 404, properly marked
+    - EXTRACTION_FAILED: Scraper could not extract data
+    - NO_MATCH_NO_ALLOWLIST: Handle mismatch, not in allowlist
+    """
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        cur = conn.cursor()
+        
+        # Main counts
+        cur.execute("""
+            SELECT
+                COUNT(*) AS total_modules,
+                COUNT(*) FILTER (WHERE supplier_status = 'ACTIVE' OR supplier_status IS NULL) AS active_modules,
+                COUNT(*) FILTER (WHERE supplier_status = 'DISCONTINUED') AS discontinued_modules,
+                COUNT(*) FILTER (WHERE net_quantity IS NOT NULL AND BTRIM(net_quantity) <> '') AS net_quantity_populated_total,
+                COUNT(*) FILTER (
+                    WHERE (supplier_status = 'ACTIVE' OR supplier_status IS NULL)
+                      AND net_quantity IS NOT NULL AND BTRIM(net_quantity) <> ''
+                ) AS net_quantity_populated_active,
+                COUNT(*) FILTER (
+                    WHERE (supplier_status = 'ACTIVE' OR supplier_status IS NULL)
+                      AND (net_quantity IS NULL OR BTRIM(net_quantity) = '')
+                ) AS remaining_missing_active
+            FROM os_modules_v3_1
+        """)
+        
+        counts = cur.fetchone()
+        
+        # Breakdown of remaining missing ACTIVE modules
+        cur.execute("""
+            SELECT
+                module_code,
+                shopify_handle,
+                os_environment,
+                product_name,
+                supplier_status,
+                supliful_handle,
+                supplier_page_url,
+                url,
+                CASE
+                    WHEN supplier_status = 'DISCONTINUED' THEN 'DISCONTINUED_404'
+                    WHEN (supliful_handle IS NULL OR BTRIM(supliful_handle) = '')
+                         AND (supplier_page_url IS NULL OR BTRIM(supplier_page_url) = '')
+                         AND (url IS NULL OR BTRIM(url) = '') THEN 'NO_MATCH_NO_ALLOWLIST'
+                    ELSE 'EXTRACTION_FAILED'
+                END AS missing_reason
+            FROM os_modules_v3_1
+            WHERE net_quantity IS NULL OR BTRIM(net_quantity) = ''
+            ORDER BY shopify_handle
+        """)
+        
+        missing_modules = cur.fetchall()
+        
+        # Categorize
+        breakdown = {
+            "NO_URL_LEGACY": 0,
+            "DISCONTINUED_404": 0,
+            "EXTRACTION_FAILED": 0,
+            "NO_MATCH_NO_ALLOWLIST": 0
+        }
+        
+        missing_details = []
+        for mod in missing_modules:
+            reason = mod["missing_reason"]
+            breakdown[reason] = breakdown.get(reason, 0) + 1
+            missing_details.append({
+                "module_code": mod["module_code"],
+                "shopify_handle": mod["shopify_handle"],
+                "os_environment": mod["os_environment"],
+                "reason": reason
+            })
+        
+        cur.close()
+        conn.close()
+        
+        total = counts["total_modules"]
+        active = counts["active_modules"]
+        discontinued = counts["discontinued_modules"]
+        populated_total = counts["net_quantity_populated_total"]
+        populated_active = counts["net_quantity_populated_active"]
+        missing_active = counts["remaining_missing_active"]
+        
+        return {
+            "total_modules": total,
+            "active_modules": active,
+            "discontinued_modules": discontinued,
+            "net_quantity_populated_total": populated_total,
+            "net_quantity_populated_active": populated_active,
+            "coverage_total_pct": round(100 * populated_total / total, 1) if total > 0 else 0,
+            "coverage_active_pct": round(100 * populated_active / active, 1) if active > 0 else 0,
+            "remaining_missing_active": missing_active,
+            "remaining_missing_breakdown": breakdown,
+            "missing_details": missing_details[:50],  # First 50 for review
+            "definition_of_done": {
+                "target": "100% coverage for ACTIVE modules",
+                "achieved": missing_active == 0,
+                "note": "DISCONTINUED modules may have NULL net_quantity (expected behavior)"
+            }
+        }
+        
+    except Exception as e:
+        try:
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Report error: {str(e)}")
