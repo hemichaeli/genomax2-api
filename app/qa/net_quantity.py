@@ -1,5 +1,5 @@
 """
-GenoMAX² QA Net Quantity Module v1.1
+GenoMAX² QA Net Quantity Module v1.2
 Endpoint for identifying modules missing net_quantity field and managing supplier status.
 
 GET /api/v1/qa/net-qty/missing
@@ -13,11 +13,15 @@ POST /api/v1/qa/net-qty/update
 POST /api/v1/qa/net-qty/mark-discontinued
 - Mark modules as DISCONTINUED with 404 status
 
+POST /api/v1/qa/net-qty/reactivate
+- Reactivate modules incorrectly marked as discontinued
+
 GET /api/v1/qa/net-qty/discontinued
 - List all discontinued modules
 
 v1.0 - Initial implementation
 v1.1 - Added supplier status endpoints
+v1.2 - Added reactivate endpoint
 """
 
 import os
@@ -101,6 +105,7 @@ def get_missing_net_quantity() -> Dict[str, Any]:
                 os_environment,
                 product_name,
                 supliful_handle,
+                supplier_status,
                 CASE
                     WHEN supplier_page_url IS NOT NULL AND BTRIM(supplier_page_url) <> '' 
                         THEN supplier_page_url
@@ -139,6 +144,7 @@ def get_missing_net_quantity() -> Dict[str, Any]:
                 "product_name": row["product_name"],
                 "supliful_handle": row.get("supliful_handle"),
                 "supplier_url": row["supplier_url"],
+                "supplier_status": row.get("supplier_status"),
                 "reason": row["reason"]
             }
             modules.append(module)
@@ -280,6 +286,70 @@ def mark_discontinued(
             "details": status_details,
             "updated_modules": updated_modules,
             "not_found": not_found
+        }
+        
+    except Exception as e:
+        try:
+            conn.rollback()
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Update error: {str(e)}")
+
+
+@router.post("/reactivate")
+def reactivate_modules(
+    module_codes: List[str] = Query(..., description="List of module codes to reactivate"),
+    details: Optional[str] = Query(None, description="Optional details/notes")
+) -> Dict[str, Any]:
+    """
+    Reactivate modules that were incorrectly marked as DISCONTINUED.
+    
+    Sets:
+    - supplier_status = 'ACTIVE'
+    - supplier_http_status = 200
+    - supplier_status_details = details
+    - supplier_checked_at = NOW()
+    """
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    if not module_codes:
+        return {"status": "error", "detail": "No module codes provided"}
+    
+    try:
+        cur = conn.cursor()
+        
+        status_details = details or f"Reactivated - verified product exists {datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
+        
+        cur.execute("""
+            UPDATE os_modules_v3_1
+            SET supplier_status = 'ACTIVE',
+                supplier_http_status = 200,
+                supplier_status_details = %s,
+                supplier_checked_at = NOW(),
+                updated_at = NOW()
+            WHERE module_code = ANY(%s)
+        """, (status_details, module_codes))
+        
+        updated = cur.rowcount
+        conn.commit()
+        
+        cur.execute("""
+            SELECT module_code, shopify_handle, supplier_status, supplier_http_status, net_quantity
+            FROM os_modules_v3_1
+            WHERE module_code = ANY(%s)
+        """, (module_codes,))
+        updated_modules = [dict(r) for r in cur.fetchall()]
+        
+        cur.close()
+        conn.close()
+        
+        return {
+            "status": "success",
+            "updated_count": updated,
+            "updated_modules": updated_modules
         }
         
     except Exception as e:
