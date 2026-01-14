@@ -1,6 +1,6 @@
 """
-GenoMAX2 API Server Entry Point v3.22.0
-Adds Supplier Catalog Admin endpoints.
+GenoMAX2 API Server Entry Point v3.23.0
+Adds Allowlist Mapping endpoints for NO_MATCH resolution.
 
 Use this file for Railway deployment:
   uvicorn main:app --host 0.0.0.0 --port $PORT
@@ -36,6 +36,16 @@ try:
     print("✅ Supplier Catalog Admin endpoints registered successfully")
 except Exception as e:
     print(f"❌ ERROR loading Supplier Catalog Admin: {type(e).__name__}: {e}")
+    import traceback
+    traceback.print_exc()
+
+# ===== QA ALLOWLIST MAPPING =====
+try:
+    from app.qa.allowlist import router as allowlist_router
+    app.include_router(allowlist_router)
+    print("✅ QA Allowlist Mapping endpoints registered successfully")
+except Exception as e:
+    print(f"❌ ERROR loading QA Allowlist Mapping: {type(e).__name__}: {e}")
     import traceback
     traceback.print_exc()
 
