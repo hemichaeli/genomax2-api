@@ -1,6 +1,6 @@
 """
-GenoMAX2 API Server Entry Point v3.24.0
-Adds Shopify Integration endpoints for product export.
+GenoMAX2 API Server Entry Point v3.25.0
+Adds Copy Cleanup endpoints for placeholder removal.
 
 Use this file for Railway deployment:
   uvicorn main:app --host 0.0.0.0 --port $PORT
@@ -59,6 +59,16 @@ except Exception as e:
     import traceback
     traceback.print_exc()
 
+# ===== COPY CLEANUP (v3.25.0) =====
+try:
+    from app.copy.router import router as copy_router
+    app.include_router(copy_router)
+    print("✅ Copy Cleanup endpoints registered successfully")
+except Exception as e:
+    print(f"❌ ERROR loading Copy Cleanup: {type(e).__name__}: {e}")
+    import traceback
+    traceback.print_exc()
+
 
 # ===== DEBUG: LIST ALL ROUTES =====
 @app.get("/debug/routes")
@@ -79,10 +89,14 @@ def debug_routes():
     # Filter for shopify routes
     shopify_routes = [r for r in routes if 'shopify' in r['path'].lower()]
     
+    # Filter for copy routes
+    copy_routes = [r for r in routes if 'copy' in r['path'].lower()]
+    
     return {
         "total_routes": len(routes),
         "bloodwork_routes": bloodwork_routes,
         "shopify_routes": shopify_routes,
+        "copy_routes": copy_routes,
         "all_api_routes": [r for r in routes if r['path'].startswith('/api/')]
     }
 
