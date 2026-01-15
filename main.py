@@ -1,6 +1,6 @@
 """
-GenoMAX2 API Server Entry Point v3.23.0
-Adds Allowlist Mapping endpoints for NO_MATCH resolution.
+GenoMAX2 API Server Entry Point v3.24.0
+Adds Shopify Integration endpoints for product export.
 
 Use this file for Railway deployment:
   uvicorn main:app --host 0.0.0.0 --port $PORT
@@ -49,6 +49,16 @@ except Exception as e:
     import traceback
     traceback.print_exc()
 
+# ===== SHOPIFY INTEGRATION (v3.24.0) =====
+try:
+    from app.integrations.shopify_router import router as shopify_router
+    app.include_router(shopify_router)
+    print("✅ Shopify Integration endpoints registered successfully")
+except Exception as e:
+    print(f"❌ ERROR loading Shopify Integration: {type(e).__name__}: {e}")
+    import traceback
+    traceback.print_exc()
+
 
 # ===== DEBUG: LIST ALL ROUTES =====
 @app.get("/debug/routes")
@@ -66,9 +76,13 @@ def debug_routes():
     # Filter for bloodwork routes
     bloodwork_routes = [r for r in routes if 'bloodwork' in r['path'].lower()]
     
+    # Filter for shopify routes
+    shopify_routes = [r for r in routes if 'shopify' in r['path'].lower()]
+    
     return {
         "total_routes": len(routes),
         "bloodwork_routes": bloodwork_routes,
+        "shopify_routes": shopify_routes,
         "all_api_routes": [r for r in routes if r['path'].startswith('/api/')]
     }
 
