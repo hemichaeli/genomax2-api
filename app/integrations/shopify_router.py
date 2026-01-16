@@ -3,11 +3,16 @@ Shopify Integration Router for GenoMAX²
 =======================================
 Provides endpoints for syncing os_modules to Shopify products.
 
+LAUNCH v1 ENFORCEMENT (v3.27.0):
+- ALL export endpoints now filter by is_launch_v1 = TRUE
+- Hard guardrail: supplier_status = 'ACTIVE' AND is_launch_v1 = TRUE
+- No fuzzy matching, no heuristic inclusion
+
 Endpoints:
 - GET  /api/v1/shopify/health - Verify Shopify API connectivity
-- GET  /api/v1/shopify/readiness/summary - Check which modules are ready for export
-- POST /api/v1/shopify/export/dry-run - Preview export without changes
-- POST /api/v1/shopify/export/publish - Execute export to Shopify
+- GET  /api/v1/shopify/readiness/summary - Check which LAUNCH v1 modules are ready
+- POST /api/v1/shopify/export/dry-run - Preview export (Launch v1 only)
+- POST /api/v1/shopify/export/publish - Execute export to Shopify (Launch v1 only)
 
 Environment Variables Required:
 - SHOPIFY_ADMIN_BASE_URL
@@ -44,7 +49,7 @@ DATABASE_URL = os.getenv("DATABASE_URL")
 
 # ===== Constants =====
 
-FIELD_MAP_VERSION = "v1"
+FIELD_MAP_VERSION = "v2"  # Updated for Launch v1 enforcement
 METAFIELD_NAMESPACE = "genomax"
 
 # Placeholder patterns to block
@@ -53,6 +58,13 @@ PLACEHOLDER_PATTERNS = re.compile(
     re.IGNORECASE
 )
 
+# HARD GUARDRAIL: Launch v1 scope filter
+# This filter MUST be applied to ALL external pipelines
+LAUNCH_V1_SCOPE_FILTER = """
+    is_launch_v1 = TRUE 
+    AND supplier_status = 'ACTIVE'
+"""
+
 
 # ===== Models =====
 
@@ -60,10 +72,12 @@ class ExportRequest(BaseModel):
     """Request body for export endpoints."""
     limit: int = Field(default=50, ge=1, le=250, description="Max modules to process")
     only_ready: bool = Field(default=True, description="Only export READY_FOR_SHOPIFY modules")
+    # Note: is_launch_v1 filter is ALWAYS applied, not optional
 
 
 class BlockedReason(str, Enum):
     """Reasons a module might be blocked from export."""
+    NOT_LAUNCH_V1 = "not_in_launch_v1"  # NEW: Launch v1 guardrail
     NOT_ACTIVE = "supplier_status_not_active"
     MISSING_PRODUCT_NAME = "missing_product_name"
     MISSING_HANDLE = "missing_shopify_handle"
@@ -96,6 +110,8 @@ def fetch_modules_for_export(limit: int = 50, only_active: bool = True) -> List[
     """
     Fetch modules from os_modules_v3_1 for export consideration.
     
+    HARD GUARDRAIL: Always filters by is_launch_v1 = TRUE AND supplier_status = 'ACTIVE'
+    
     Returns all required fields for Shopify export.
     """
     conn = get_db()
@@ -105,14 +121,16 @@ def fetch_modules_for_export(limit: int = 50, only_active: bool = True) -> List[
     try:
         cur = conn.cursor()
         
-        # Build query
-        query = """
+        # Build query with LAUNCH v1 HARD GUARDRAIL
+        # Note: is_launch_v1 filter is ALWAYS applied
+        query = f"""
             SELECT 
                 module_code,
                 product_name,
                 shopify_handle,
                 os_environment,
                 os_layer,
+                tier,
                 biological_domain,
                 net_quantity,
                 fda_disclaimer,
@@ -125,14 +143,13 @@ def fetch_modules_for_export(limit: int = 50, only_active: bool = True) -> List[
                 dosing_protocol,
                 supplier_page_url,
                 supliful_handle,
-                supplier_status
+                supplier_status,
+                is_launch_v1
             FROM os_modules_v3_1
+            WHERE {LAUNCH_V1_SCOPE_FILTER}
+            ORDER BY tier, os_environment, os_layer, module_code 
+            LIMIT %s
         """
-        
-        if only_active:
-            query += " WHERE supplier_status = 'ACTIVE'"
-        
-        query += " ORDER BY os_environment, os_layer, module_code LIMIT %s"
         
         cur.execute(query, (limit,))
         rows = cur.fetchall()
@@ -155,10 +172,16 @@ def check_module_readiness(module: Dict[str, Any]) -> Tuple[bool, List[BlockedRe
     """
     Check if a module passes the READY_FOR_SHOPIFY gate.
     
+    LAUNCH v1 ENFORCEMENT: is_launch_v1 = TRUE is a hard requirement.
+    
     Returns:
         Tuple of (is_ready: bool, blocked_reasons: List[BlockedReason])
     """
     reasons = []
+    
+    # NEW: Required: is_launch_v1 = TRUE (HARD GUARDRAIL)
+    if not module.get("is_launch_v1"):
+        reasons.append(BlockedReason.NOT_LAUNCH_V1)
     
     # Required: supplier_status = 'ACTIVE'
     if module.get("supplier_status") != "ACTIVE":
@@ -205,7 +228,7 @@ def build_shopify_product_payload(module: Dict[str, Any]) -> Dict[str, Any]:
     - handle: shopify_handle
     - body_html: shopify_body (fallback: back_label_text)
     - status: active
-    - tags: os_environment, os_layer, biological_domain
+    - tags: os_environment, os_layer, biological_domain, tier
     """
     # Build body HTML
     body_html = module.get("shopify_body")
@@ -214,7 +237,7 @@ def build_shopify_product_payload(module: Dict[str, Any]) -> Dict[str, Any]:
         back_text = module["back_label_text"]
         body_html = f"<p>{back_text.replace(chr(10), '</p><p>')}</p>"
     
-    # Build tags
+    # Build tags (now includes tier)
     tags = []
     if module.get("os_environment"):
         tags.append(module["os_environment"])
@@ -222,6 +245,8 @@ def build_shopify_product_payload(module: Dict[str, Any]) -> Dict[str, Any]:
         tags.append(module["os_layer"])
     if module.get("biological_domain"):
         tags.append(module["biological_domain"])
+    if module.get("tier"):
+        tags.append(module["tier"])
     
     return {
         "title": module.get("product_name"),
@@ -245,6 +270,7 @@ def build_metafields_payload(module: Dict[str, Any]) -> List[Dict[str, Any]]:
     field_map = {
         "os_environment": "os_environment",
         "os_layer": "os_layer",
+        "tier": "tier",  # NEW: Include tier
         "biological_domain": "biological_domain",
         "net_quantity": "net_quantity",
         "fda_disclaimer": "fda_disclaimer_block",
@@ -375,9 +401,11 @@ def shopify_health():
 @router.get("/readiness/summary")
 def readiness_summary():
     """
-    Check which modules are ready for Shopify export.
+    Check which LAUNCH v1 modules are ready for Shopify export.
     
-    Returns summary of active modules, ready modules, blocked modules,
+    LAUNCH v1 ENFORCEMENT: Only checks modules where is_launch_v1 = TRUE
+    
+    Returns summary of Launch v1 modules, ready modules, blocked modules,
     and breakdown of blocking reasons.
     """
     conn = get_db()
@@ -387,8 +415,9 @@ def readiness_summary():
     try:
         cur = conn.cursor()
         
-        # Get all ACTIVE modules with relevant fields
-        cur.execute("""
+        # Get all LAUNCH v1 ACTIVE modules with relevant fields
+        # HARD GUARDRAIL: is_launch_v1 = TRUE filter applied
+        cur.execute(f"""
             SELECT 
                 module_code,
                 product_name,
@@ -398,20 +427,32 @@ def readiness_summary():
                 shopify_body,
                 front_label_text,
                 back_label_text,
-                supplier_status
+                supplier_status,
+                is_launch_v1,
+                tier
             FROM os_modules_v3_1
-            WHERE supplier_status = 'ACTIVE'
-            ORDER BY module_code
+            WHERE {LAUNCH_V1_SCOPE_FILTER}
+            ORDER BY tier, module_code
         """)
         
-        active_modules = [dict(row) for row in cur.fetchall()]
+        launch_v1_modules = [dict(row) for row in cur.fetchall()]
         
-        # Count total active
-        cur.execute("""
+        # Count total Launch v1
+        cur.execute(f"""
             SELECT COUNT(*) as total FROM os_modules_v3_1 
-            WHERE supplier_status = 'ACTIVE'
+            WHERE {LAUNCH_V1_SCOPE_FILTER}
         """)
-        active_count = cur.fetchone()["total"]
+        launch_v1_count = cur.fetchone()["total"]
+        
+        # Count by tier
+        cur.execute(f"""
+            SELECT tier, COUNT(*) as count 
+            FROM os_modules_v3_1 
+            WHERE {LAUNCH_V1_SCOPE_FILTER}
+            GROUP BY tier
+            ORDER BY tier
+        """)
+        tier_distribution = {row["tier"]: row["count"] for row in cur.fetchall()}
         
         cur.close()
         conn.close()
@@ -421,7 +462,7 @@ def readiness_summary():
         blocked_modules = []
         blocked_breakdown = {}
         
-        for module in active_modules:
+        for module in launch_v1_modules:
             is_ready, reasons = check_module_readiness(module)
             
             if is_ready:
@@ -429,6 +470,7 @@ def readiness_summary():
             else:
                 blocked_modules.append({
                     "module_code": module["module_code"],
+                    "tier": module.get("tier"),
                     "reasons": [r.value for r in reasons]
                 })
                 
@@ -440,7 +482,12 @@ def readiness_summary():
         top_blocked = blocked_modules[:10]
         
         return {
-            "active_modules": active_count,
+            "scope": {
+                "is_launch_v1": True,
+                "supplier_status": "ACTIVE",
+            },
+            "launch_v1_modules": launch_v1_count,
+            "tier_distribution": tier_distribution,
             "ready_for_shopify": len(ready_modules),
             "blocked": len(blocked_modules),
             "blocked_breakdown": blocked_breakdown,
@@ -461,10 +508,12 @@ def export_dry_run(request: ExportRequest):
     """
     Preview Shopify export without making changes.
     
+    LAUNCH v1 ENFORCEMENT: Only exports modules where is_launch_v1 = TRUE
+    
     Builds payloads for candidate modules and returns summary
     without actually calling Shopify API.
     """
-    # Fetch modules
+    # Fetch modules (LAUNCH v1 filter always applied)
     modules = fetch_modules_for_export(
         limit=request.limit,
         only_active=request.only_ready
@@ -488,12 +537,14 @@ def export_dry_run(request: ExportRequest):
                 metafields = build_metafields_payload(module)
                 sample_payloads.append({
                     "module_code": module["module_code"],
+                    "tier": module.get("tier"),
                     "product": payload,
                     "metafields_count": len(metafields),
                 })
         else:
             blocked_modules.append({
                 "module_code": module["module_code"],
+                "tier": module.get("tier"),
                 "reasons": [r.value for r in reasons]
             })
             
@@ -501,6 +552,10 @@ def export_dry_run(request: ExportRequest):
                 blocked_reasons[reason.value] = blocked_reasons.get(reason.value, 0) + 1
     
     return {
+        "scope": {
+            "is_launch_v1": True,
+            "supplier_status": "ACTIVE",
+        },
         "candidate_count": len(modules),
         "ready_count": len(ready_modules),
         "blocked_count": len(blocked_modules),
@@ -517,6 +572,8 @@ def export_publish(
 ):
     """
     Execute Shopify product export.
+    
+    LAUNCH v1 ENFORCEMENT: Only exports modules where is_launch_v1 = TRUE
     
     If confirm=false, behaves like dry-run.
     If confirm=true, creates/updates products in Shopify.
@@ -547,7 +604,7 @@ def export_publish(
             }
         )
     
-    # Fetch modules
+    # Fetch modules (LAUNCH v1 filter always applied)
     modules = fetch_modules_for_export(
         limit=request.limit,
         only_active=request.only_ready
@@ -572,6 +629,7 @@ def export_publish(
         if not is_ready:
             results["skipped"].append({
                 "module_code": module_code,
+                "tier": module.get("tier"),
                 "reasons": [r.value for r in reasons]
             })
             log_publish_audit(
@@ -605,6 +663,7 @@ def export_publish(
             # Record result
             result_entry = {
                 "module_code": module_code,
+                "tier": module.get("tier"),
                 "shopify_product_id": product_id,
                 "shopify_handle": shopify_handle,
             }
@@ -680,6 +739,10 @@ def export_publish(
     # Build summary
     return {
         "batch_id": batch_id,
+        "scope": {
+            "is_launch_v1": True,
+            "supplier_status": "ACTIVE",
+        },
         "summary": {
             "created": len(results["created"]),
             "updated": len(results["updated"]),
