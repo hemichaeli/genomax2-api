@@ -1,6 +1,14 @@
 """
-GenoMAX2 API Server Entry Point v3.26.0
-Adds Launch v1 lock migration and QA endpoints.
+GenoMAX2 API Server Entry Point v3.27.0
+Launch v1 Enforcement with Pairing QA and Design Export
+
+v3.27.0:
+- Add Launch v1 enforcement router
+- GET /api/v1/qa/launch-v1/pairing - Environment pairing validation
+- GET /api/v1/launch-v1/export/design - Excel export with LAUNCH_V1_SUMMARY
+- GET /api/v1/launch-v1/products - List Launch v1 products
+- Shopify endpoints now enforce is_launch_v1 = TRUE
+- All external pipelines use HARD GUARDRAIL filter
 
 Use this file for Railway deployment:
   uvicorn main:app --host 0.0.0.0 --port $PORT
@@ -50,11 +58,11 @@ except Exception as e:
     import traceback
     traceback.print_exc()
 
-# ===== SHOPIFY INTEGRATION (v3.24.0) =====
+# ===== SHOPIFY INTEGRATION (v3.24.0, updated v3.27.0 with Launch v1 enforcement) =====
 try:
     from app.integrations.shopify_router import router as shopify_router
     app.include_router(shopify_router)
-    print("✅ Shopify Integration endpoints registered successfully")
+    print("✅ Shopify Integration endpoints registered successfully (Launch v1 enforced)")
 except Exception as e:
     print(f"❌ ERROR loading Shopify Integration: {type(e).__name__}: {e}")
     import traceback
@@ -67,6 +75,16 @@ try:
     print("✅ Copy Cleanup endpoints registered successfully")
 except Exception as e:
     print(f"❌ ERROR loading Copy Cleanup: {type(e).__name__}: {e}")
+    import traceback
+    traceback.print_exc()
+
+# ===== LAUNCH V1 ENFORCEMENT (v3.27.0) =====
+try:
+    from app.launch.enforcement import router as launch_enforcement_router
+    app.include_router(launch_enforcement_router)
+    print("✅ Launch v1 Enforcement endpoints registered successfully")
+except Exception as e:
+    print(f"❌ ERROR loading Launch v1 Enforcement: {type(e).__name__}: {e}")
     import traceback
     traceback.print_exc()
 
