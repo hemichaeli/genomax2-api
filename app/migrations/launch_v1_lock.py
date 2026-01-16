@@ -1,133 +1,146 @@
 """
-Migration: Lock Launch v1 in Database
+Migration: Add is_launch_v1 flag to os_modules_v3_1
 Version: 3.26.0
 Date: 2025-01-15
 
-Adds is_launch_v1 boolean flag to os_modules_v3_1.
-Launch v1 includes: TIER 1 + TIER 2
-Launch v1 excludes: TIER 3
+Locks Launch v1 scope in database:
+- TIER 1 + TIER 2 = included (is_launch_v1 = TRUE)
+- TIER 3 = excluded (is_launch_v1 = FALSE)
 
-This is a state-alignment task - products remain untouched otherwise.
+This is a state-alignment task, not a refactor.
+Products are NOT deleted or modified - only flagged.
 """
 
-# Migration SQL with explicit steps
 MIGRATION_SQL = """
 -- =====================================================
--- LAUNCH V1 LOCK MIGRATION
--- =====================================================
--- Purpose: Formally lock Launch v1 scope in database
--- Scope: TIER 1 + TIER 2 = Launch v1
---        TIER 3 = Excluded from launch pipelines
+-- GenoMAX² Launch v1 Lock Migration
+-- Version: 3.26.0
 -- =====================================================
 
--- Step 1: Add is_launch_v1 column if not exists
+-- Step 1: Add launch flag column (idempotent)
 ALTER TABLE os_modules_v3_1
 ADD COLUMN IF NOT EXISTS is_launch_v1 BOOLEAN DEFAULT FALSE;
 
--- Step 2: Create index for launch filtering
+-- Step 2: Create index for launch filtering (idempotent)
 CREATE INDEX IF NOT EXISTS idx_os_modules_is_launch_v1 
     ON os_modules_v3_1(is_launch_v1) 
     WHERE is_launch_v1 = TRUE;
 
--- Step 3: Comment on column for documentation
-COMMENT ON COLUMN os_modules_v3_1.is_launch_v1 IS 
-    'Launch v1 flag: TRUE for TIER 1 + TIER 2, FALSE for TIER 3. Used to filter launch pipelines.';
-"""
-
-# Populate SQL - run separately after column exists
-POPULATE_SQL = """
--- =====================================================
--- POPULATE LAUNCH V1 FLAGS
--- =====================================================
-
--- Include Tier 1 + Tier 2 in Launch v1
+-- Step 3: Include Tier 1 + Tier 2 in Launch v1
 UPDATE os_modules_v3_1
 SET is_launch_v1 = TRUE
-WHERE tier IN ('TIER 1', 'TIER 2', 'Tier 1', 'Tier 2', 'T1', 'T2', '1', '2');
+WHERE tier IN ('TIER 1', 'TIER 2', 'Tier 1', 'Tier 2', 'tier 1', 'tier 2', '1', '2')
+  AND supplier_status = 'ACTIVE';
 
--- Explicitly exclude Tier 3 (and anything else)
+-- Step 4: Explicitly exclude Tier 3 (defensive)
 UPDATE os_modules_v3_1
 SET is_launch_v1 = FALSE
-WHERE tier IN ('TIER 3', 'Tier 3', 'T3', '3')
+WHERE tier IN ('TIER 3', 'Tier 3', 'tier 3', '3')
    OR tier IS NULL
-   OR is_launch_v1 IS NULL;
+   OR supplier_status != 'ACTIVE';
+
+-- Step 5: Add comment for documentation
+COMMENT ON COLUMN os_modules_v3_1.is_launch_v1 IS 
+    'Launch v1 inclusion flag. TRUE = Tier 1/2 ACTIVE products included in launch pipelines. FALSE = excluded from Shopify/Design/QA launch flows.';
 """
 
-# Validation queries
-VALIDATION_QUERIES = {
-    "launch_tier_counts": """
-        SELECT tier, COUNT(*) as count
-        FROM os_modules_v3_1
-        WHERE is_launch_v1 = TRUE
-        GROUP BY tier
-        ORDER BY tier;
-    """,
-    "excluded_tier_counts": """
-        SELECT tier, COUNT(*) as count
-        FROM os_modules_v3_1
-        WHERE is_launch_v1 = FALSE
-        GROUP BY tier
-        ORDER BY tier;
-    """,
-    "tier3_preserved": """
-        SELECT COUNT(*) as tier3_total
-        FROM os_modules_v3_1
-        WHERE tier IN ('TIER 3', 'Tier 3', 'T3', '3');
-    """,
-    "launch_summary": """
-        SELECT 
-            COUNT(*) FILTER (WHERE is_launch_v1 = TRUE) as launch_v1_count,
-            COUNT(*) FILTER (WHERE is_launch_v1 = FALSE) as excluded_count,
-            COUNT(*) FILTER (WHERE is_launch_v1 IS NULL) as null_count,
-            COUNT(*) as total
-        FROM os_modules_v3_1;
-    """
-}
-
-# Rollback SQL
 ROLLBACK_SQL = """
--- =====================================================
--- ROLLBACK: Remove is_launch_v1 column
--- =====================================================
--- WARNING: This removes the launch lock entirely
+-- Rollback: Remove is_launch_v1 column
+-- WARNING: This will lose launch lock state
+
+ALTER TABLE os_modules_v3_1 
+DROP COLUMN IF EXISTS is_launch_v1;
 
 DROP INDEX IF EXISTS idx_os_modules_is_launch_v1;
-ALTER TABLE os_modules_v3_1 DROP COLUMN IF EXISTS is_launch_v1;
+"""
+
+VALIDATION_SQL = """
+-- Validation Query 1: Tier distribution in Launch v1
+SELECT 
+    tier,
+    COUNT(*) as count,
+    SUM(CASE WHEN is_launch_v1 = TRUE THEN 1 ELSE 0 END) as in_launch_v1,
+    SUM(CASE WHEN is_launch_v1 = FALSE THEN 1 ELSE 0 END) as excluded
+FROM os_modules_v3_1
+GROUP BY tier
+ORDER BY tier;
+
+-- Validation Query 2: Launch v1 summary
+SELECT 
+    is_launch_v1,
+    supplier_status,
+    COUNT(*) as count
+FROM os_modules_v3_1
+GROUP BY is_launch_v1, supplier_status
+ORDER BY is_launch_v1 DESC, supplier_status;
+
+-- Validation Query 3: Confirm no Tier 3 in launch
+SELECT COUNT(*) as tier3_in_launch
+FROM os_modules_v3_1
+WHERE tier IN ('TIER 3', 'Tier 3', 'tier 3', '3')
+  AND is_launch_v1 = TRUE;
+-- Expected: 0
 """
 
 
 def run_migration(cursor):
     """Execute the migration."""
     cursor.execute(MIGRATION_SQL)
-    return {"status": "success", "step": "schema_added"}
+    return {"status": "success", "migration": "launch_v1_lock"}
 
 
-def populate_flags(cursor):
-    """Populate the launch flags based on tier."""
-    cursor.execute(POPULATE_SQL)
-    return {"status": "success", "step": "flags_populated"}
-
-
-def validate(cursor):
-    """Run validation queries."""
-    results = {}
-    for name, query in VALIDATION_QUERIES.items():
-        cursor.execute(query)
-        results[name] = cursor.fetchall()
-    return results
-
-
-def rollback(cursor):
-    """Rollback the migration."""
+def run_rollback(cursor):
+    """Execute rollback (use with caution)."""
     cursor.execute(ROLLBACK_SQL)
-    return {"status": "rolled_back"}
+    return {"status": "rolled_back", "migration": "launch_v1_lock"}
+
+
+def run_validation(cursor):
+    """Run validation queries and return results."""
+    results = {}
+    
+    # Tier distribution
+    cursor.execute("""
+        SELECT 
+            tier,
+            COUNT(*) as count,
+            SUM(CASE WHEN is_launch_v1 = TRUE THEN 1 ELSE 0 END) as in_launch_v1,
+            SUM(CASE WHEN is_launch_v1 = FALSE THEN 1 ELSE 0 END) as excluded
+        FROM os_modules_v3_1
+        GROUP BY tier
+        ORDER BY tier
+    """)
+    results["tier_distribution"] = [dict(row) for row in cursor.fetchall()]
+    
+    # Launch summary
+    cursor.execute("""
+        SELECT 
+            is_launch_v1,
+            supplier_status,
+            COUNT(*) as count
+        FROM os_modules_v3_1
+        GROUP BY is_launch_v1, supplier_status
+        ORDER BY is_launch_v1 DESC, supplier_status
+    """)
+    results["launch_summary"] = [dict(row) for row in cursor.fetchall()]
+    
+    # Tier 3 leak check
+    cursor.execute("""
+        SELECT COUNT(*) as tier3_in_launch
+        FROM os_modules_v3_1
+        WHERE tier IN ('TIER 3', 'Tier 3', 'tier 3', '3')
+          AND is_launch_v1 = TRUE
+    """)
+    results["tier3_leak_check"] = cursor.fetchone()["tier3_in_launch"]
+    
+    return results
 
 
 if __name__ == "__main__":
     print("=== Launch v1 Lock Migration ===")
-    print("\nSchema Migration:")
+    print("\nMigration SQL:")
     print(MIGRATION_SQL)
-    print("\nPopulate Flags:")
-    print(POPULATE_SQL)
-    print("\nRollback:")
+    print("\nRollback SQL:")
     print(ROLLBACK_SQL)
+    print("\nValidation SQL:")
+    print(VALIDATION_SQL)
