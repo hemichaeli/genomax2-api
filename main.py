@@ -73,18 +73,17 @@ except Exception as e:
 
 # ===== LAUNCH V1 LOCK MIGRATION (v3.26.0) =====
 
-@app.get("/migrate-lock-launch-v1")
-def migrate_lock_launch_v1():
+@app.get("/migrate-add-tier-column")
+def migrate_add_tier_column():
     """
-    Migration 009: Lock Launch v1 scope to TIER 1 + TIER 2 only.
+    Migration 009a: Add tier column to os_modules_v3_1.
     
-    - Adds is_launch_v1 BOOLEAN column
-    - Sets TRUE for TIER 1 and TIER 2 products
-    - Sets FALSE for TIER 3 (preserved but excluded from launch)
-    - Creates partial index for launch queries
+    Default tiering based on os_layer:
+    - Core = TIER 1
+    - Adaptive = TIER 2
+    - All others = TIER 3
     
-    TIER 3 products remain in DB but are excluded from all launch pipelines.
-    This is a state-alignment task, not a refactor.
+    Run this BEFORE /migrate-lock-launch-v1
     """
     conn = get_db()
     if not conn:
@@ -93,7 +92,123 @@ def migrate_lock_launch_v1():
     try:
         cur = conn.cursor()
         
-        # Step 1: Add column if not exists
+        # Step 1: Add tier column if not exists
+        cur.execute("""
+            ALTER TABLE os_modules_v3_1
+            ADD COLUMN IF NOT EXISTS tier VARCHAR(20) DEFAULT 'TIER 3'
+        """)
+        
+        # Step 2: Populate based on os_layer
+        # Core = TIER 1
+        cur.execute("""
+            UPDATE os_modules_v3_1
+            SET tier = 'TIER 1'
+            WHERE os_layer = 'Core'
+        """)
+        tier_1_count = cur.rowcount
+        
+        # Adaptive = TIER 2
+        cur.execute("""
+            UPDATE os_modules_v3_1
+            SET tier = 'TIER 2'
+            WHERE os_layer = 'Adaptive'
+        """)
+        tier_2_count = cur.rowcount
+        
+        # Everything else = TIER 3
+        cur.execute("""
+            UPDATE os_modules_v3_1
+            SET tier = 'TIER 3'
+            WHERE os_layer NOT IN ('Core', 'Adaptive') OR os_layer IS NULL
+        """)
+        tier_3_count = cur.rowcount
+        
+        # Create index
+        cur.execute("""
+            CREATE INDEX IF NOT EXISTS idx_os_modules_tier 
+            ON os_modules_v3_1 (tier)
+        """)
+        
+        # Get distribution
+        cur.execute("""
+            SELECT tier, COUNT(*) as count
+            FROM os_modules_v3_1
+            GROUP BY tier
+            ORDER BY tier
+        """)
+        distribution = {row["tier"]: row["count"] for row in cur.fetchall()}
+        
+        # Audit log
+        cur.execute("""
+            INSERT INTO audit_log (entity_type, entity_id, action, metadata, created_at)
+            VALUES ('migration', NULL, 'add_tier_column', %s, NOW())
+        """, (json.dumps({
+            "migration": "009a_add_tier_column",
+            "tier_1_updated": tier_1_count,
+            "tier_2_updated": tier_2_count,
+            "tier_3_updated": tier_3_count,
+            "distribution": distribution
+        }),))
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        return {
+            "status": "success",
+            "migration": "009a_add_tier_column",
+            "timestamp": now_iso(),
+            "tier_distribution": distribution,
+            "mapping_used": {
+                "TIER 1": "os_layer = 'Core'",
+                "TIER 2": "os_layer = 'Adaptive'",
+                "TIER 3": "all others"
+            },
+            "next_step": "Run /migrate-lock-launch-v1 to lock Launch v1 scope"
+        }
+        
+    except Exception as e:
+        try: conn.close()
+        except: pass
+        return {"error": str(e)}
+
+
+@app.get("/migrate-lock-launch-v1")
+def migrate_lock_launch_v1():
+    """
+    Migration 009b: Lock Launch v1 scope to TIER 1 + TIER 2 only.
+    
+    Prerequisites: Run /migrate-add-tier-column first if tier column doesn't exist.
+    
+    - Adds is_launch_v1 BOOLEAN column
+    - Sets TRUE for TIER 1 and TIER 2 products
+    - Sets FALSE for TIER 3 (preserved but excluded from launch)
+    - Creates partial index for launch queries
+    
+    TIER 3 products remain in DB but are excluded from all launch pipelines.
+    """
+    conn = get_db()
+    if not conn:
+        return {"error": "Database connection failed"}
+    
+    try:
+        cur = conn.cursor()
+        
+        # Check if tier column exists
+        cur.execute("""
+            SELECT column_name FROM information_schema.columns 
+            WHERE table_name = 'os_modules_v3_1' AND column_name = 'tier'
+        """)
+        if not cur.fetchone():
+            cur.close()
+            conn.close()
+            return {
+                "error": "tier column not found",
+                "fix": "Run /migrate-add-tier-column first",
+                "status": "BLOCKED"
+            }
+        
+        # Step 1: Add is_launch_v1 column if not exists
         cur.execute("""
             ALTER TABLE os_modules_v3_1
             ADD COLUMN IF NOT EXISTS is_launch_v1 BOOLEAN DEFAULT FALSE
@@ -168,7 +283,7 @@ def migrate_lock_launch_v1():
             INSERT INTO audit_log (entity_type, entity_id, action, metadata, created_at)
             VALUES ('migration', NULL, 'lock_launch_v1', %s, NOW())
         """, (json.dumps({
-            "migration": "009_lock_launch_v1",
+            "migration": "009b_lock_launch_v1",
             "launch_distribution": launch_distribution,
             "tier_3_preserved": tier_3_validation[0],
             "tier_3_excluded": tier_3_validation[1],
@@ -195,16 +310,14 @@ def migrate_lock_launch_v1():
             errors.append(f"CRITICAL: {tier_3_validation[2]} TIER 3 products incorrectly included")
         
         if launch_distribution.get('TIER 1', 0) == 0:
-            passed = False
             errors.append("WARNING: No TIER 1 products in Launch v1")
         
         if launch_distribution.get('TIER 2', 0) == 0:
-            passed = False
             errors.append("WARNING: No TIER 2 products in Launch v1")
         
         return {
             "status": "success" if passed else "failed",
-            "migration": "009_lock_launch_v1",
+            "migration": "009b_lock_launch_v1",
             "timestamp": now_iso(),
             "passed": passed,
             "errors": errors,
@@ -252,7 +365,7 @@ def qa_launch_v1_scope():
     try:
         cur = conn.cursor()
         
-        # Check if column exists
+        # Check if is_launch_v1 column exists
         cur.execute("""
             SELECT column_name FROM information_schema.columns 
             WHERE table_name = 'os_modules_v3_1' AND column_name = 'is_launch_v1'
@@ -345,10 +458,10 @@ def list_launch_v1_products():
         
         cur.execute("""
             SELECT 
-                id,
                 module_code,
                 product_name,
                 os_environment,
+                os_layer,
                 tier,
                 is_launch_v1,
                 created_at
@@ -366,6 +479,66 @@ def list_launch_v1_products():
             "count": len(products),
             "timestamp": now_iso(),
             "products": products
+        }
+        
+    except Exception as e:
+        try: conn.close()
+        except: pass
+        return {"error": str(e)}
+
+
+@app.get("/api/v1/catalog/tier-distribution")
+def get_tier_distribution():
+    """
+    Get current tier distribution in os_modules_v3_1.
+    """
+    conn = get_db()
+    if not conn:
+        return {"error": "Database connection failed"}
+    
+    try:
+        cur = conn.cursor()
+        
+        # Check if tier column exists
+        cur.execute("""
+            SELECT column_name FROM information_schema.columns 
+            WHERE table_name = 'os_modules_v3_1' AND column_name = 'tier'
+        """)
+        if not cur.fetchone():
+            cur.close()
+            conn.close()
+            return {
+                "error": "tier column not found",
+                "fix": "Run /migrate-add-tier-column first"
+            }
+        
+        cur.execute("""
+            SELECT 
+                tier, 
+                os_layer,
+                COUNT(*) as count
+            FROM os_modules_v3_1
+            GROUP BY tier, os_layer
+            ORDER BY tier, os_layer
+        """)
+        
+        distribution = [dict(row) for row in cur.fetchall()]
+        
+        cur.execute("""
+            SELECT tier, COUNT(*) as count
+            FROM os_modules_v3_1
+            GROUP BY tier
+            ORDER BY tier
+        """)
+        tier_totals = {row["tier"]: row["count"] for row in cur.fetchall()}
+        
+        cur.close()
+        conn.close()
+        
+        return {
+            "tier_totals": tier_totals,
+            "detailed_distribution": distribution,
+            "timestamp": now_iso()
         }
         
     except Exception as e:
@@ -396,8 +569,8 @@ def debug_routes():
     # Filter for copy routes
     copy_routes = [r for r in routes if 'copy' in r['path'].lower()]
     
-    # Filter for launch routes
-    launch_routes = [r for r in routes if 'launch' in r['path'].lower()]
+    # Filter for launch/tier routes
+    launch_routes = [r for r in routes if 'launch' in r['path'].lower() or 'tier' in r['path'].lower()]
     
     return {
         "total_routes": len(routes),
