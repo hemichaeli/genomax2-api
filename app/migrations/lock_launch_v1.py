@@ -1,134 +1,108 @@
 """
-Migration: Lock Launch v1 in Database
+Migration: Lock Launch v1 in DB
 Version: 3.26.0
 Date: 2025-01-15
 
 Adds is_launch_v1 boolean flag to os_modules_v3_1 table.
-Launch v1 = TIER 1 + TIER 2 only.
-TIER 3 products remain in DB but excluded from launch pipelines.
+Launch v1 includes: TIER 1 + TIER 2
+Launch v1 excludes: TIER 3
 
-This is a state-alignment task, not a refactor.
+This is a state-alignment task - products remain untouched otherwise.
 """
 
-MIGRATION_SQL = """
--- ============================================
--- LAUNCH V1 LOCK MIGRATION
--- Version: 3.26.0
--- Date: 2025-01-15
--- ============================================
+MIGRATION_NAME = "lock_launch_v1"
+MIGRATION_VERSION = "3.26.0"
 
--- Step 1: Add explicit launch flag
+# Step 1: Add column
+ADD_COLUMN_SQL = """
 ALTER TABLE os_modules_v3_1
 ADD COLUMN IF NOT EXISTS is_launch_v1 BOOLEAN DEFAULT FALSE;
+"""
 
--- Step 2: Create index for efficient filtering
+# Step 2: Create index for query performance
+ADD_INDEX_SQL = """
 CREATE INDEX IF NOT EXISTS idx_os_modules_is_launch_v1 
-    ON os_modules_v3_1(is_launch_v1) 
-    WHERE is_launch_v1 = TRUE;
+ON os_modules_v3_1(is_launch_v1) 
+WHERE is_launch_v1 = TRUE;
+"""
 
--- Step 3: Include Tier 1 + Tier 2 in Launch v1
+# Step 3: Populate launch flag - Include Tier 1 + Tier 2
+SET_TIER_1_2_SQL = """
 UPDATE os_modules_v3_1
 SET is_launch_v1 = TRUE
 WHERE tier IN ('TIER 1', 'TIER 2', 'Tier 1', 'Tier 2', 'tier 1', 'tier 2', '1', '2');
+"""
 
--- Step 4: Explicitly exclude Tier 3 (defensive)
+# Step 4: Explicitly exclude Tier 3 (defensive)
+SET_TIER_3_SQL = """
 UPDATE os_modules_v3_1
 SET is_launch_v1 = FALSE
 WHERE tier IN ('TIER 3', 'Tier 3', 'tier 3', '3')
-   OR tier IS NULL;
-
--- Step 5: Add comment for documentation
-COMMENT ON COLUMN os_modules_v3_1.is_launch_v1 IS 
-    'Launch v1 flag: TRUE = included in launch (Tier 1 + Tier 2), FALSE = excluded (Tier 3)';
+   OR tier IS NULL
+   OR tier = '';
 """
 
-ROLLBACK_SQL = """
--- Rollback: Remove is_launch_v1 column
-ALTER TABLE os_modules_v3_1
-DROP COLUMN IF EXISTS is_launch_v1;
-
-DROP INDEX IF EXISTS idx_os_modules_is_launch_v1;
-"""
-
-VALIDATION_SQL = """
--- Validation Query 1: Tier counts in Launch v1
-SELECT tier, COUNT(*) as count
+# Validation queries
+VALIDATION_LAUNCH_COUNTS = """
+SELECT 
+    tier,
+    COUNT(*) as total,
+    SUM(CASE WHEN is_launch_v1 = TRUE THEN 1 ELSE 0 END) as in_launch,
+    SUM(CASE WHEN is_launch_v1 = FALSE THEN 1 ELSE 0 END) as excluded
 FROM os_modules_v3_1
-WHERE is_launch_v1 = TRUE
 GROUP BY tier
 ORDER BY tier;
+"""
 
--- Validation Query 2: Tier 3 preserved but excluded
-SELECT COUNT(*) as tier_3_total
+VALIDATION_TIER_3_EXISTS = """
+SELECT COUNT(*) as tier_3_count
 FROM os_modules_v3_1
 WHERE tier IN ('TIER 3', 'Tier 3', 'tier 3', '3');
+"""
 
--- Validation Query 3: Launch v1 summary
+VALIDATION_LAUNCH_SUMMARY = """
 SELECT 
-    COUNT(*) FILTER (WHERE is_launch_v1 = TRUE) as launch_v1_count,
-    COUNT(*) FILTER (WHERE is_launch_v1 = FALSE) as excluded_count,
-    COUNT(*) as total
+    COUNT(*) as total_modules,
+    SUM(CASE WHEN is_launch_v1 = TRUE THEN 1 ELSE 0 END) as launch_v1_count,
+    SUM(CASE WHEN is_launch_v1 = FALSE THEN 1 ELSE 0 END) as excluded_count,
+    SUM(CASE WHEN is_launch_v1 = TRUE AND supplier_status = 'ACTIVE' THEN 1 ELSE 0 END) as launch_v1_active
 FROM os_modules_v3_1;
 """
 
+# Rollback (if needed)
+ROLLBACK_SQL = """
+-- Rollback: Remove is_launch_v1 column
+-- ALTER TABLE os_modules_v3_1 DROP COLUMN IF EXISTS is_launch_v1;
+-- DROP INDEX IF EXISTS idx_os_modules_is_launch_v1;
+"""
 
-def run_migration(cursor):
-    """Execute the migration."""
-    cursor.execute(MIGRATION_SQL)
-    return {"status": "success", "column": "is_launch_v1", "version": "3.26.0"}
+def get_migration_steps():
+    """Return ordered list of migration steps."""
+    return [
+        ("add_column", ADD_COLUMN_SQL),
+        ("add_index", ADD_INDEX_SQL),
+        ("set_tier_1_2", SET_TIER_1_2_SQL),
+        ("set_tier_3", SET_TIER_3_SQL),
+    ]
 
 
-def run_rollback(cursor):
-    """Rollback the migration."""
-    cursor.execute(ROLLBACK_SQL)
-    return {"status": "rolled_back", "column": "is_launch_v1"}
-
-
-def run_validation(cursor):
-    """Run validation queries."""
-    results = {}
-    
-    # Query 1: Tier counts in launch
-    cursor.execute("""
-        SELECT tier, COUNT(*) as count
-        FROM os_modules_v3_1
-        WHERE is_launch_v1 = TRUE
-        GROUP BY tier
-        ORDER BY tier
-    """)
-    results["launch_v1_by_tier"] = {row[0]: row[1] for row in cursor.fetchall()}
-    
-    # Query 2: Tier 3 preserved
-    cursor.execute("""
-        SELECT COUNT(*) as count
-        FROM os_modules_v3_1
-        WHERE tier IN ('TIER 3', 'Tier 3', 'tier 3', '3')
-    """)
-    results["tier_3_total"] = cursor.fetchone()[0]
-    
-    # Query 3: Summary
-    cursor.execute("""
-        SELECT 
-            COUNT(*) FILTER (WHERE is_launch_v1 = TRUE) as launch_v1_count,
-            COUNT(*) FILTER (WHERE is_launch_v1 = FALSE) as excluded_count,
-            COUNT(*) as total
-        FROM os_modules_v3_1
-    """)
-    row = cursor.fetchone()
-    results["summary"] = {
-        "launch_v1_count": row[0],
-        "excluded_count": row[1],
-        "total": row[2]
+def get_validation_queries():
+    """Return validation queries."""
+    return {
+        "launch_counts": VALIDATION_LAUNCH_COUNTS,
+        "tier_3_exists": VALIDATION_TIER_3_EXISTS,
+        "launch_summary": VALIDATION_LAUNCH_SUMMARY,
     }
-    
-    return results
 
 
 if __name__ == "__main__":
-    print("Migration: Lock Launch v1")
-    print("=" * 50)
-    print(MIGRATION_SQL)
-    print("\nRollback:")
-    print(ROLLBACK_SQL)
-    print("\nValidation:")
-    print(VALIDATION_SQL)
+    print(f"Migration: {MIGRATION_NAME}")
+    print(f"Version: {MIGRATION_VERSION}")
+    print("\n=== Migration Steps ===")
+    for name, sql in get_migration_steps():
+        print(f"\n-- Step: {name}")
+        print(sql)
+    print("\n=== Validation Queries ===")
+    for name, sql in get_validation_queries().items():
+        print(f"\n-- {name}")
+        print(sql)
