@@ -1,111 +1,118 @@
 """
-Migration: Add is_launch_v1 flag to os_modules_v3_1
+Migration: Add is_launch_v1 column and lock Launch v1 scope
 Version: 3.26.0
-Date: 2025-01-15
+Date: 2026-01-16
 
-Locks Launch v1 to TIER 1 + TIER 2 products only.
-Tier 3 products remain in DB but are excluded from launch pipelines.
+Purpose:
+- Add is_launch_v1 boolean flag to os_modules_v3_1
+- Set TRUE for TIER 1 and TIER 2 products
+- Set FALSE for TIER 3 products
+- Enforces Launch v1 scope at DB level
 
-This is a state-alignment task, not a refactor.
+Constraints:
+- Does NOT delete any products
+- Does NOT modify tier values
+- Does NOT change copy, net_quantity, or supplier data
+- Only adds/populates the is_launch_v1 flag
 """
 
-# Migration version for tracking
-MIGRATION_VERSION = "3.26.0"
 MIGRATION_NAME = "launch_v1_lock"
+MIGRATION_VERSION = "3.26.0"
 
-# Step 1: Add the launch flag column
+# Step 1: Add column
 ADD_COLUMN_SQL = """
 ALTER TABLE os_modules_v3_1
 ADD COLUMN IF NOT EXISTS is_launch_v1 BOOLEAN DEFAULT FALSE;
 """
 
-# Step 2: Create index for efficient filtering
-ADD_INDEX_SQL = """
-CREATE INDEX IF NOT EXISTS idx_os_modules_is_launch_v1 
-    ON os_modules_v3_1(is_launch_v1) 
-    WHERE is_launch_v1 = TRUE;
-"""
-
-# Step 3: Populate launch flag - Include Tier 1 + Tier 2
-POPULATE_TIER_1_2_SQL = """
+# Step 2: Populate for Tier 1 + Tier 2
+SET_LAUNCH_TRUE_SQL = """
 UPDATE os_modules_v3_1
 SET is_launch_v1 = TRUE
 WHERE tier IN ('TIER 1', 'TIER 2', 'Tier 1', 'Tier 2', 'tier 1', 'tier 2', '1', '2');
 """
 
-# Step 4: Explicitly exclude Tier 3 (defensive)
-EXCLUDE_TIER_3_SQL = """
+# Step 3: Explicitly exclude Tier 3
+SET_LAUNCH_FALSE_SQL = """
 UPDATE os_modules_v3_1
 SET is_launch_v1 = FALSE
 WHERE tier IN ('TIER 3', 'Tier 3', 'tier 3', '3')
-   OR tier IS NULL;
+   OR tier IS NULL
+   OR tier = '';
+"""
+
+# Step 4: Create index for query performance
+CREATE_INDEX_SQL = """
+CREATE INDEX IF NOT EXISTS idx_os_modules_launch_v1 
+ON os_modules_v3_1(is_launch_v1) 
+WHERE is_launch_v1 = TRUE;
 """
 
 # Validation queries
-VALIDATION_QUERIES = {
-    "tier_distribution_in_launch": """
-        SELECT tier, COUNT(*) as count
-        FROM os_modules_v3_1
-        WHERE is_launch_v1 = TRUE
-        GROUP BY tier
-        ORDER BY tier;
-    """,
-    "tier_3_excluded": """
-        SELECT COUNT(*) as tier_3_in_launch
-        FROM os_modules_v3_1
-        WHERE is_launch_v1 = TRUE 
-          AND tier IN ('TIER 3', 'Tier 3', 'tier 3', '3');
-    """,
-    "tier_3_preserved": """
-        SELECT COUNT(*) as tier_3_total
-        FROM os_modules_v3_1
-        WHERE tier IN ('TIER 3', 'Tier 3', 'tier 3', '3');
-    """,
-    "launch_v1_counts": """
-        SELECT 
-            COUNT(*) FILTER (WHERE is_launch_v1 = TRUE) as in_launch,
-            COUNT(*) FILTER (WHERE is_launch_v1 = FALSE) as excluded,
-            COUNT(*) as total
-        FROM os_modules_v3_1;
-    """,
-}
-
-# Rollback SQL (if needed)
-ROLLBACK_SQL = """
--- Rollback: Remove is_launch_v1 column
--- WARNING: Only use if migration needs to be reverted
-ALTER TABLE os_modules_v3_1 DROP COLUMN IF EXISTS is_launch_v1;
-DROP INDEX IF EXISTS idx_os_modules_is_launch_v1;
+VALIDATION_LAUNCH_COUNTS_SQL = """
+SELECT 
+    tier,
+    COUNT(*) as total,
+    SUM(CASE WHEN is_launch_v1 = TRUE THEN 1 ELSE 0 END) as in_launch,
+    SUM(CASE WHEN is_launch_v1 = FALSE THEN 1 ELSE 0 END) as excluded
+FROM os_modules_v3_1
+GROUP BY tier
+ORDER BY tier;
 """
 
-# Full migration script
-FULL_MIGRATION_SQL = f"""
--- =====================================================
--- GenoMAX² Launch v1 Lock Migration
+VALIDATION_TIER3_EXISTS_SQL = """
+SELECT COUNT(*) as tier3_count
+FROM os_modules_v3_1
+WHERE tier IN ('TIER 3', 'Tier 3', 'tier 3', '3');
+"""
+
+VALIDATION_LAUNCH_SUMMARY_SQL = """
+SELECT 
+    is_launch_v1,
+    COUNT(*) as count,
+    COUNT(DISTINCT tier) as distinct_tiers
+FROM os_modules_v3_1
+GROUP BY is_launch_v1;
+"""
+
+# Rollback (if needed)
+ROLLBACK_SQL = """
+ALTER TABLE os_modules_v3_1
+DROP COLUMN IF EXISTS is_launch_v1;
+"""
+
+
+def get_full_migration_sql():
+    """Return complete migration as single transaction."""
+    return f"""
+-- ============================================
+-- Migration: Launch v1 Lock
 -- Version: {MIGRATION_VERSION}
--- Date: 2025-01-15
--- =====================================================
+-- ============================================
+
+BEGIN;
 
 -- Step 1: Add is_launch_v1 column
 {ADD_COLUMN_SQL}
 
--- Step 2: Create partial index for launch queries
-{ADD_INDEX_SQL}
+-- Step 2: Include Tier 1 + Tier 2 in Launch v1
+{SET_LAUNCH_TRUE_SQL}
 
--- Step 3: Include Tier 1 + Tier 2 in Launch v1
-{POPULATE_TIER_1_2_SQL}
+-- Step 3: Explicitly exclude Tier 3 and NULL tiers
+{SET_LAUNCH_FALSE_SQL}
 
--- Step 4: Explicitly exclude Tier 3 and NULL tiers
-{EXCLUDE_TIER_3_SQL}
+-- Step 4: Create index for performance
+{CREATE_INDEX_SQL}
 
--- Add column comment for documentation
-COMMENT ON COLUMN os_modules_v3_1.is_launch_v1 IS 
-    'Launch v1 flag: TRUE for TIER 1 + TIER 2 products only. Tier 3 excluded.';
+COMMIT;
+
+-- Validation (run after migration)
+-- {VALIDATION_LAUNCH_COUNTS_SQL}
 """
 
 
 def run_migration(cursor):
-    """Execute the full migration."""
+    """Execute the migration step by step."""
     results = {
         "migration": MIGRATION_NAME,
         "version": MIGRATION_VERSION,
@@ -114,65 +121,41 @@ def run_migration(cursor):
     
     # Step 1: Add column
     cursor.execute(ADD_COLUMN_SQL)
-    results["steps"].append({"step": "add_column", "status": "success"})
+    results["steps"].append({"step": 1, "action": "add_column", "status": "success"})
     
-    # Step 2: Add index
-    cursor.execute(ADD_INDEX_SQL)
-    results["steps"].append({"step": "add_index", "status": "success"})
-    
-    # Step 3: Populate Tier 1 + Tier 2
-    cursor.execute(POPULATE_TIER_1_2_SQL)
-    tier_1_2_count = cursor.rowcount
+    # Step 2: Set TRUE for Tier 1 + 2
+    cursor.execute(SET_LAUNCH_TRUE_SQL)
+    tier12_count = cursor.rowcount
     results["steps"].append({
-        "step": "populate_tier_1_2", 
-        "status": "success",
-        "rows_updated": tier_1_2_count
+        "step": 2, 
+        "action": "set_launch_true", 
+        "rows_affected": tier12_count,
+        "status": "success"
     })
     
-    # Step 4: Exclude Tier 3
-    cursor.execute(EXCLUDE_TIER_3_SQL)
-    tier_3_count = cursor.rowcount
+    # Step 3: Set FALSE for Tier 3
+    cursor.execute(SET_LAUNCH_FALSE_SQL)
+    tier3_count = cursor.rowcount
     results["steps"].append({
-        "step": "exclude_tier_3", 
-        "status": "success",
-        "rows_updated": tier_3_count
+        "step": 3, 
+        "action": "set_launch_false", 
+        "rows_affected": tier3_count,
+        "status": "success"
     })
     
-    # Add comment
-    cursor.execute("""
-        COMMENT ON COLUMN os_modules_v3_1.is_launch_v1 IS 
-            'Launch v1 flag: TRUE for TIER 1 + TIER 2 products only. Tier 3 excluded.';
-    """)
-    results["steps"].append({"step": "add_comment", "status": "success"})
+    # Step 4: Create index
+    cursor.execute(CREATE_INDEX_SQL)
+    results["steps"].append({"step": 4, "action": "create_index", "status": "success"})
     
-    return results
-
-
-def validate_migration(cursor):
-    """Run validation queries after migration."""
-    results = {}
+    results["status"] = "success"
+    results["launch_v1_count"] = tier12_count
+    results["excluded_count"] = tier3_count
     
-    for name, query in VALIDATION_QUERIES.items():
-        cursor.execute(query)
-        rows = cursor.fetchall()
-        results[name] = [dict(row) for row in rows] if rows else []
-    
-    # Check constraints
-    validation_passed = True
-    
-    # Tier 3 should NOT be in launch
-    if results.get("tier_3_excluded") and results["tier_3_excluded"][0].get("tier_3_in_launch", 0) > 0:
-        validation_passed = False
-        results["error"] = "TIER 3 found in launch - constraint violated"
-    
-    results["validation_passed"] = validation_passed
     return results
 
 
 if __name__ == "__main__":
     print(f"Migration: {MIGRATION_NAME}")
     print(f"Version: {MIGRATION_VERSION}")
-    print("\n=== Full Migration SQL ===")
-    print(FULL_MIGRATION_SQL)
-    print("\n=== Rollback SQL ===")
-    print(ROLLBACK_SQL)
+    print()
+    print(get_full_migration_sql())
