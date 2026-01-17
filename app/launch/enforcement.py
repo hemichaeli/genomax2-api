@@ -9,12 +9,17 @@ HARD GUARDRAILS:
 - No fuzzy matching. No heuristic inclusion.
 - Brain logic and research views remain unfiltered.
 
+PAIRING POLICY (v3.28.0):
+- REQUIRED_PAIR: Must have exactly 2 environments (MAXimo² + MAXima²)
+- SINGLE_ENV_ALLOWED: Must have exactly 1 environment (gender-specific)
+
 Endpoints:
-- GET  /api/v1/qa/launch-v1/pairing - Validate environment pairing (no half products)
+- GET  /api/v1/qa/launch-v1/pairing - Validate environment pairing with policy
 - GET  /api/v1/launch-v1/export/design - Excel export with LAUNCH_V1_SUMMARY tab
 - GET  /api/v1/launch-v1/products - List Launch v1 products with base_handle
+- GET  /api/v1/launch-v1/summary - Quick dashboard summary
 
-v3.27.0
+v3.28.0 - Policy-aware pairing
 """
 
 import os
@@ -51,6 +56,10 @@ LAUNCH_V1_SCOPE_FILTER = """
     AND supplier_status = 'ACTIVE'
 """
 
+# Pairing policy values
+PAIRING_POLICY_REQUIRED_PAIR = 'REQUIRED_PAIR'
+PAIRING_POLICY_SINGLE_ENV = 'SINGLE_ENV_ALLOWED'
+
 # Regex to strip environment suffix from shopify_handle
 ENV_SUFFIX_PATTERN = re.compile(r'-maximo$|-maxima$', re.IGNORECASE)
 
@@ -84,14 +93,27 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def check_column_exists(cursor, table: str, column: str) -> bool:
+    """Check if a column exists in a table."""
+    cursor.execute("""
+        SELECT column_name FROM information_schema.columns 
+        WHERE table_name = %s AND column_name = %s
+    """, (table, column))
+    return cursor.fetchone() is not None
+
+
 # ===== Models =====
 
 class PairingOffender(BaseModel):
-    """A base product with incorrect environment count."""
+    """A base product with incorrect environment count based on its policy."""
     base_handle: str
+    pairing_policy: str
     env_count: int
-    handles: List[str]
+    expected_count: int
+    module_codes: List[str]
+    shopify_handles: List[str]
     environments: List[str]
+    reason: str
 
 
 class PairingQAResult(BaseModel):
@@ -99,14 +121,14 @@ class PairingQAResult(BaseModel):
     overall_status: str = Field(description="PASS or FAIL")
     timestamp: str
     scope: Dict[str, Any]
-    distribution: List[Dict[str, int]]
-    expected_env_count: int = 2
+    distribution: List[Dict[str, Any]]
     total_base_products: int
     total_modules: int
     maximo_count: int
     maxima_count: int
-    offenders: List[PairingOffender]
+    offenders: List[Dict[str, Any]]
     invariants: Dict[str, bool]
+    policy_aware: bool = True
 
 
 class LaunchV1Summary(BaseModel):
@@ -139,6 +161,17 @@ def fetch_launch_v1_products() -> List[Dict[str, Any]]:
     try:
         cur = conn.cursor()
         
+        # Check if pairing_policy column exists
+        has_pairing_policy = check_column_exists(cur, 'os_modules_v3_1', 'pairing_policy')
+        has_base_handle_col = check_column_exists(cur, 'os_modules_v3_1', 'base_handle')
+        
+        # Build dynamic column list
+        extra_cols = ""
+        if has_pairing_policy:
+            extra_cols += ", pairing_policy"
+        if has_base_handle_col:
+            extra_cols += ", base_handle AS db_base_handle"
+        
         cur.execute(f"""
             SELECT 
                 module_code,
@@ -163,6 +196,7 @@ def fetch_launch_v1_products() -> List[Dict[str, Any]]:
                 is_launch_v1,
                 created_at,
                 updated_at
+                {extra_cols}
             FROM os_modules_v3_1
             WHERE {LAUNCH_V1_SCOPE_FILTER}
             ORDER BY tier, os_environment, module_code
@@ -172,11 +206,22 @@ def fetch_launch_v1_products() -> List[Dict[str, Any]]:
         cur.close()
         conn.close()
         
-        # Add derived base_handle
+        # Add derived base_handle if not from DB
         products = []
         for row in rows:
             product = dict(row)
-            product['base_handle'] = derive_base_handle(product.get('shopify_handle'))
+            # Use DB base_handle if available, otherwise derive
+            if has_base_handle_col and product.get('db_base_handle'):
+                product['base_handle'] = product.pop('db_base_handle')
+            else:
+                product['base_handle'] = derive_base_handle(product.get('shopify_handle'))
+                if 'db_base_handle' in product:
+                    del product['db_base_handle']
+            
+            # Default pairing_policy if not in DB
+            if not has_pairing_policy:
+                product['pairing_policy'] = PAIRING_POLICY_REQUIRED_PAIR
+            
             products.append(product)
         
         return products
@@ -189,13 +234,15 @@ def fetch_launch_v1_products() -> List[Dict[str, Any]]:
         raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
 
 
-def compute_pairing_analysis(products: List[Dict[str, Any]]) -> Dict[str, Any]:
+def compute_policy_aware_pairing_analysis(products: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Analyze environment pairing for Launch v1 products.
+    Analyze environment pairing for Launch v1 products using explicit policy.
     
-    Each base product should exist exactly twice:
-    - Once for MAXimo² (male)
-    - Once for MAXima² (female)
+    Policy rules:
+    - REQUIRED_PAIR: Must have exactly 2 environments (MAXimo² + MAXima²)
+    - SINGLE_ENV_ALLOWED: Must have exactly 1 environment
+    
+    Also detects duplicates within same (base_handle, os_environment).
     """
     # Group by base_handle
     base_groups: Dict[str, List[Dict[str, Any]]] = {}
@@ -209,20 +256,71 @@ def compute_pairing_analysis(products: List[Dict[str, Any]]) -> Dict[str, Any]:
             base_groups[base_handle] = []
         base_groups[base_handle].append(product)
     
-    # Analyze distribution
-    distribution: Dict[int, int] = {}  # env_count -> number of base products
+    # Analyze each base_handle group
     offenders: List[PairingOffender] = []
+    distribution: Dict[str, Dict[int, int]] = {
+        PAIRING_POLICY_REQUIRED_PAIR: {},
+        PAIRING_POLICY_SINGLE_ENV: {},
+    }
     
     for base_handle, group in base_groups.items():
-        env_count = len(group)
-        distribution[env_count] = distribution.get(env_count, 0) + 1
+        # Get policy (should be same for all in group, use first)
+        policy = group[0].get('pairing_policy', PAIRING_POLICY_REQUIRED_PAIR)
         
-        if env_count != 2:
+        # Count distinct environments
+        envs = list(set(p.get('os_environment') for p in group))
+        env_count = len(envs)
+        
+        # Track distribution
+        if policy not in distribution:
+            distribution[policy] = {}
+        distribution[policy][env_count] = distribution[policy].get(env_count, 0) + 1
+        
+        # Determine expected count based on policy
+        if policy == PAIRING_POLICY_REQUIRED_PAIR:
+            expected = 2
+        elif policy == PAIRING_POLICY_SINGLE_ENV:
+            expected = 1
+        else:
+            expected = 2  # Default to pair
+        
+        # Check for policy violations
+        is_violation = False
+        reason = ""
+        
+        if policy == PAIRING_POLICY_REQUIRED_PAIR and env_count != 2:
+            is_violation = True
+            if env_count < 2:
+                reason = f"REQUIRED_PAIR has only {env_count} environment(s), needs both MAXimo² and MAXima²"
+            else:
+                reason = f"REQUIRED_PAIR has {env_count} environments, should have exactly 2"
+        
+        elif policy == PAIRING_POLICY_SINGLE_ENV and env_count != 1:
+            is_violation = True
+            reason = f"SINGLE_ENV_ALLOWED has {env_count} environments, should have exactly 1"
+        
+        # Check for duplicates within same environment (regardless of policy)
+        env_module_counts: Dict[str, int] = {}
+        for p in group:
+            env = p.get('os_environment', '')
+            env_module_counts[env] = env_module_counts.get(env, 0) + 1
+        
+        for env, count in env_module_counts.items():
+            if count > 1:
+                is_violation = True
+                reason = f"Duplicate modules ({count}) in same environment ({env})"
+                break
+        
+        if is_violation:
             offenders.append(PairingOffender(
                 base_handle=base_handle,
+                pairing_policy=policy,
                 env_count=env_count,
-                handles=[p.get('shopify_handle', '') for p in group],
-                environments=[p.get('os_environment', '') for p in group]
+                expected_count=expected,
+                module_codes=[p.get('module_code', '') for p in group],
+                shopify_handles=[p.get('shopify_handle', '') for p in group],
+                environments=envs,
+                reason=reason
             ))
     
     # Count by environment
@@ -245,28 +343,38 @@ def compute_pairing_analysis(products: List[Dict[str, Any]]) -> Dict[str, Any]:
 @router.get("/api/v1/qa/launch-v1/pairing", response_model=PairingQAResult)
 def qa_launch_v1_pairing():
     """
-    QA Check: Validate Launch v1 has complete environment pairing.
+    QA Check: Validate Launch v1 has correct environment pairing per policy.
+    
+    POLICY RULES:
+    - REQUIRED_PAIR: Must have exactly 2 environments (MAXimo² + MAXima²)
+    - SINGLE_ENV_ALLOWED: Must have exactly 1 environment
     
     PASS conditions:
-    - Every base_handle has exactly 2 modules (MAXimo² + MAXima²)
-    - No orphan products
+    - All REQUIRED_PAIR base_handles have exactly 2 environments
+    - All SINGLE_ENV_ALLOWED base_handles have exactly 1 environment
+    - No duplicate modules within same (base_handle, os_environment)
     
     FAIL conditions:
-    - Any base_handle with env_count != 2
+    - Any policy violation
+    - Any duplicate within same environment
     
-    Returns distribution and list of offenders if any.
+    Returns distribution by policy and list of offenders if any.
     """
     # Fetch products with hard guardrails
     products = fetch_launch_v1_products()
     
-    # Compute pairing analysis
-    analysis = compute_pairing_analysis(products)
+    # Compute policy-aware analysis
+    analysis = compute_policy_aware_pairing_analysis(products)
     
     # Build distribution list
-    dist_list = [
-        {"env_count": env_count, "base_products": count}
-        for env_count, count in sorted(analysis['distribution'].items(), reverse=True)
-    ]
+    dist_list = []
+    for policy, env_counts in analysis['distribution'].items():
+        for env_count, base_products in sorted(env_counts.items()):
+            dist_list.append({
+                "pairing_policy": policy,
+                "env_count": env_count,
+                "base_products": base_products
+            })
     
     # Determine pass/fail
     offenders = analysis['offenders']
@@ -277,10 +385,7 @@ def qa_launch_v1_pairing():
         "modules_equals_maximo_plus_maxima": (
             analysis['total_modules'] == analysis['maximo_count'] + analysis['maxima_count']
         ),
-        "pairs_complete_if_pass": (
-            overall_status == "FAIL" or 
-            analysis['total_modules'] == analysis['total_base_products'] * 2
-        ),
+        "no_policy_violations": len(offenders) == 0,
     }
     
     return PairingQAResult(
@@ -291,13 +396,13 @@ def qa_launch_v1_pairing():
             "supplier_status": "ACTIVE"
         },
         distribution=dist_list,
-        expected_env_count=2,
         total_base_products=analysis['total_base_products'],
         total_modules=analysis['total_modules'],
         maximo_count=analysis['maximo_count'],
         maxima_count=analysis['maxima_count'],
         offenders=[o.model_dump() for o in offenders],
-        invariants=invariants
+        invariants=invariants,
+        policy_aware=True
     )
 
 
@@ -305,10 +410,11 @@ def qa_launch_v1_pairing():
 def list_launch_v1_products(
     environment: Optional[str] = Query(None, description="Filter by os_environment"),
     tier: Optional[str] = Query(None, description="Filter by tier (TIER 1, TIER 2)"),
+    policy: Optional[str] = Query(None, description="Filter by pairing_policy"),
     limit: int = Query(500, ge=1, le=1000),
 ):
     """
-    List all Launch v1 products with base_handle derived.
+    List all Launch v1 products with base_handle and pairing_policy.
     
     HARD GUARDRAILS enforced:
     - is_launch_v1 = TRUE
@@ -323,17 +429,23 @@ def list_launch_v1_products(
     if tier:
         products = [p for p in products if p.get('tier') == tier]
     
+    if policy:
+        products = [p for p in products if p.get('pairing_policy') == policy]
+    
     # Apply limit
     products = products[:limit]
     
     # Compute summary
     tier_counts = {}
     env_counts = {}
+    policy_counts = {}
     for p in products:
         t = p.get('tier', 'UNKNOWN')
         e = p.get('os_environment', 'UNKNOWN')
+        pol = p.get('pairing_policy', 'UNKNOWN')
         tier_counts[t] = tier_counts.get(t, 0) + 1
         env_counts[e] = env_counts.get(e, 0) + 1
+        policy_counts[pol] = policy_counts.get(pol, 0) + 1
     
     return {
         "count": len(products),
@@ -343,9 +455,11 @@ def list_launch_v1_products(
             "supplier_status": "ACTIVE",
             "environment_filter": environment,
             "tier_filter": tier,
+            "policy_filter": policy,
         },
         "tier_distribution": tier_counts,
         "environment_distribution": env_counts,
+        "policy_distribution": policy_counts,
         "products": products,
     }
 
@@ -362,14 +476,14 @@ def export_design_excel(
     - supplier_status = 'ACTIVE'
     
     Includes:
-    - LAUNCH_V1_SUMMARY tab with counts and invariants
+    - LAUNCH_V1_SUMMARY tab with counts, policy distribution, and invariants
     - READY_FOR_DESIGN tab with all Launch v1 products
-    - base_handle column derived from shopify_handle
+    - base_handle and pairing_policy columns
     
     Prevents "332 products" confusion by clearly showing:
     - modules_count (total rows)
     - base_products_count (unique base_handle)
-    - breakdown by environment
+    - breakdown by environment and policy
     """
     if not OPENPYXL_AVAILABLE:
         raise HTTPException(
@@ -380,12 +494,16 @@ def export_design_excel(
     # Fetch products with hard guardrails
     products = fetch_launch_v1_products()
     
-    # Compute pairing analysis
-    analysis = compute_pairing_analysis(products)
+    # Compute policy-aware analysis
+    analysis = compute_policy_aware_pairing_analysis(products)
     
     # Compute tier counts
     tier_1_count = sum(1 for p in products if p.get('tier') == 'TIER 1')
     tier_2_count = sum(1 for p in products if p.get('tier') == 'TIER 2')
+    
+    # Policy counts
+    required_pair_count = sum(1 for p in products if p.get('pairing_policy') == PAIRING_POLICY_REQUIRED_PAIR)
+    single_env_count = sum(1 for p in products if p.get('pairing_policy') == PAIRING_POLICY_SINGLE_ENV)
     
     # Pairing status
     offenders = analysis['offenders']
@@ -393,7 +511,6 @@ def export_design_excel(
     
     # Invariant checks
     modules_equals_sum = analysis['total_modules'] == analysis['maximo_count'] + analysis['maxima_count']
-    pairs_complete = pairing_status == "PASS" and analysis['total_modules'] == analysis['total_base_products'] * 2
     
     # Create workbook
     wb = openpyxl.Workbook()
@@ -410,7 +527,7 @@ def export_design_excel(
     
     # Summary data
     summary_data = [
-        ("Launch v1 Export Summary", ""),
+        ("Launch v1 Export Summary (Policy-Aware)", ""),
         ("Generated At", now_iso()),
         ("", ""),
         ("COUNTS", ""),
@@ -425,9 +542,14 @@ def export_design_excel(
         ("TIER 1 Count", tier_1_count),
         ("TIER 2 Count", tier_2_count),
         ("", ""),
+        ("PAIRING POLICY BREAKDOWN", ""),
+        ("REQUIRED_PAIR Modules", required_pair_count),
+        ("SINGLE_ENV_ALLOWED Modules", single_env_count),
+        ("", ""),
         ("INVARIANT CHECKS", ""),
         ("modules_count = maximo + maxima", "PASS" if modules_equals_sum else "FAIL"),
-        ("Pairing Complete (all pairs = 2)", pairing_status),
+        ("Pairing Policy Compliance", pairing_status),
+        ("Offender Count", len(offenders)),
         ("", ""),
         ("SCOPE FILTERS", ""),
         ("is_launch_v1", "TRUE"),
@@ -439,7 +561,8 @@ def export_design_excel(
         ws_summary.cell(row=row_idx, column=2, value=value)
         
         # Style headers
-        if label in ["Launch v1 Export Summary", "COUNTS", "ENVIRONMENT BREAKDOWN", "TIER BREAKDOWN", "INVARIANT CHECKS", "SCOPE FILTERS"]:
+        if label in ["Launch v1 Export Summary (Policy-Aware)", "COUNTS", "ENVIRONMENT BREAKDOWN", 
+                     "TIER BREAKDOWN", "PAIRING POLICY BREAKDOWN", "INVARIANT CHECKS", "SCOPE FILTERS"]:
             ws_summary.cell(row=row_idx, column=1).font = Font(bold=True)
         
         # Style pass/fail
@@ -449,8 +572,8 @@ def export_design_excel(
             ws_summary.cell(row=row_idx, column=2).fill = fail_fill
     
     # Adjust column widths
-    ws_summary.column_dimensions['A'].width = 35
-    ws_summary.column_dimensions['B'].width = 25
+    ws_summary.column_dimensions['A'].width = 40
+    ws_summary.column_dimensions['B'].width = 30
     
     # ===== READY_FOR_DESIGN Tab =====
     ws_design = wb.create_sheet("READY_FOR_DESIGN")
@@ -462,6 +585,7 @@ def export_design_excel(
         "base_handle",
         "shopify_handle",
         "os_environment",
+        "pairing_policy",
         "tier",
         "os_layer",
         "biological_domain",
@@ -496,7 +620,8 @@ def export_design_excel(
     if offenders:
         ws_offenders = wb.create_sheet("PAIRING_OFFENDERS")
         
-        offender_headers = ["base_handle", "env_count", "handles", "environments"]
+        offender_headers = ["base_handle", "pairing_policy", "env_count", "expected_count", 
+                           "module_codes", "environments", "reason"]
         for col_idx, header in enumerate(offender_headers, start=1):
             cell = ws_offenders.cell(row=1, column=col_idx, value=header)
             cell.fill = fail_fill
@@ -504,9 +629,18 @@ def export_design_excel(
         
         for row_idx, offender in enumerate(offenders, start=2):
             ws_offenders.cell(row=row_idx, column=1, value=offender.base_handle)
-            ws_offenders.cell(row=row_idx, column=2, value=offender.env_count)
-            ws_offenders.cell(row=row_idx, column=3, value=", ".join(offender.handles))
-            ws_offenders.cell(row=row_idx, column=4, value=", ".join(offender.environments))
+            ws_offenders.cell(row=row_idx, column=2, value=offender.pairing_policy)
+            ws_offenders.cell(row=row_idx, column=3, value=offender.env_count)
+            ws_offenders.cell(row=row_idx, column=4, value=offender.expected_count)
+            ws_offenders.cell(row=row_idx, column=5, value=", ".join(offender.module_codes))
+            ws_offenders.cell(row=row_idx, column=6, value=", ".join(offender.environments))
+            ws_offenders.cell(row=row_idx, column=7, value=offender.reason)
+        
+        # Adjust widths
+        ws_offenders.column_dimensions['A'].width = 35
+        ws_offenders.column_dimensions['B'].width = 20
+        ws_offenders.column_dimensions['E'].width = 50
+        ws_offenders.column_dimensions['G'].width = 60
     
     # Save to BytesIO
     output = io.BytesIO()
@@ -534,7 +668,7 @@ def get_launch_v1_summary():
     Useful for dashboard and status checks.
     """
     products = fetch_launch_v1_products()
-    analysis = compute_pairing_analysis(products)
+    analysis = compute_policy_aware_pairing_analysis(products)
     
     tier_1_count = sum(1 for p in products if p.get('tier') == 'TIER 1')
     tier_2_count = sum(1 for p in products if p.get('tier') == 'TIER 2')
@@ -543,7 +677,7 @@ def get_launch_v1_summary():
     pairing_status = "PASS" if len(offenders) == 0 else "FAIL"
     
     modules_equals_sum = analysis['total_modules'] == analysis['maximo_count'] + analysis['maxima_count']
-    pairs_complete = pairing_status == "PASS" and analysis['total_modules'] == analysis['total_base_products'] * 2
+    pairs_complete = pairing_status == "PASS"
     
     return LaunchV1Summary(
         modules_count=analysis['total_modules'],
