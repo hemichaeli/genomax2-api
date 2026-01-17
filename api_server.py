@@ -1,7 +1,15 @@
 """
 GenoMAX² API Server
 Gender-Optimized Biological Operating System
-Version 3.21.0 - Excel Override System
+Version 3.27.0 - Launch v1 Enforcement
+
+v3.27.0:
+- Launch v1 enforcement with HARD GUARDRAILS
+- GET /api/v1/qa/launch-v1/pairing - Environment pairing validation
+- GET /api/v1/launch-v1/export/design - Excel export with LAUNCH_V1_SUMMARY
+- GET /api/v1/launch-v1/products - List Launch v1 products with base_handle
+- Shopify endpoints now enforce is_launch_v1 = TRUE filter
+- All external pipelines use LAUNCH_V1_SCOPE_FILTER
 
 v3.21.0:
 - Add Excel Override endpoints for catalog data sync
@@ -129,7 +137,7 @@ from app.catalog.override import router as override_router
 # Telemetry Emitter imports (v3.17.0 - Issue #9 Stage 2)
 from app.telemetry import get_emitter, derive_run_summary, derive_events
 
-app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.21.0")
+app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.27.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -653,7 +661,7 @@ def _emit_telemetry_for_phase(
             sex=sex,
             age=age,
             has_bloodwork=has_bloodwork or summary.has_bloodwork,
-            api_version="3.21.0",
+            api_version="3.27.0",
         )
         
         # Complete run with aggregates
@@ -686,18 +694,18 @@ def _emit_telemetry_for_phase(
 
 @app.get("/")
 def root():
-    return {"service": "GenoMAX² API", "version": "3.21.0", "status": "operational"}
+    return {"service": "GenoMAX² API", "version": "3.27.0", "status": "operational"}
 
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "3.21.0"}
+    return {"status": "healthy", "version": "3.27.0"}
 
 
 @app.get("/version")
 def version():
     return {
-        "api_version": "3.21.0",
+        "api_version": "3.27.0",
         "brain_version": "1.5.0",
         "resolver_version": "1.0.0",
         "catalog_version": "catalog_governance_v1",
@@ -709,8 +717,9 @@ def version():
         "safety_gate_version": "safety_gate_v1",
         "qa_audit_version": "qa_audit_v1",
         "override_version": "excel_override_v1",
+        "launch_v1_version": "launch_enforcement_v1",
         "contract_version": CONTRACT_VERSION,
-        "features": ["orchestrate", "orchestrate_v2", "compose", "route", "resolve", "supplier-gating", "catalog-governance", "routing-layer", "matching-layer", "explainability", "painpoints", "lifestyle-schema", "telemetry", "telemetry-instrumented", "intake-system", "safety-gate", "qa-audit", "excel-override"]
+        "features": ["orchestrate", "orchestrate_v2", "compose", "route", "resolve", "supplier-gating", "catalog-governance", "routing-layer", "matching-layer", "explainability", "painpoints", "lifestyle-schema", "telemetry", "telemetry-instrumented", "intake-system", "safety-gate", "qa-audit", "excel-override", "launch-v1-enforcement"]
     }
 
 
