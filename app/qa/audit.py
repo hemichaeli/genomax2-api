@@ -1,5 +1,5 @@
 """
-GenoMAX² QA Audit Module v2.5.1
+GenoMAX² QA Audit Module v2.6.0
 Post-Migration Validation for os_modules_v3_1
 
 SPLIT AUDIT MODES:
@@ -7,6 +7,7 @@ SPLIT AUDIT MODES:
 2. READY_FOR_DESIGN - Requires link/net_quantity/fda_disclaimer/no placeholders 
    (will FAIL until Supliful API integration)
 
+v2.6.0: Added POST /audit/os-modules/bulk-upsert for module insertion/updates
 v2.5.1: Fixed column references (product_link does not exist, use url/supplier_page_url)
 v2.5: Added GET /net-qty/missing endpoint for backfill operations
 v2.4: B3 respects disclaimer_applicability (TOPICAL exempt from fda_disclaimer)
@@ -377,7 +378,7 @@ def audit_os_modules(mode: Optional[str] = Query(default=None)) -> Dict[str, Any
         raise HTTPException(status_code=500, detail="Database connection failed")
     
     results = {
-        "audit_version": "2.5.1",
+        "audit_version": "2.6.0",
         "table": "os_modules_v3_1",
         "mode": mode or "all",
         "checks": {},
@@ -411,14 +412,14 @@ def audit_os_modules(mode: Optional[str] = Query(default=None)) -> Dict[str, Any
                 "mode": "DB_INTEGRITY"
             }
             
-            # A2: Total module count
+            # A2: Total module count (updated to allow for new modules)
             cur.execute("SELECT COUNT(*) AS total FROM os_modules_v3_1")
             a2_count = cur.fetchone()["total"]
             results["checks"]["A2_total_modules"] = {
-                "description": "Total module count (expected 210 after migration)",
-                "expected": 210,
+                "description": "Total module count (base: 210, may grow)",
+                "minimum_expected": 210,
                 "found": a2_count,
-                "status": "PASS" if a2_count == 210 else "FAIL",
+                "status": "PASS" if a2_count >= 210 else "FAIL",
                 "mode": "DB_INTEGRITY"
             }
             
@@ -902,3 +903,153 @@ def audit_os_modules_export() -> Dict[str, Any]:
         except:
             pass
         raise HTTPException(status_code=500, detail=f"Export error: {str(e)}")
+
+
+# ============================================================================
+# OS MODULES BULK UPSERT ENDPOINT (v2.6.0)
+# ============================================================================
+
+class ModuleUpsertItem(BaseModel):
+    """Single module for bulk upsert."""
+    module_code: str
+    shopify_handle: str
+    product_name: str
+    product_link: Optional[str] = None
+    os_environment: str  # MAXima² or MAXimo²
+    os_layer: str  # Core, Support, Adaptive
+    net_quantity_label: Optional[str] = None
+    front_label_text: Optional[str] = None
+    back_label_text: Optional[str] = None
+    fda_disclaimer: Optional[str] = None
+    supliful_handle: Optional[str] = None
+    biological_domain: Optional[str] = None
+    disclaimer_applicability: Optional[str] = "SUPPLEMENT"
+    disclaimer_symbol: Optional[str] = "*"
+
+
+class BulkModuleUpsertRequest(BaseModel):
+    """Bulk module upsert request."""
+    modules: List[ModuleUpsertItem]
+
+
+@router.post("/audit/os-modules/bulk-upsert")
+def bulk_upsert_modules(request: BulkModuleUpsertRequest) -> Dict[str, Any]:
+    """
+    Bulk upsert modules into os_modules_v3_1.
+    
+    - INSERT new modules (by module_code)
+    - UPDATE existing modules
+    
+    Returns: {"status": "success/partial/error", "inserted": N, "updated": N, "errors": [...]}
+    """
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        cur = conn.cursor()
+        inserted = 0
+        updated = 0
+        errors = []
+        
+        for module in request.modules:
+            try:
+                # Check if module exists
+                cur.execute(
+                    "SELECT module_code FROM os_modules_v3_1 WHERE module_code = %s",
+                    (module.module_code,)
+                )
+                existing = cur.fetchone()
+                
+                if existing:
+                    # UPDATE existing module
+                    cur.execute("""
+                        UPDATE os_modules_v3_1 SET
+                            shopify_handle = %s,
+                            product_name = %s,
+                            url = %s,
+                            os_environment = %s,
+                            os_layer = %s,
+                            net_quantity = %s,
+                            front_label_text = %s,
+                            back_label_text = %s,
+                            fda_disclaimer = %s,
+                            supliful_handle = %s,
+                            biological_domain = %s,
+                            disclaimer_applicability = %s,
+                            disclaimer_symbol = %s,
+                            updated_at = NOW()
+                        WHERE module_code = %s
+                    """, (
+                        module.shopify_handle,
+                        module.product_name,
+                        module.product_link,
+                        module.os_environment,
+                        module.os_layer,
+                        module.net_quantity_label,
+                        module.front_label_text,
+                        module.back_label_text,
+                        module.fda_disclaimer,
+                        module.supliful_handle,
+                        module.biological_domain,
+                        module.disclaimer_applicability,
+                        module.disclaimer_symbol,
+                        module.module_code
+                    ))
+                    updated += 1
+                else:
+                    # INSERT new module
+                    cur.execute("""
+                        INSERT INTO os_modules_v3_1 (
+                            module_code, shopify_handle, product_name, url,
+                            os_environment, os_layer, net_quantity,
+                            front_label_text, back_label_text, fda_disclaimer,
+                            supliful_handle, biological_domain,
+                            disclaimer_applicability, disclaimer_symbol,
+                            created_at, updated_at
+                        ) VALUES (
+                            %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW(), NOW()
+                        )
+                    """, (
+                        module.module_code,
+                        module.shopify_handle,
+                        module.product_name,
+                        module.product_link,
+                        module.os_environment,
+                        module.os_layer,
+                        module.net_quantity_label,
+                        module.front_label_text,
+                        module.back_label_text,
+                        module.fda_disclaimer,
+                        module.supliful_handle,
+                        module.biological_domain,
+                        module.disclaimer_applicability,
+                        module.disclaimer_symbol
+                    ))
+                    inserted += 1
+                    
+            except Exception as e:
+                errors.append({
+                    "module_code": module.module_code,
+                    "error": str(e)
+                })
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        status = "success" if not errors else ("partial" if (inserted + updated) > 0 else "error")
+        return {
+            "status": status,
+            "inserted": inserted,
+            "updated": updated,
+            "errors": errors
+        }
+        
+    except Exception as e:
+        try:
+            conn.rollback()
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Bulk upsert error: {str(e)}")
