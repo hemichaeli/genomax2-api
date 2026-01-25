@@ -31,7 +31,9 @@ from app.shared.hashing import canonicalize_and_hash
 # CONFIGURATION
 # ============================================
 
-BLOODWORK_BASE_URL = "https://web-production-97b74.up.railway.app"
+# FIXED: Was incorrectly pointing to PostgreSQL URL (web-production-97b74)
+# Correct API URL is web-production-7110
+BLOODWORK_BASE_URL = "https://web-production-7110.up.railway.app"
 BLOODWORK_ENDPOINT = "/api/v1/bloodwork/process"
 BLOODWORK_TIMEOUT_SECONDS = 30.0
 ENGINE_VERSION = "1.0.0"
