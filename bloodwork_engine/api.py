@@ -11,6 +11,7 @@ v2.0 Features:
 - Hormonal routing
 - OCR parsing for lab reports
 - Lab API integration (Junction/Vital)
+- Webhook endpoints for lab result notifications
 """
 
 import os
@@ -19,6 +20,7 @@ from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 from dataclasses import asdict
 from fastapi import UploadFile, File, Body, Query
+from starlette.requests import Request
 
 # ============================================================
 # REQUEST/RESPONSE MODELS
@@ -754,7 +756,7 @@ def register_bloodwork_endpoints(app):
     # GET /api/v1/labs/vital/status
     # ---------------------------------------------------------
     @app.get("/api/v1/labs/vital/status", tags=["Lab API"])
-    def vital_status():
+    def vital_api_status():
         """Check Junction (formerly Vital) API configuration and connectivity."""
         api_key = os.environ.get("VITAL_API_KEY")
         environment = os.environ.get("VITAL_ENVIRONMENT", "sandbox")
@@ -1173,5 +1175,158 @@ def register_bloodwork_endpoints(app):
             }
         except Exception as e:
             return {"error": str(e)}
+    
+    # =========================================================
+    # WEBHOOK ENDPOINTS (Lab Result Notifications)
+    # =========================================================
+    
+    # ---------------------------------------------------------
+    # POST /api/v1/webhooks/vital
+    # ---------------------------------------------------------
+    @app.post("/api/v1/webhooks/vital", tags=["Webhooks"])
+    async def vital_webhook(request: Request):
+        """
+        Junction/Vital results webhook endpoint.
+        
+        Receives notifications when lab results are ready.
+        Automatically processes results through the Bloodwork Engine.
+        
+        Configure this URL in your Junction dashboard:
+        https://your-domain.com/api/v1/webhooks/vital
+        """
+        try:
+            from bloodwork_engine.webhooks import process_vital_webhook
+        except ImportError as e:
+            return {
+                "success": False,
+                "error": f"Webhook module not available: {e}"
+            }
+        
+        try:
+            raw_body = await request.body()
+            signature = request.headers.get("X-Vital-Signature", "")
+            ip_address = request.client.host if request.client else None
+            
+            result = await process_vital_webhook(
+                payload=raw_body.decode(),
+                signature_header=signature,
+                ip_address=ip_address,
+                auto_process=True
+            )
+            
+            return {
+                "success": result.success,
+                "event_id": str(result.event_id) if result.event_id else None,
+                "message": result.message if hasattr(result, 'message') else None
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    # ---------------------------------------------------------
+    # POST /api/v1/webhooks/labtestingapi
+    # ---------------------------------------------------------
+    @app.post("/api/v1/webhooks/labtestingapi", tags=["Webhooks"])
+    async def lab_testing_api_webhook(request: Request):
+        """
+        Lab Testing API results webhook endpoint.
+        
+        Receives notifications from Lab Testing API (Quest Diagnostics direct).
+        Automatically processes results through the Bloodwork Engine.
+        
+        Configure this URL in your Lab Testing API dashboard:
+        https://your-domain.com/api/v1/webhooks/labtestingapi
+        """
+        try:
+            from bloodwork_engine.webhooks import process_lab_testing_api_webhook
+        except ImportError as e:
+            return {
+                "success": False,
+                "error": f"Webhook module not available: {e}"
+            }
+        
+        try:
+            raw_body = await request.body()
+            signature = request.headers.get("X-Signature", "")
+            timestamp = request.headers.get("X-Timestamp", "")
+            ip_address = request.client.host if request.client else None
+            
+            result = await process_lab_testing_api_webhook(
+                payload=raw_body.decode(),
+                signature_header=signature,
+                timestamp_header=timestamp,
+                ip_address=ip_address,
+                auto_process=True
+            )
+            
+            return {
+                "success": result.success,
+                "event_id": str(result.event_id) if result.event_id else None,
+                "message": result.message if hasattr(result, 'message') else None
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "error": str(e)
+            }
+    
+    # ---------------------------------------------------------
+    # GET /api/v1/webhooks/status
+    # ---------------------------------------------------------
+    @app.get("/api/v1/webhooks/status", tags=["Webhooks"])
+    def webhook_status():
+        """
+        Check webhook configuration status.
+        
+        Shows which webhook integrations are configured and ready.
+        """
+        vital_secret = os.getenv("VITAL_WEBHOOK_SECRET")
+        lab_testing_api_secret = os.getenv("LAB_TESTING_API_WEBHOOK_SECRET")
+        
+        # Check if webhook module is available
+        webhook_module_available = False
+        try:
+            from bloodwork_engine.webhooks import WebhookResult
+            webhook_module_available = True
+        except ImportError:
+            pass
+        
+        return {
+            "webhook_module_available": webhook_module_available,
+            "vital": {
+                "configured": bool(vital_secret),
+                "endpoint": "/api/v1/webhooks/vital",
+                "secret_preview": f"{vital_secret[:8]}..." if vital_secret and len(vital_secret) > 8 else ("***" if vital_secret else None),
+                "signature_header": "X-Vital-Signature",
+                "documentation": "https://docs.junction.com/webhooks"
+            },
+            "lab_testing_api": {
+                "configured": bool(lab_testing_api_secret),
+                "endpoint": "/api/v1/webhooks/labtestingapi",
+                "secret_preview": f"{lab_testing_api_secret[:8]}..." if lab_testing_api_secret and len(lab_testing_api_secret) > 8 else ("***" if lab_testing_api_secret else None),
+                "signature_header": "X-Signature",
+                "timestamp_header": "X-Timestamp",
+                "documentation": "https://labtestingapi.com/docs"
+            },
+            "endpoints": [
+                "/api/v1/webhooks/vital",
+                "/api/v1/webhooks/labtestingapi",
+                "/api/v1/webhooks/status"
+            ],
+            "setup_instructions": {
+                "vital": {
+                    "step_1": "Set VITAL_WEBHOOK_SECRET environment variable",
+                    "step_2": "Configure webhook URL in Junction dashboard",
+                    "step_3": "Subscribe to 'labtest.result.ready' events"
+                },
+                "lab_testing_api": {
+                    "step_1": "Set LAB_TESTING_API_WEBHOOK_SECRET environment variable",
+                    "step_2": "Configure webhook URL in Lab Testing API dashboard",
+                    "step_3": "Enable result notifications"
+                }
+            }
+        }
     
     return app
