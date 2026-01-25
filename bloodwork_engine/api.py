@@ -10,7 +10,7 @@ v2.0 Features:
 - Computed markers (HOMA-IR, ratios)
 - Hormonal routing
 - OCR parsing for lab reports
-- Lab API integration (Vital)
+- Lab API integration (Junction/Vital)
 """
 
 import os
@@ -109,7 +109,7 @@ class ProcessMarkersResponse(BaseModel):
 
 # Lab API Models
 class CreateVitalUserRequest(BaseModel):
-    """Request to create a Vital user."""
+    """Request to create a Junction/Vital user."""
     external_id: str = Field(..., description="GenoMAX user ID")
     first_name: Optional[str] = None
     last_name: Optional[str] = None
@@ -118,7 +118,7 @@ class CreateVitalUserRequest(BaseModel):
 
 class CreateLabOrderRequest(BaseModel):
     """Request to create a lab order."""
-    user_id: str = Field(..., description="Vital user ID")
+    user_id: str = Field(..., description="Junction user ID")
     lab_test_id: str = Field(..., description="Lab test ID to order")
     collection_method: str = Field(default="walk_in_test", description="walk_in_test, at_home_phlebotomy, or testkit")
     patient_details: Optional[Dict[str, Any]] = Field(default=None, description="Patient info: first_name, last_name, dob, gender, email, phone_number")
@@ -715,7 +715,7 @@ def register_bloodwork_endpoints(app):
             }
     
     # =========================================================
-    # LAB API ENDPOINTS (Vital Integration)
+    # LAB API ENDPOINTS (Junction/Vital Integration)
     # =========================================================
     
     # ---------------------------------------------------------
@@ -735,7 +735,7 @@ def register_bloodwork_endpoints(app):
                 "providers": providers,
                 "primary_provider": "vital",
                 "vital_configured": vital_status.get("valid", False),
-                "documentation": "https://docs.tryvital.io/"
+                "documentation": "https://docs.junction.com/"
             }
         except ImportError as e:
             return {
@@ -755,7 +755,7 @@ def register_bloodwork_endpoints(app):
     # ---------------------------------------------------------
     @app.get("/api/v1/labs/vital/status", tags=["Lab API"])
     def vital_status():
-        """Check Vital API configuration and connectivity."""
+        """Check Junction (formerly Vital) API configuration and connectivity."""
         api_key = os.environ.get("VITAL_API_KEY")
         environment = os.environ.get("VITAL_ENVIRONMENT", "sandbox")
         
@@ -765,10 +765,11 @@ def register_bloodwork_endpoints(app):
                 "error": "VITAL_API_KEY environment variable not set",
                 "environment": environment,
                 "setup_instructions": {
-                    "step_1": "Sign up at https://tryvital.io",
+                    "step_1": "Sign up at https://tryvital.io (now Junction)",
                     "step_2": "Get API key from dashboard",
                     "step_3": "Set VITAL_API_KEY environment variable",
-                    "step_4": "Optionally set VITAL_ENVIRONMENT to 'production' (default: sandbox)"
+                    "step_4": "Optionally set VITAL_ENVIRONMENT to 'production' (default: sandbox)",
+                    "step_5": "Contact Junction to enable Lab Testing API on your account"
                 }
             }
         
@@ -778,26 +779,52 @@ def register_bloodwork_endpoints(app):
             adapter = VitalAdapter(api_key=api_key, environment=environment)
             validation = adapter.validate_credentials()
             
+            # Check if lab testing is enabled by trying to list labs
+            lab_testing_enabled = False
+            lab_testing_error = None
+            available_labs = []
+            try:
+                labs = adapter.list_labs()
+                lab_testing_enabled = True
+                available_labs = labs
+            except Exception as e:
+                lab_testing_error = str(e)
+                if "not authorized" in str(e).lower():
+                    lab_testing_error = "Lab Testing API not enabled. Contact Junction to enable lab testing on your account."
+            
             return {
                 "configured": True,
-                "valid": validation.get("valid", False),
+                "api_key_valid": validation.get("valid", False),
+                "lab_testing_enabled": lab_testing_enabled,
+                "lab_testing_error": lab_testing_error,
                 "environment": environment,
                 "api_key_preview": f"{api_key[:8]}...{api_key[-4:]}" if len(api_key) > 12 else "***",
                 "base_url": adapter.base_url,
+                "api_version": "v3",
                 "validation_result": validation,
+                "available_labs": available_labs if lab_testing_enabled else [],
                 "features": {
-                    "walk_in_tests": True,
-                    "at_home_phlebotomy": True,
-                    "test_kits": True,
-                    "quest_locations": True,
-                    "labcorp_locations": True,
-                    "restricted_states": ["NY", "NJ", "RI"]
+                    "walk_in_tests": lab_testing_enabled,
+                    "at_home_phlebotomy": lab_testing_enabled,
+                    "test_kits": lab_testing_enabled,
+                    "quest_locations": lab_testing_enabled,
+                    "labcorp_locations": lab_testing_enabled,
+                    "restricted_states": ["NY", "NJ", "RI"] if lab_testing_enabled else []
+                },
+                "next_steps": {
+                    "action_required": "Contact Junction to enable Lab Testing API",
+                    "contact": "support@junction.com",
+                    "book_intro_call": "https://tryvital.io/labs",
+                    "documentation": "https://docs.junction.com/lab/overview/introduction"
+                } if not lab_testing_enabled else {
+                    "ready": True,
+                    "documentation": "https://docs.junction.com/lab/overview/introduction"
                 }
             }
         except Exception as e:
             return {
                 "configured": True,
-                "valid": False,
+                "api_key_valid": False,
                 "error": str(e),
                 "environment": environment
             }
@@ -807,7 +834,7 @@ def register_bloodwork_endpoints(app):
     # ---------------------------------------------------------
     @app.get("/api/v1/labs/vital/tests", tags=["Lab API"])
     def list_vital_tests():
-        """List available lab tests from Vital."""
+        """List available lab tests from Junction."""
         api_key = os.environ.get("VITAL_API_KEY")
         if not api_key:
             return {"error": "VITAL_API_KEY not configured"}
@@ -843,7 +870,7 @@ def register_bloodwork_endpoints(app):
     # ---------------------------------------------------------
     @app.get("/api/v1/labs/vital/markers", tags=["Lab API"])
     def list_vital_markers():
-        """List available biomarkers from Vital."""
+        """List available biomarkers from Junction."""
         api_key = os.environ.get("VITAL_API_KEY")
         if not api_key:
             return {"error": "VITAL_API_KEY not configured"}
@@ -902,7 +929,7 @@ def register_bloodwork_endpoints(app):
     # ---------------------------------------------------------
     @app.post("/api/v1/labs/vital/users", tags=["Lab API"])
     def create_vital_user(request: CreateVitalUserRequest):
-        """Create a user in Vital for lab ordering."""
+        """Create a user in Junction for lab ordering."""
         api_key = os.environ.get("VITAL_API_KEY")
         if not api_key:
             return {"error": "VITAL_API_KEY not configured"}
@@ -1028,7 +1055,7 @@ def register_bloodwork_endpoints(app):
     # ---------------------------------------------------------
     @app.get("/api/v1/labs/vital/results", tags=["Lab API"])
     def get_vital_results(
-        user_id: Optional[str] = Query(default=None, description="Vital user ID"),
+        user_id: Optional[str] = Query(default=None, description="Junction user ID"),
         order_id: Optional[str] = Query(default=None, description="Specific order ID"),
         process_through_engine: bool = Query(default=True, description="Process results through Bloodwork Engine"),
         lab_profile: str = Query(default="GLOBAL_CONSERVATIVE", description="Lab profile for engine processing"),
@@ -1036,7 +1063,7 @@ def register_bloodwork_endpoints(app):
         age: Optional[int] = Query(default=None, description="Age for engine processing")
     ):
         """
-        Fetch lab results from Vital.
+        Fetch lab results from Junction.
         
         Optionally processes results through the Bloodwork Engine to get
         safety gates, routing constraints, and optimization recommendations.
