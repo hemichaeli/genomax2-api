@@ -17,7 +17,7 @@ For v1 compatibility:
 # V2 Engine (default) - 40 markers, 31 gates, genetic/hormonal support
 from bloodwork_engine.engine_v2 import (
     BloodworkEngineV2,
-    BloodworkDataLoaderV2,
+    BloodworkDataLoader,
     BloodworkResult,
     ProcessedMarker,
     ComputedMarker,
@@ -44,7 +44,6 @@ from bloodwork_engine.api import register_bloodwork_endpoints
 
 # Aliases for backward compatibility
 BloodworkEngine = BloodworkEngineV2
-BloodworkDataLoader = BloodworkDataLoaderV2
 
 __version__ = "2.0.0"
 __all__ = [
@@ -52,7 +51,6 @@ __all__ = [
     "BloodworkEngine",
     "BloodworkEngineV2",
     "BloodworkDataLoader",
-    "BloodworkDataLoaderV2",
     "BloodworkResult",
     "ProcessedMarker",
     "ComputedMarker",
