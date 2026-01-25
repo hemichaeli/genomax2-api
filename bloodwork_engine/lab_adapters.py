@@ -8,11 +8,17 @@ Primary Integration: Junction (https://junction.com, formerly Vital/tryvital.io)
 - Transparent pricing, no test upcharges
 - Operates in restricted states (NY, NJ, RI)
 
+Secondary Integration: Lab Testing API (https://labtestingapi.com)
+- Direct Quest Diagnostics access (2,300+ locations)
+- Up to 80% off standard lab pricing
+- 47 states (excludes NY, NJ, RI)
+- PWNHealth physician oversight included
+
 Usage:
-    from bloodwork_engine.lab_adapters import VitalAdapter, get_adapter
+    from bloodwork_engine.lab_adapters import VitalAdapter, LabTestingAPIAdapter, get_adapter
     
     # Get adapter by name
-    adapter = get_adapter("vital")
+    adapter = get_adapter("vital")  # or "lab_testing_api"
     
     # Fetch results
     results = adapter.fetch_results(user_id="12345")
@@ -115,6 +121,23 @@ class LabTest:
     price: Optional[float] = None
     turnaround_days: Optional[int] = None
     lab_provider: Optional[str] = None
+
+
+@dataclass 
+class LabLocation:
+    """A lab collection site (PSC - Patient Service Center)."""
+    location_id: str
+    name: str
+    address: str
+    city: str
+    state: str
+    zip_code: str
+    phone: Optional[str] = None
+    hours: Optional[Dict[str, str]] = None  # {monday: "7am-5pm", ...}
+    latitude: Optional[float] = None
+    longitude: Optional[float] = None
+    distance_miles: Optional[float] = None
+    lab_provider: str = "Quest Diagnostics"
 
 
 class LabAdapter(ABC):
@@ -724,6 +747,502 @@ class VitalAdapter(LabAdapter):
         return result.get("url")
 
 
+class LabTestingAPIAdapter(LabAdapter):
+    """
+    Adapter for Lab Testing API (labtestingapi.com).
+    
+    Provides direct access to Quest Diagnostics through a developer-friendly API.
+    Documentation: https://labtestingapi.com/
+    
+    Features:
+    - Direct Quest Diagnostics access (2,300+ locations)
+    - Up to 80% off standard lab pricing
+    - Transparent pricing (e.g., CMP-14 at $30.50)
+    - 47 states coverage (excludes NY, NJ, RI)
+    - PWNHealth physician network oversight
+    - Real-time order status
+    - Results in PDF and raw format
+    - Same-day testing with 3-4 hour results turnaround
+    - HIPAA-compliant messaging and results delivery
+    
+    Pricing Examples:
+    - Comprehensive Metabolic Panel (CMP-14): $30.50
+    - General Wellness Male Panel: $389.80
+    
+    API Version: v1 (2025)
+    """
+    
+    provider = LabProvider.LAB_TESTING_API
+    
+    # Standard test codes for common panels
+    TEST_CODES = {
+        "cmp": "10165",        # Comprehensive Metabolic Panel
+        "cbc": "10001",        # Complete Blood Count
+        "lipid": "10216",      # Lipid Panel
+        "tsh": "10195",        # TSH
+        "vitamin_d": "10201",  # Vitamin D, 25-Hydroxy
+        "iron": "10055",       # Iron & TIBC
+        "ferritin": "10190",   # Ferritin
+        "hba1c": "10192",      # Hemoglobin A1c
+        "testosterone_total": "10237",  # Testosterone, Total
+    }
+    
+    # Pricing (as of 2025)
+    PRICING = {
+        "10165": 30.50,   # CMP-14
+        "10001": 18.50,   # CBC
+        "10216": 23.00,   # Lipid Panel
+        "10195": 32.00,   # TSH
+        "10201": 45.00,   # Vitamin D
+        "10055": 26.00,   # Iron & TIBC
+        "10190": 28.00,   # Ferritin
+        "10192": 35.00,   # HbA1c
+        "10237": 42.00,   # Testosterone
+    }
+    
+    # Restricted states (no service)
+    RESTRICTED_STATES = ["NY", "NJ", "RI"]
+    
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        environment: str = "production",  # 'sandbox' or 'production'
+        timeout: int = 30
+    ):
+        """
+        Initialize Lab Testing API adapter.
+        
+        Args:
+            api_key: API key from labtestingapi.com
+            environment: 'sandbox' for testing, 'production' for live
+            timeout: Request timeout in seconds
+        """
+        self.api_key = api_key or os.environ.get("LAB_TESTING_API_KEY")
+        self.environment = environment
+        self.timeout = timeout
+        
+        # Base URL
+        if environment == "sandbox":
+            self.base_url = "https://sandbox.labtestingapi.com/api/v1"
+        else:
+            self.base_url = "https://api.labtestingapi.com/api/v1"
+        
+        # Authentication header
+        self.headers = {
+            "Authorization": f"Bearer {self.api_key}" if self.api_key else "",
+            "Accept": "application/json",
+            "Content-Type": "application/json"
+        }
+    
+    def _request(
+        self,
+        method: str,
+        endpoint: str,
+        data: Optional[Dict] = None,
+        params: Optional[Dict] = None
+    ) -> Dict[str, Any]:
+        """Make HTTP request to Lab Testing API."""
+        url = f"{self.base_url}{endpoint}"
+        
+        try:
+            with httpx.Client(timeout=self.timeout) as client:
+                response = client.request(
+                    method=method,
+                    url=url,
+                    headers=self.headers,
+                    json=data,
+                    params=params
+                )
+                response.raise_for_status()
+                return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Lab Testing API error: {e.response.status_code} - {e.response.text}")
+            raise
+        except Exception as e:
+            logger.error(f"Lab Testing API request failed: {e}")
+            raise
+    
+    def validate_credentials(self) -> Dict[str, Any]:
+        """Validate Lab Testing API credentials."""
+        if not self.api_key:
+            return {
+                "valid": False,
+                "error": "LAB_TESTING_API_KEY not configured",
+                "environment": self.environment,
+                "provider": "Lab Testing API"
+            }
+        
+        try:
+            # Test with tests listing endpoint
+            result = self._request("GET", "/tests")
+            return {
+                "valid": True,
+                "tests_available": len(result.get("tests", [])) if isinstance(result, dict) else 0,
+                "environment": self.environment,
+                "provider": "Lab Testing API",
+                "lab_network": "Quest Diagnostics",
+                "coverage": "47 states (excludes NY, NJ, RI)"
+            }
+        except Exception as e:
+            return {
+                "valid": False,
+                "error": str(e),
+                "environment": self.environment,
+                "provider": "Lab Testing API"
+            }
+    
+    # =========================================================
+    # TEST CATALOG
+    # =========================================================
+    
+    def list_lab_tests(self) -> List[LabTest]:
+        """
+        List available lab tests.
+        
+        Returns:
+            List of LabTest objects
+        """
+        result = self._request("GET", "/tests")
+        
+        tests = []
+        test_list = result.get("tests", []) if isinstance(result, dict) else result
+        
+        for test in test_list:
+            tests.append(LabTest(
+                test_id=str(test.get("id", test.get("code"))),
+                name=test.get("name"),
+                description=test.get("description"),
+                markers=test.get("biomarkers", []),
+                sample_type=test.get("sample_type", "blood"),
+                fasting_required=test.get("fasting_required", False),
+                price=test.get("price"),
+                turnaround_days=test.get("turnaround_days", 1),
+                lab_provider="Quest Diagnostics"
+            ))
+        
+        return tests
+    
+    def get_lab_test(self, test_id: str) -> LabTest:
+        """Get details for a specific lab test."""
+        result = self._request("GET", f"/tests/{test_id}")
+        
+        return LabTest(
+            test_id=str(result.get("id", result.get("code"))),
+            name=result.get("name"),
+            description=result.get("description"),
+            markers=result.get("biomarkers", []),
+            sample_type=result.get("sample_type", "blood"),
+            fasting_required=result.get("fasting_required", False),
+            price=result.get("price"),
+            turnaround_days=result.get("turnaround_days", 1),
+            lab_provider="Quest Diagnostics"
+        )
+    
+    def get_test_price(self, test_id: str) -> Optional[float]:
+        """Get pricing for a specific test."""
+        # Check local cache first
+        if test_id in self.PRICING:
+            return self.PRICING[test_id]
+        
+        try:
+            result = self._request("GET", f"/tests/{test_id}/price")
+            return result.get("price")
+        except Exception:
+            return None
+    
+    # =========================================================
+    # LAB LOCATIONS
+    # =========================================================
+    
+    def find_lab_locations(
+        self,
+        zip_code: str,
+        radius_miles: int = 25
+    ) -> List[LabLocation]:
+        """
+        Find nearby Quest Diagnostics locations.
+        
+        Args:
+            zip_code: US ZIP code
+            radius_miles: Search radius (default 25)
+        
+        Returns:
+            List of LabLocation objects
+        """
+        params = {
+            "zip_code": zip_code,
+            "radius": radius_miles
+        }
+        
+        result = self._request("GET", "/locations", params=params)
+        
+        locations = []
+        location_list = result.get("locations", []) if isinstance(result, dict) else result
+        
+        for loc in location_list:
+            locations.append(LabLocation(
+                location_id=str(loc.get("id")),
+                name=loc.get("name", "Quest Diagnostics"),
+                address=loc.get("address", {}).get("street", loc.get("address_line1", "")),
+                city=loc.get("address", {}).get("city", loc.get("city", "")),
+                state=loc.get("address", {}).get("state", loc.get("state", "")),
+                zip_code=loc.get("address", {}).get("zip", loc.get("zip_code", "")),
+                phone=loc.get("phone"),
+                hours=loc.get("hours"),
+                latitude=loc.get("latitude"),
+                longitude=loc.get("longitude"),
+                distance_miles=loc.get("distance"),
+                lab_provider="Quest Diagnostics"
+            ))
+        
+        return locations
+    
+    def check_state_coverage(self, state: str) -> bool:
+        """Check if a state is covered by Lab Testing API."""
+        return state.upper() not in self.RESTRICTED_STATES
+    
+    # =========================================================
+    # ORDER MANAGEMENT
+    # =========================================================
+    
+    def create_order(
+        self,
+        patient: LabPatient,
+        test_ids: List[str],
+        location_id: Optional[str] = None
+    ) -> LabOrder:
+        """
+        Create a lab test order.
+        
+        Args:
+            patient: Patient information (must include DOB, sex, address)
+            test_ids: List of test IDs to order
+            location_id: Optional preferred Quest location
+        
+        Returns:
+            LabOrder with requisition details
+        """
+        # Validate state coverage
+        if patient.address:
+            state = patient.address.get("state", "")
+            if not self.check_state_coverage(state):
+                raise ValueError(f"Lab Testing API does not operate in {state}. "
+                               f"Restricted states: {', '.join(self.RESTRICTED_STATES)}")
+        
+        data = {
+            "patient": {
+                "external_id": patient.external_id,
+                "first_name": patient.first_name,
+                "last_name": patient.last_name,
+                "date_of_birth": patient.date_of_birth.isoformat() if patient.date_of_birth else None,
+                "sex": patient.sex,
+                "email": patient.email,
+                "phone": patient.phone,
+                "address": patient.address
+            },
+            "tests": test_ids
+        }
+        
+        if location_id:
+            data["location_id"] = location_id
+        
+        result = self._request("POST", "/orders", data=data)
+        
+        # Update patient with lab ID
+        patient.lab_patient_id = result.get("patient_id")
+        
+        return LabOrder(
+            order_id=result.get("id", result.get("order_id")),
+            patient=patient,
+            status=result.get("status", "pending"),
+            tests_ordered=test_ids,
+            ordered_at=datetime.fromisoformat(result.get("created_at").replace("Z", "+00:00")) if result.get("created_at") else datetime.now(),
+            lab_provider="Quest Diagnostics",
+            collection_method="walk_in_test",
+            requisition_url=result.get("requisition_url", result.get("pdf_url"))
+        )
+    
+    def get_order_status(self, order_id: str) -> LabOrder:
+        """Get the current status of a lab order."""
+        result = self._request("GET", f"/orders/{order_id}")
+        
+        patient_data = result.get("patient", {})
+        patient = LabPatient(
+            external_id=patient_data.get("external_id", ""),
+            lab_patient_id=patient_data.get("id")
+        )
+        
+        status_map = {
+            "pending": "pending",
+            "requisition_ready": "pending",
+            "in_progress": "collecting",
+            "sample_received": "processing",
+            "results_pending": "processing",
+            "completed": "completed",
+            "cancelled": "cancelled",
+            "failed": "failed"
+        }
+        
+        return LabOrder(
+            order_id=result.get("id"),
+            patient=patient,
+            status=status_map.get(result.get("status"), result.get("status")),
+            tests_ordered=result.get("tests", []),
+            ordered_at=datetime.fromisoformat(result.get("created_at").replace("Z", "+00:00")) if result.get("created_at") else datetime.now(),
+            completed_at=datetime.fromisoformat(result.get("completed_at").replace("Z", "+00:00")) if result.get("completed_at") else None,
+            lab_provider="Quest Diagnostics",
+            collection_method="walk_in_test",
+            requisition_url=result.get("requisition_url")
+        )
+    
+    def get_requisition_pdf(self, order_id: str) -> Optional[str]:
+        """Get requisition PDF URL for walk-in testing."""
+        result = self._request("GET", f"/orders/{order_id}/requisition")
+        return result.get("url", result.get("pdf_url"))
+    
+    def cancel_order(self, order_id: str) -> Dict[str, Any]:
+        """Cancel a pending lab order."""
+        return self._request("POST", f"/orders/{order_id}/cancel")
+    
+    def list_orders(
+        self,
+        patient_id: Optional[str] = None,
+        status: Optional[str] = None,
+        from_date: Optional[date] = None,
+        to_date: Optional[date] = None
+    ) -> List[LabOrder]:
+        """List lab orders with optional filters."""
+        params = {}
+        if patient_id:
+            params["patient_id"] = patient_id
+        if status:
+            params["status"] = status
+        if from_date:
+            params["from_date"] = from_date.isoformat()
+        if to_date:
+            params["to_date"] = to_date.isoformat()
+        
+        result = self._request("GET", "/orders", params=params)
+        
+        orders = []
+        order_list = result.get("orders", []) if isinstance(result, dict) else result
+        
+        for order in order_list:
+            patient_data = order.get("patient", {})
+            patient = LabPatient(
+                external_id=patient_data.get("external_id", ""),
+                lab_patient_id=patient_data.get("id")
+            )
+            orders.append(LabOrder(
+                order_id=order.get("id"),
+                patient=patient,
+                status=order.get("status"),
+                tests_ordered=order.get("tests", []),
+                ordered_at=datetime.fromisoformat(order.get("created_at").replace("Z", "+00:00")) if order.get("created_at") else datetime.now(),
+                lab_provider="Quest Diagnostics"
+            ))
+        
+        return orders
+    
+    # =========================================================
+    # RESULTS
+    # =========================================================
+    
+    def fetch_results(
+        self,
+        user_id: Optional[str] = None,
+        order_id: Optional[str] = None,
+        from_date: Optional[date] = None,
+        to_date: Optional[date] = None
+    ) -> List[LabResults]:
+        """
+        Fetch lab results.
+        
+        Args:
+            user_id: Patient external ID
+            order_id: Specific order ID
+            from_date: Filter results from this date
+            to_date: Filter results until this date
+        
+        Returns:
+            List of LabResults
+        """
+        if order_id:
+            result = self._request("GET", f"/orders/{order_id}/results")
+            return [self._parse_result(result, order_id)]
+        
+        # List results by patient
+        params = {}
+        if user_id:
+            params["patient_external_id"] = user_id
+        if from_date:
+            params["from_date"] = from_date.isoformat()
+        if to_date:
+            params["to_date"] = to_date.isoformat()
+        
+        result = self._request("GET", "/results", params=params)
+        
+        results = []
+        result_list = result.get("results", []) if isinstance(result, dict) else result
+        
+        for r in result_list:
+            results.append(self._parse_result(r, r.get("order_id")))
+        
+        return results
+    
+    def _parse_result(self, data: Dict, order_id: str) -> LabResults:
+        """Parse Lab Testing API result into LabResults object."""
+        markers = []
+        
+        biomarker_list = data.get("biomarkers", data.get("results", []))
+        if isinstance(data, dict) and not biomarker_list:
+            biomarker_list = []
+        
+        for biomarker in biomarker_list:
+            markers.append(LabMarkerResult(
+                marker_code=biomarker.get("code", biomarker.get("name", "")),
+                marker_name=biomarker.get("name", ""),
+                value=biomarker.get("value"),
+                unit=biomarker.get("unit", ""),
+                reference_low=biomarker.get("reference_low", biomarker.get("ref_low")),
+                reference_high=biomarker.get("reference_high", biomarker.get("ref_high")),
+                flag=biomarker.get("flag"),
+                loinc_code=biomarker.get("loinc_code")
+            ))
+        
+        patient_data = data.get("patient", {})
+        patient = LabPatient(
+            external_id=patient_data.get("external_id", ""),
+            lab_patient_id=patient_data.get("id")
+        )
+        
+        report_date_str = data.get("report_date") or data.get("completed_at") or data.get("created_at")
+        if report_date_str:
+            try:
+                report_date = datetime.fromisoformat(report_date_str.replace("Z", "+00:00")).date()
+            except ValueError:
+                report_date = date.today()
+        else:
+            report_date = date.today()
+        
+        return LabResults(
+            result_id=data.get("id", order_id),
+            order_id=order_id,
+            patient=patient,
+            lab_provider="Quest Diagnostics (via Lab Testing API)",
+            report_date=report_date,
+            markers=markers,
+            raw_response=data,
+            pdf_url=data.get("pdf_url"),
+            status=data.get("status", "final")
+        )
+    
+    def get_result_pdf(self, order_id: str) -> Optional[str]:
+        """Get PDF URL for lab results."""
+        result = self._request("GET", f"/orders/{order_id}/results/pdf")
+        return result.get("url", result.get("pdf_url"))
+
+
 class ManualAdapter(LabAdapter):
     """
     Adapter for manual entry or OCR-parsed results.
@@ -793,6 +1312,7 @@ class ManualAdapter(LabAdapter):
 # Adapter registry
 _ADAPTERS = {
     LabProvider.VITAL: VitalAdapter,
+    LabProvider.LAB_TESTING_API: LabTestingAPIAdapter,
     LabProvider.MANUAL: ManualAdapter,
 }
 
@@ -802,7 +1322,7 @@ def get_adapter(provider: str, **config) -> LabAdapter:
     Get a lab adapter by provider name.
     
     Args:
-        provider: Provider name ('vital', 'manual')
+        provider: Provider name ('vital', 'lab_testing_api', 'manual')
         **config: Provider-specific configuration
     
     Returns:
@@ -854,3 +1374,45 @@ def get_vital_status() -> Dict[str, Any]:
     
     adapter = VitalAdapter(api_key=api_key, environment=environment)
     return adapter.validate_credentials()
+
+
+def get_lab_testing_api_status() -> Dict[str, Any]:
+    """Get Lab Testing API configuration status."""
+    api_key = os.environ.get("LAB_TESTING_API_KEY")
+    environment = os.environ.get("LAB_TESTING_API_ENVIRONMENT", "production")
+    
+    if not api_key:
+        return {
+            "configured": False,
+            "error": "LAB_TESTING_API_KEY not set",
+            "environment": environment,
+            "provider": "Lab Testing API"
+        }
+    
+    adapter = LabTestingAPIAdapter(api_key=api_key, environment=environment)
+    return adapter.validate_credentials()
+
+
+def get_best_available_adapter() -> Optional[LabAdapter]:
+    """
+    Get the best available lab adapter based on configuration.
+    
+    Priority:
+    1. Junction (Vital) - if configured and Lab Testing enabled
+    2. Lab Testing API - if configured
+    3. None - if no adapters configured
+    
+    Returns:
+        Configured LabAdapter or None
+    """
+    # Try Junction first
+    vital_status = get_vital_status()
+    if vital_status.get("valid"):
+        return VitalAdapter()
+    
+    # Fall back to Lab Testing API
+    lta_status = get_lab_testing_api_status()
+    if lta_status.get("valid"):
+        return LabTestingAPIAdapter()
+    
+    return None
