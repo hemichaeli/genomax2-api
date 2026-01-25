@@ -286,6 +286,78 @@ class BloodworkDataLoader:
     def get_safety_gates(self) -> Dict:
         return self._reference_ranges.get("safety_gates", {})
     
+    def get_safety_gate_summary(self) -> Dict[str, int]:
+        """
+        Get safety gate counts by tier.
+        
+        Correctly iterates through tier_data["gates"] arrays to count gates.
+        
+        Returns:
+            Dict with keys: total, tier1_safety, tier2_optimization, tier3_genetic_hormonal
+        """
+        safety_gates = self._reference_ranges.get("safety_gates", {})
+        summary = {
+            "total": 0,
+            "tier1_safety": 0,
+            "tier2_optimization": 0,
+            "tier3_genetic_hormonal": 0
+        }
+        
+        for tier_key in ["tier1_safety", "tier2_optimization", "tier3_genetic_hormonal"]:
+            tier_data = safety_gates.get(tier_key, {})
+            if isinstance(tier_data, dict) and "gates" in tier_data:
+                count = len(tier_data["gates"])
+                summary[tier_key] = count
+                summary["total"] += count
+        
+        return summary
+    
+    def get_all_gates_flat(self) -> Dict[str, Dict]:
+        """
+        Get all safety gates as a flat dictionary keyed by gate_id.
+        
+        Returns:
+            Dict mapping gate_id to gate definition with tier info
+        """
+        safety_gates = self._reference_ranges.get("safety_gates", {})
+        flat_gates = {}
+        
+        for tier_key in ["tier1_safety", "tier2_optimization", "tier3_genetic_hormonal"]:
+            tier_data = safety_gates.get(tier_key, {})
+            if isinstance(tier_data, dict) and "gates" in tier_data:
+                for gate in tier_data["gates"]:
+                    gate_id = gate.get("gate_id")
+                    if gate_id:
+                        gate_with_tier = dict(gate)
+                        gate_with_tier["tier"] = tier_key
+                        flat_gates[gate_id] = gate_with_tier
+        
+        return flat_gates
+    
+    def get_gates_by_tier(self) -> Dict[str, Dict[str, Dict]]:
+        """
+        Get safety gates organized by tier as flat dictionaries.
+        
+        Returns:
+            Dict with tier keys mapping to dicts of gate_id -> gate definition
+        """
+        safety_gates = self._reference_ranges.get("safety_gates", {})
+        gates_by_tier = {
+            "tier1_safety": {},
+            "tier2_optimization": {},
+            "tier3_genetic_hormonal": {}
+        }
+        
+        for tier_key in ["tier1_safety", "tier2_optimization", "tier3_genetic_hormonal"]:
+            tier_data = safety_gates.get(tier_key, {})
+            if isinstance(tier_data, dict) and "gates" in tier_data:
+                for gate in tier_data["gates"]:
+                    gate_id = gate.get("gate_id")
+                    if gate_id:
+                        gates_by_tier[tier_key][gate_id] = gate
+        
+        return gates_by_tier
+    
     def get_gate_definition(self, gate_id: str) -> Optional[Dict]:
         """Get a specific safety gate definition."""
         gate_data = self._safety_gates_lookup.get(gate_id)
