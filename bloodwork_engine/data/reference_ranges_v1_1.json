@@ -1,0 +1,770 @@
+{
+  "version": "1.1",
+  "scope": "GenoMAX² Bloodwork Engine v1.1 - Complete Reference Ranges & Safety Gates (All Tiers)",
+  "philosophy": {
+    "principle": "Blood does not negotiate",
+    "optimal_vs_normal": "GenoMAX optimal ranges represent functional optimal values, NOT standard lab reference ranges",
+    "safety_first": "Decision limits trigger safety gates that override all routing logic"
+  },
+  "changelog": {
+    "1.1": "Added 18 new safety gates (23 total) and ranges for 24 new markers",
+    "1.0": "Initial release with 5 safety gates and 13 marker ranges"
+  },
+  "lab_profiles": ["GLOBAL_CONSERVATIVE", "IL_HMO_GENERIC", "US_QUEST", "US_LABCORP", "EU_GENERIC"],
+  "policy": {
+    "lookup_order": ["<LAB_PROFILE>", "GLOBAL_CONSERVATIVE"],
+    "if_missing_range": "MISSING_RANGE (emit REQUIRE_REVIEW)",
+    "safety_precedence": "decision_limits override genomax_optimal"
+  },
+  "safety_gates": {
+    "tier1_safety": {
+      "description": "Hard safety gates - block or caution on dangerous supplementation",
+      "gates": [
+        {
+          "gate_id": "GATE_001",
+          "name": "iron_block",
+          "trigger_marker": "ferritin",
+          "condition": "ferritin > threshold",
+          "threshold_male": 300,
+          "threshold_female": 200,
+          "unit": "ng/mL",
+          "action": "BLOCK_IRON",
+          "blocked_ingredients": ["iron", "iron_bisglycinate", "ferrous_sulfate", "ferrous_fumarate", "heme_iron"],
+          "exception": "Deferred if hs_crp > 3.0 (acute phase reactant)",
+          "rationale": "Elevated ferritin may indicate iron overload or hemochromatosis risk"
+        },
+        {
+          "gate_id": "GATE_002",
+          "name": "vitamin_d_caution",
+          "trigger_marker": "calcium_serum",
+          "condition": "calcium_serum > threshold",
+          "threshold": 10.5,
+          "unit": "mg/dL",
+          "action": "CAUTION_VITAMIN_D",
+          "caution_ingredients": ["vitamin_d3", "vitamin_d2", "cholecalciferol"],
+          "rationale": "Hypercalcemia risk with vitamin D supplementation"
+        },
+        {
+          "gate_id": "GATE_003",
+          "name": "hepatic_caution",
+          "trigger_marker": ["alt", "ast"],
+          "condition": "alt > threshold OR ast > threshold",
+          "threshold_male": 50,
+          "threshold_female": 40,
+          "unit": "U/L",
+          "action": "CAUTION_HEPATOTOXIC",
+          "caution_ingredients": ["niacin_ir", "kava", "high_dose_vitamin_a", "green_tea_extract_egcg"],
+          "blocked_ingredients": ["ashwagandha"],
+          "rationale": "Elevated liver enzymes indicate hepatic stress"
+        },
+        {
+          "gate_id": "GATE_004",
+          "name": "renal_caution",
+          "trigger_marker": ["egfr", "creatinine"],
+          "condition": "egfr < 60 OR creatinine > threshold",
+          "egfr_threshold": 60,
+          "creatinine_threshold_male": 1.3,
+          "creatinine_threshold_female": 1.1,
+          "unit": "mL/min/1.73m2 | mg/dL",
+          "action": "CAUTION_RENAL",
+          "caution_ingredients": ["creatine", "high_dose_protein"],
+          "rationale": "Impaired kidney function requires careful supplement selection"
+        },
+        {
+          "gate_id": "GATE_005",
+          "name": "acute_inflammation",
+          "trigger_marker": "hs_crp",
+          "condition": "hs_crp > threshold",
+          "threshold": 3.0,
+          "unit": "mg/L",
+          "action": "FLAG_ACUTE_INFLAMMATION",
+          "effects": ["defer_iron_interpretation", "flag_root_cause_investigation"],
+          "rationale": "CRP > 3 indicates acute inflammation; ferritin interpretation unreliable"
+        },
+        {
+          "gate_id": "GATE_006",
+          "name": "potassium_block",
+          "trigger_marker": "potassium",
+          "condition": "potassium > threshold",
+          "threshold": 5.0,
+          "unit": "mEq/L",
+          "action": "BLOCK_POTASSIUM",
+          "blocked_ingredients": ["potassium", "potassium_citrate", "potassium_chloride"],
+          "rationale": "Hyperkalemia risk"
+        },
+        {
+          "gate_id": "GATE_007",
+          "name": "potassium_support",
+          "trigger_marker": "potassium",
+          "condition": "potassium < threshold",
+          "threshold": 3.5,
+          "unit": "mEq/L",
+          "action": "FLAG_LOW_POTASSIUM",
+          "recommended_ingredients": ["potassium_citrate", "electrolyte_blend"],
+          "rationale": "Low potassium may benefit from targeted support"
+        },
+        {
+          "gate_id": "GATE_008",
+          "name": "thyroid_iodine_block",
+          "trigger_marker": "tsh",
+          "condition": "tsh < threshold",
+          "threshold": 0.4,
+          "unit": "mIU/L",
+          "action": "BLOCK_IODINE",
+          "blocked_ingredients": ["iodine", "kelp", "iodine_potassium"],
+          "rationale": "Low TSH suggests hyperthyroidism; iodine contraindicated"
+        },
+        {
+          "gate_id": "GATE_009",
+          "name": "thyroid_support_flag",
+          "trigger_marker": "tsh",
+          "condition": "tsh > threshold",
+          "threshold": 4.5,
+          "unit": "mIU/L",
+          "action": "FLAG_THYROID_SUPPORT",
+          "recommended_ingredients": ["selenium", "zinc", "iodine"],
+          "rationale": "Elevated TSH may indicate subclinical hypothyroidism"
+        },
+        {
+          "gate_id": "GATE_010",
+          "name": "b12_deficiency",
+          "trigger_marker": "vitamin_b12",
+          "condition": "vitamin_b12 < threshold",
+          "threshold": 300,
+          "unit": "pg/mL",
+          "action": "FLAG_B12_DEFICIENCY",
+          "recommended_ingredients": ["methylcobalamin", "adenosylcobalamin"],
+          "rationale": "B12 < 300 may indicate functional deficiency"
+        },
+        {
+          "gate_id": "GATE_011",
+          "name": "folate_deficiency",
+          "trigger_marker": "folate_serum",
+          "condition": "folate_serum < threshold",
+          "threshold": 3.0,
+          "unit": "ng/mL",
+          "action": "FLAG_FOLATE_DEFICIENCY",
+          "recommended_ingredients": ["methylfolate", "folinic_acid"],
+          "rationale": "Low folate affects methylation"
+        },
+        {
+          "gate_id": "GATE_012",
+          "name": "homocysteine_elevated",
+          "trigger_marker": "homocysteine",
+          "condition": "homocysteine > threshold",
+          "threshold": 10,
+          "unit": "µmol/L",
+          "action": "FLAG_METHYLATION_SUPPORT",
+          "recommended_ingredients": ["methylfolate", "methylcobalamin", "b6_p5p", "riboflavin", "tmg"],
+          "rationale": "Elevated homocysteine indicates methylation dysfunction"
+        },
+        {
+          "gate_id": "GATE_013",
+          "name": "uric_acid_high",
+          "trigger_marker": "uric_acid",
+          "condition": "uric_acid > threshold",
+          "threshold_male": 7.0,
+          "threshold_female": 6.0,
+          "unit": "mg/dL",
+          "action": "CAUTION_PURINE",
+          "caution_ingredients": ["high_dose_niacin", "fructose"],
+          "rationale": "Elevated uric acid increases gout risk"
+        },
+        {
+          "gate_id": "GATE_014",
+          "name": "coagulation_caution",
+          "trigger_marker": "platelet_count",
+          "condition": "platelet_count < threshold",
+          "threshold": 100,
+          "unit": "x10^3/µL",
+          "action": "CAUTION_BLOOD_THINNING",
+          "caution_ingredients": ["fish_oil_high_dose", "vitamin_e_high_dose", "ginkgo", "garlic_extract"],
+          "rationale": "Low platelets increase bleeding risk"
+        }
+      ]
+    },
+    "tier2_optimization": {
+      "description": "Optimization gates - flag for targeted protocol adjustments",
+      "gates": [
+        {
+          "gate_id": "GATE_015",
+          "name": "omega3_deficiency",
+          "trigger_marker": "omega3_index",
+          "condition": "omega3_index < threshold",
+          "threshold": 4.0,
+          "unit": "%",
+          "action": "FLAG_OMEGA3_PRIORITY",
+          "recommended_ingredients": ["epa_dha", "fish_oil", "algae_omega3"],
+          "rationale": "Omega-3 index < 4% indicates high cardiovascular risk"
+        },
+        {
+          "gate_id": "GATE_016",
+          "name": "omega3_optimal",
+          "trigger_marker": "omega3_index",
+          "condition": "omega3_index > threshold",
+          "threshold": 8.0,
+          "unit": "%",
+          "action": "FLAG_OMEGA3_SUFFICIENT",
+          "effect": "reduce_omega3_dosing",
+          "rationale": "Omega-3 index > 8% is cardioprotective; maintenance dose only"
+        },
+        {
+          "gate_id": "GATE_017",
+          "name": "zinc_copper_imbalance",
+          "trigger_marker": ["zinc_serum", "copper_serum"],
+          "condition": "zinc_serum / copper_serum > threshold",
+          "threshold_ratio": 1.5,
+          "unit": "ratio",
+          "action": "CAUTION_ZINC_EXCESS",
+          "effect": "reduce_zinc_dosing",
+          "rationale": "Excess zinc depletes copper"
+        },
+        {
+          "gate_id": "GATE_018",
+          "name": "insulin_resistance",
+          "trigger_marker": ["fasting_insulin", "fasting_glucose"],
+          "condition": "fasting_insulin > 10 OR homa_ir > 2.5",
+          "insulin_threshold": 10,
+          "homa_ir_threshold": 2.5,
+          "unit": "µIU/mL | ratio",
+          "action": "FLAG_INSULIN_SUPPORT",
+          "recommended_ingredients": ["berberine", "chromium", "alpha_lipoic_acid", "inositol"],
+          "calculation_note": "HOMA-IR = (fasting_glucose * fasting_insulin) / 405",
+          "rationale": "Insulin resistance benefits from metabolic support"
+        },
+        {
+          "gate_id": "GATE_019",
+          "name": "anemia_flag",
+          "trigger_marker": ["hemoglobin", "ferritin"],
+          "condition": "hemoglobin < anemia_threshold AND ferritin < 30",
+          "hemoglobin_threshold_male": 13.0,
+          "hemoglobin_threshold_female": 11.0,
+          "ferritin_threshold": 30,
+          "unit": "g/dL | ng/mL",
+          "action": "FLAG_IRON_DEFICIENCY_ANEMIA",
+          "effect": "override_iron_block",
+          "recommended_ingredients": ["iron_bisglycinate", "vitamin_c"],
+          "rationale": "True IDA requires iron despite inflammation-elevated ferritin"
+        },
+        {
+          "gate_id": "GATE_020",
+          "name": "triglyceride_caution",
+          "trigger_marker": "triglycerides",
+          "condition": "triglycerides > threshold",
+          "threshold": 500,
+          "unit": "mg/dL",
+          "action": "CAUTION_FISH_OIL_DOSE",
+          "effect": "limit_fish_oil_4g_max",
+          "rationale": "Very high TG may require prescription-strength omega-3"
+        }
+      ]
+    },
+    "tier3_hormonal_genetic": {
+      "description": "Advanced genetic and hormonal routing gates",
+      "gates": [
+        {
+          "gate_id": "GATE_021",
+          "name": "cortisol_dysregulation",
+          "trigger_marker": "cortisol_am",
+          "condition": "cortisol_am < 6 OR cortisol_am > 25",
+          "low_threshold": 6,
+          "high_threshold": 25,
+          "unit": "µg/dL",
+          "action": "FLAG_ADRENAL_SUPPORT",
+          "recommended_ingredients_low": ["licorice_root", "rhodiola", "vitamin_c"],
+          "recommended_ingredients_high": ["phosphatidylserine", "ashwagandha"],
+          "rationale": "Abnormal morning cortisol suggests adrenal dysfunction"
+        },
+        {
+          "gate_id": "GATE_022",
+          "name": "thyroid_conversion",
+          "trigger_marker": ["tsh", "free_t3"],
+          "condition": "tsh normal AND free_t3 < threshold",
+          "tsh_normal_range": [0.4, 4.5],
+          "free_t3_threshold": 2.3,
+          "unit": "mIU/L | pg/mL",
+          "action": "FLAG_T4_TO_T3_CONVERSION",
+          "recommended_ingredients": ["selenium", "zinc", "tyrosine"],
+          "rationale": "Normal TSH with low fT3 suggests poor T4-to-T3 conversion"
+        },
+        {
+          "gate_id": "GATE_023",
+          "name": "estrogen_dominance",
+          "trigger_marker": ["estradiol", "progesterone"],
+          "condition": "estradiol:progesterone ratio > 100 (luteal phase)",
+          "ratio_threshold": 100,
+          "unit": "ratio (pg/mL : ng/mL)",
+          "action": "FLAG_PROGESTERONE_SUPPORT",
+          "sex": "female",
+          "recommended_ingredients": ["vitex", "dim", "calcium_d_glucarate"],
+          "rationale": "High E2:P4 ratio in luteal phase suggests estrogen dominance"
+        }
+      ]
+    }
+  },
+  "ranges": [
+    {
+      "marker_code": "ferritin",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "male",
+      "canonical_unit": "ng/mL",
+      "genomax_optimal": {"low": 50, "high": 200},
+      "lab_reference": {"low": 30, "high": 400},
+      "critical": {"low": 12, "high": 500},
+      "decision_limits": {"iron_block_threshold": 300}
+    },
+    {
+      "marker_code": "ferritin",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "female",
+      "canonical_unit": "ng/mL",
+      "genomax_optimal": {"low": 30, "high": 150},
+      "lab_reference": {"low": 12, "high": 150},
+      "critical": {"low": 12, "high": 300},
+      "decision_limits": {"iron_block_threshold": 200}
+    },
+    {
+      "marker_code": "vitamin_d_25oh",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "ng/mL",
+      "genomax_optimal": {"low": 40, "high": 70},
+      "lab_reference": {"low": 30, "high": 100},
+      "critical": {"low": 10, "high": 100},
+      "decision_limits": {"deficiency_threshold": 20, "insufficiency_threshold": 30}
+    },
+    {
+      "marker_code": "calcium_serum",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "mg/dL",
+      "genomax_optimal": {"low": 9.0, "high": 10.0},
+      "lab_reference": {"low": 8.6, "high": 10.2},
+      "critical": {"low": 7.0, "high": 11.5},
+      "decision_limits": {"vitamin_d_caution_threshold": 10.5}
+    },
+    {
+      "marker_code": "hs_crp",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "mg/L",
+      "genomax_optimal": {"low": 0, "high": 1.0},
+      "lab_reference": {"low": 0, "high": 3.0},
+      "critical": {"low": null, "high": 10.0},
+      "decision_limits": {"acute_inflammation_threshold": 3.0}
+    },
+    {
+      "marker_code": "fasting_glucose",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "mg/dL",
+      "genomax_optimal": {"low": 70, "high": 90},
+      "lab_reference": {"low": 65, "high": 99},
+      "critical": {"low": 55, "high": 200},
+      "decision_limits": {"prediabetic_threshold": 100}
+    },
+    {
+      "marker_code": "hba1c",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "%",
+      "genomax_optimal": {"low": 4.5, "high": 5.3},
+      "lab_reference": {"low": 4.0, "high": 5.6},
+      "critical": {"low": null, "high": 9.0},
+      "decision_limits": {"prediabetic_threshold": 5.7}
+    },
+    {
+      "marker_code": "creatinine",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "male",
+      "canonical_unit": "mg/dL",
+      "genomax_optimal": {"low": 0.8, "high": 1.2},
+      "lab_reference": {"low": 0.7, "high": 1.3},
+      "critical": {"low": 0.4, "high": 2.5},
+      "decision_limits": {"renal_caution_threshold": 1.3}
+    },
+    {
+      "marker_code": "creatinine",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "female",
+      "canonical_unit": "mg/dL",
+      "genomax_optimal": {"low": 0.6, "high": 1.0},
+      "lab_reference": {"low": 0.5, "high": 1.1},
+      "critical": {"low": 0.3, "high": 2.0},
+      "decision_limits": {"renal_caution_threshold": 1.1}
+    },
+    {
+      "marker_code": "egfr",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "mL/min/1.73m2",
+      "genomax_optimal": {"low": 90, "high": null},
+      "lab_reference": {"low": 60, "high": null},
+      "critical": {"low": 15, "high": null},
+      "decision_limits": {"renal_caution_threshold": 60}
+    },
+    {
+      "marker_code": "alt",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "male",
+      "canonical_unit": "U/L",
+      "genomax_optimal": {"low": 7, "high": 35},
+      "lab_reference": {"low": 7, "high": 56},
+      "critical": {"low": null, "high": 200},
+      "decision_limits": {"hepatic_caution_threshold": 50}
+    },
+    {
+      "marker_code": "alt",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "female",
+      "canonical_unit": "U/L",
+      "genomax_optimal": {"low": 7, "high": 30},
+      "lab_reference": {"low": 7, "high": 45},
+      "critical": {"low": null, "high": 150},
+      "decision_limits": {"hepatic_caution_threshold": 40}
+    },
+    {
+      "marker_code": "ast",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "male",
+      "canonical_unit": "U/L",
+      "genomax_optimal": {"low": 10, "high": 35},
+      "lab_reference": {"low": 10, "high": 40},
+      "critical": {"low": null, "high": 200},
+      "decision_limits": {"hepatic_caution_threshold": 50}
+    },
+    {
+      "marker_code": "ast",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "female",
+      "canonical_unit": "U/L",
+      "genomax_optimal": {"low": 10, "high": 30},
+      "lab_reference": {"low": 10, "high": 32},
+      "critical": {"low": null, "high": 150},
+      "decision_limits": {"hepatic_caution_threshold": 40}
+    },
+    {
+      "marker_code": "magnesium_serum",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "mg/dL",
+      "genomax_optimal": {"low": 2.0, "high": 2.5},
+      "lab_reference": {"low": 1.7, "high": 2.4},
+      "critical": {"low": 1.2, "high": 3.5},
+      "decision_limits": {"deficiency_threshold": 1.8}
+    },
+    {
+      "marker_code": "hemoglobin",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "male",
+      "canonical_unit": "g/dL",
+      "genomax_optimal": {"low": 14.5, "high": 17.0},
+      "lab_reference": {"low": 13.5, "high": 17.5},
+      "critical": {"low": 10.0, "high": 20.0},
+      "decision_limits": {"anemia_threshold": 13.0}
+    },
+    {
+      "marker_code": "hemoglobin",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "female",
+      "canonical_unit": "g/dL",
+      "genomax_optimal": {"low": 12.5, "high": 15.0},
+      "lab_reference": {"low": 12.0, "high": 15.5},
+      "critical": {"low": 8.0, "high": 18.0},
+      "decision_limits": {"anemia_threshold": 11.0}
+    },
+    {
+      "marker_code": "total_testosterone",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "male",
+      "canonical_unit": "ng/dL",
+      "genomax_optimal": {"low": 500, "high": 900},
+      "lab_reference": {"low": 264, "high": 916},
+      "critical": {"low": 200, "high": 1200},
+      "decision_limits": {"low_t_threshold": 300}
+    },
+    {
+      "marker_code": "potassium",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "mEq/L",
+      "genomax_optimal": {"low": 4.0, "high": 4.8},
+      "lab_reference": {"low": 3.5, "high": 5.0},
+      "critical": {"low": 3.0, "high": 6.0},
+      "decision_limits": {"block_threshold": 5.0, "support_threshold": 3.5}
+    },
+    {
+      "marker_code": "tsh",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "mIU/L",
+      "genomax_optimal": {"low": 1.0, "high": 2.5},
+      "lab_reference": {"low": 0.4, "high": 4.5},
+      "critical": {"low": 0.1, "high": 10.0},
+      "decision_limits": {"iodine_block_threshold": 0.4, "support_threshold": 4.5}
+    },
+    {
+      "marker_code": "vitamin_b12",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "pg/mL",
+      "genomax_optimal": {"low": 500, "high": 1000},
+      "lab_reference": {"low": 200, "high": 900},
+      "critical": {"low": 150, "high": null},
+      "decision_limits": {"deficiency_threshold": 300}
+    },
+    {
+      "marker_code": "folate_serum",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "ng/mL",
+      "genomax_optimal": {"low": 10, "high": 25},
+      "lab_reference": {"low": 3, "high": 20},
+      "critical": {"low": 2, "high": null},
+      "decision_limits": {"deficiency_threshold": 3.0}
+    },
+    {
+      "marker_code": "homocysteine",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "µmol/L",
+      "genomax_optimal": {"low": 5, "high": 8},
+      "lab_reference": {"low": 4, "high": 15},
+      "critical": {"low": null, "high": 50},
+      "decision_limits": {"methylation_support_threshold": 10}
+    },
+    {
+      "marker_code": "uric_acid",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "male",
+      "canonical_unit": "mg/dL",
+      "genomax_optimal": {"low": 3.5, "high": 6.0},
+      "lab_reference": {"low": 3.5, "high": 7.2},
+      "critical": {"low": null, "high": 12.0},
+      "decision_limits": {"purine_caution_threshold": 7.0}
+    },
+    {
+      "marker_code": "uric_acid",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "female",
+      "canonical_unit": "mg/dL",
+      "genomax_optimal": {"low": 2.5, "high": 5.0},
+      "lab_reference": {"low": 2.5, "high": 6.2},
+      "critical": {"low": null, "high": 10.0},
+      "decision_limits": {"purine_caution_threshold": 6.0}
+    },
+    {
+      "marker_code": "platelet_count",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "x10^3/µL",
+      "genomax_optimal": {"low": 175, "high": 350},
+      "lab_reference": {"low": 150, "high": 400},
+      "critical": {"low": 50, "high": 600},
+      "decision_limits": {"blood_thinning_caution_threshold": 100}
+    },
+    {
+      "marker_code": "omega3_index",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "%",
+      "genomax_optimal": {"low": 8, "high": 12},
+      "lab_reference": {"low": 4, "high": null},
+      "critical": {"low": null, "high": null},
+      "decision_limits": {"deficiency_threshold": 4.0, "optimal_threshold": 8.0}
+    },
+    {
+      "marker_code": "zinc_serum",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "µg/dL",
+      "genomax_optimal": {"low": 80, "high": 120},
+      "lab_reference": {"low": 60, "high": 120},
+      "critical": {"low": 40, "high": 200},
+      "decision_limits": {"deficiency_threshold": 60}
+    },
+    {
+      "marker_code": "copper_serum",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "µg/dL",
+      "genomax_optimal": {"low": 80, "high": 120},
+      "lab_reference": {"low": 70, "high": 140},
+      "critical": {"low": 50, "high": 200},
+      "decision_limits": {"deficiency_threshold": 70}
+    },
+    {
+      "marker_code": "fasting_insulin",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "µIU/mL",
+      "genomax_optimal": {"low": 2, "high": 6},
+      "lab_reference": {"low": 2, "high": 25},
+      "critical": {"low": null, "high": 50},
+      "decision_limits": {"insulin_resistance_threshold": 10}
+    },
+    {
+      "marker_code": "triglycerides",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "mg/dL",
+      "genomax_optimal": {"low": 50, "high": 100},
+      "lab_reference": {"low": 0, "high": 150},
+      "critical": {"low": null, "high": 1000},
+      "decision_limits": {"fish_oil_caution_threshold": 500}
+    },
+    {
+      "marker_code": "cortisol_am",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "µg/dL",
+      "genomax_optimal": {"low": 10, "high": 18},
+      "lab_reference": {"low": 6, "high": 23},
+      "critical": {"low": 3, "high": 30},
+      "decision_limits": {"low_threshold": 6, "high_threshold": 25}
+    },
+    {
+      "marker_code": "dhea_s",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "male",
+      "canonical_unit": "µg/dL",
+      "genomax_optimal": {"low": 250, "high": 500},
+      "lab_reference": {"low": 80, "high": 560},
+      "critical": {"low": 50, "high": null},
+      "decision_limits": {"low_threshold": 150}
+    },
+    {
+      "marker_code": "dhea_s",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "female",
+      "canonical_unit": "µg/dL",
+      "genomax_optimal": {"low": 150, "high": 350},
+      "lab_reference": {"low": 35, "high": 430},
+      "critical": {"low": 30, "high": null},
+      "decision_limits": {"low_threshold": 100}
+    },
+    {
+      "marker_code": "estradiol",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "male",
+      "canonical_unit": "pg/mL",
+      "genomax_optimal": {"low": 20, "high": 40},
+      "lab_reference": {"low": 10, "high": 50},
+      "critical": {"low": null, "high": 80},
+      "decision_limits": {"elevated_threshold": 50}
+    },
+    {
+      "marker_code": "estradiol",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "female",
+      "canonical_unit": "pg/mL",
+      "phase": "luteal",
+      "genomax_optimal": {"low": 50, "high": 200},
+      "lab_reference": {"low": 50, "high": 300},
+      "critical": {"low": null, "high": null},
+      "notes": "Varies by menstrual phase"
+    },
+    {
+      "marker_code": "progesterone",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "female",
+      "canonical_unit": "ng/mL",
+      "phase": "luteal",
+      "genomax_optimal": {"low": 10, "high": 25},
+      "lab_reference": {"low": 2, "high": 25},
+      "critical": {"low": 1, "high": null},
+      "decision_limits": {"low_threshold": 5}
+    },
+    {
+      "marker_code": "free_t3",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "pg/mL",
+      "genomax_optimal": {"low": 3.0, "high": 4.0},
+      "lab_reference": {"low": 2.3, "high": 4.2},
+      "critical": {"low": 1.5, "high": 6.0},
+      "decision_limits": {"conversion_threshold": 2.3}
+    },
+    {
+      "marker_code": "free_t4",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "ng/dL",
+      "genomax_optimal": {"low": 1.0, "high": 1.5},
+      "lab_reference": {"low": 0.8, "high": 1.8},
+      "critical": {"low": 0.5, "high": 3.0},
+      "decision_limits": {}
+    },
+    {
+      "marker_code": "shbg",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "male",
+      "canonical_unit": "nmol/L",
+      "genomax_optimal": {"low": 20, "high": 50},
+      "lab_reference": {"low": 10, "high": 57},
+      "critical": {"low": null, "high": 100},
+      "decision_limits": {}
+    },
+    {
+      "marker_code": "shbg",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "female",
+      "canonical_unit": "nmol/L",
+      "genomax_optimal": {"low": 40, "high": 120},
+      "lab_reference": {"low": 18, "high": 144},
+      "critical": {"low": null, "high": 200},
+      "decision_limits": {}
+    },
+    {
+      "marker_code": "ldl_cholesterol",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "mg/dL",
+      "genomax_optimal": {"low": 50, "high": 100},
+      "lab_reference": {"low": 0, "high": 130},
+      "critical": {"low": null, "high": 190},
+      "decision_limits": {"elevated_threshold": 130}
+    },
+    {
+      "marker_code": "hdl_cholesterol",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "male",
+      "canonical_unit": "mg/dL",
+      "genomax_optimal": {"low": 50, "high": 90},
+      "lab_reference": {"low": 40, "high": null},
+      "critical": {"low": 30, "high": null},
+      "decision_limits": {"low_threshold": 40}
+    },
+    {
+      "marker_code": "hdl_cholesterol",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "female",
+      "canonical_unit": "mg/dL",
+      "genomax_optimal": {"low": 60, "high": 100},
+      "lab_reference": {"low": 50, "high": null},
+      "critical": {"low": 35, "high": null},
+      "decision_limits": {"low_threshold": 50}
+    },
+    {
+      "marker_code": "apolipoprotein_b",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "mg/dL",
+      "genomax_optimal": {"low": 40, "high": 70},
+      "lab_reference": {"low": 40, "high": 100},
+      "critical": {"low": null, "high": 150},
+      "decision_limits": {"elevated_threshold": 100}
+    },
+    {
+      "marker_code": "lp_a",
+      "lab_profile": "GLOBAL_CONSERVATIVE",
+      "sex": "both",
+      "canonical_unit": "nmol/L",
+      "genomax_optimal": {"low": 0, "high": 30},
+      "lab_reference": {"low": 0, "high": 75},
+      "critical": {"low": null, "high": 200},
+      "decision_limits": {"elevated_threshold": 75},
+      "notes": "Genetically determined. Currently no approved treatments to lower Lp(a)."
+    }
+  ]
+}
