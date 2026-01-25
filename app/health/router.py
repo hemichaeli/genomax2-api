@@ -34,11 +34,18 @@ def deployment_health():
         loader = get_loader()
         engine = get_engine()
         
+        # Count total gates across all tiers
+        safety_gates = loader.get_safety_gates()
+        total_gates = 0
+        for tier_key, tier_data in safety_gates.items():
+            if isinstance(tier_data, dict) and "gates" in tier_data:
+                total_gates += len(tier_data["gates"])
+        
         status["components"]["bloodwork_engine"] = {
             "status": "healthy",
             "version": bw_version,
             "markers": len(loader.allowed_marker_codes),
-            "safety_gates": len(loader.get_safety_gates()),
+            "safety_gates": total_gates,
             "ruleset_version": loader.ruleset_version
         }
     except Exception as e:
@@ -160,12 +167,17 @@ def bloodwork_v2_health():
         loader = get_loader()
         engine = get_engine()
         
-        # Get gate counts by tier - FIX: iterate over .items() not just dict
-        gates = loader.get_safety_gates()
+        # Get gate counts by tier - safety_gates is nested by tier
+        # Structure: {"tier1_safety": {"description": ..., "gates": [...]}, ...}
+        safety_gates = loader.get_safety_gates()
         tier_counts = {}
-        for gate_id, gate in gates.items():  # Use .items() to get key-value pairs
-            tier = gate.get('tier', 1)
-            tier_counts[f"tier_{tier}"] = tier_counts.get(f"tier_{tier}", 0) + 1
+        total_gates = 0
+        
+        for tier_key, tier_data in safety_gates.items():
+            if isinstance(tier_data, dict) and "gates" in tier_data:
+                gate_count = len(tier_data["gates"])
+                tier_counts[tier_key] = gate_count
+                total_gates += gate_count
         
         # Test marker processing
         test_result = engine.process_markers(
@@ -182,7 +194,7 @@ def bloodwork_v2_health():
                 "sample": list(loader.allowed_marker_codes)[:10]
             },
             "safety_gates": {
-                "total": len(gates),
+                "total": total_gates,
                 "by_tier": tier_counts
             },
             "test_processing": {
