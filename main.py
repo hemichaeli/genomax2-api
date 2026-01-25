@@ -1,6 +1,13 @@
 """
-GenoMAX2 API Server Entry Point v3.27.0
-Launch v1 Enforcement with Pairing QA and Design Export
+GenoMAX2 API Server Entry Point v3.28.0
+Bloodwork Engine v2.0 with Auto-Migration
+
+v3.28.0:
+- Bloodwork Engine upgraded to v2.0 (40 markers, 31 safety gates)
+- Auto-migration runner on startup
+- OCR parser service for blood test uploads
+- Lab adapter interface for API integrations
+- Safety routing service for ingredient filtering
 
 v3.27.0:
 - Add Launch v1 enforcement router
@@ -14,15 +21,49 @@ Use this file for Railway deployment:
   uvicorn main:app --host 0.0.0.0 --port $PORT
 """
 
+import os
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# ===== RUN MIGRATIONS ON STARTUP =====
+def run_startup_migrations():
+    """Run pending database migrations on startup."""
+    try:
+        from scripts.run_migrations import run_pending_migrations
+        logger.info("🔄 Running startup migrations...")
+        result = run_pending_migrations()
+        if result['success']:
+            logger.info(f"✅ Migrations complete: {result['executed']} executed, {result['skipped']} skipped")
+        else:
+            logger.error(f"❌ Migration failed: {result['errors']}")
+        return result
+    except ImportError as e:
+        logger.warning(f"⚠️ Migration runner not available: {e}")
+        return {'success': True, 'executed': 0, 'skipped': 0}
+    except Exception as e:
+        logger.error(f"❌ Migration error: {e}")
+        return {'success': False, 'errors': [str(e)]}
+
+# Run migrations before importing app (ensures schema is ready)
+if os.environ.get('RUN_MIGRATIONS', 'true').lower() == 'true':
+    run_startup_migrations()
+
 from api_server import app, get_db, now_iso
 from app.brain.painpoints_data import PAINPOINTS_DICTIONARY, LIFESTYLE_SCHEMA
 import json
 
-# ===== BLOODWORK ENGINE V1 =====
+# ===== BLOODWORK ENGINE V2 =====
 try:
     from bloodwork_engine.api import register_bloodwork_endpoints
     register_bloodwork_endpoints(app)
-    print("✅ Bloodwork Engine v1 endpoints registered successfully")
+    from bloodwork_engine import __version__ as bw_version
+    print(f"✅ Bloodwork Engine v{bw_version} endpoints registered successfully")
 except Exception as e:
     print(f"❌ ERROR loading Bloodwork Engine: {type(e).__name__}: {e}")
     import traceback
