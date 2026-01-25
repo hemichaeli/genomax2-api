@@ -1,12 +1,12 @@
 """
-GenoMAX² Bloodwork Engine v1.0
+GenoMAX² Bloodwork Engine v2.0
 ==============================
 Safety and routing layer for biomarker normalization.
 
 This module:
 - Normalizes biomarkers to canonical units
 - Flags out-of-range or missing data
-- Evaluates safety gates based on decision limits
+- Evaluates safety gates based on decision limits (31 gates across 3 tiers)
 - Emits RoutingConstraints
 
 This module MUST NOT:
@@ -14,13 +14,17 @@ This module MUST NOT:
 - Generate recommendations
 - Infer missing values
 - Expand biomarker scope beyond allowed markers
+
+CHANGELOG:
+- v2.0: Dynamic safety gate loading from reference_ranges_v2_0.json (31 gates)
+- v1.0: Initial release with 5 hardcoded safety gates
 """
 
 import json
 import logging
 import hashlib
 from pathlib import Path
-from typing import Optional, Dict, List, Any, Tuple
+from typing import Optional, Dict, List, Any, Tuple, Union
 from dataclasses import dataclass, field, asdict
 from enum import Enum
 from datetime import datetime
@@ -45,6 +49,7 @@ class MarkerStatus(str, Enum):
 class RangeStatus(str, Enum):
     """Status of range evaluation."""
     IN_RANGE = "IN_RANGE"
+    OPTIMAL = "OPTIMAL"
     LOW = "LOW"
     HIGH = "HIGH"
     CRITICAL_LOW = "CRITICAL_LOW"
@@ -65,6 +70,7 @@ class ProcessedMarker:
     status: MarkerStatus
     range_status: RangeStatus
     reference_range: Optional[Dict[str, float]] = None
+    genomax_optimal: Optional[Dict[str, float]] = None
     decision_limits: Optional[Dict[str, float]] = None
     lab_profile_used: Optional[str] = None
     fallback_used: bool = False
@@ -72,19 +78,28 @@ class ProcessedMarker:
     conversion_multiplier: Optional[float] = None
     flags: List[str] = field(default_factory=list)
     log_entries: List[str] = field(default_factory=list)
+    is_genetic_marker: bool = False
+    is_computed: bool = False
 
 
 @dataclass
 class SafetyGate:
     """A triggered safety gate."""
     gate_id: str
+    name: str
+    tier: str  # tier1_safety, tier2_optimization, tier3_genetic_hormonal
     description: str
-    trigger_marker: str
+    trigger_marker: Union[str, List[str]]
     trigger_value: float
     threshold: float
+    action: str
     routing_constraint: str
+    blocked_ingredients: List[str] = field(default_factory=list)
+    caution_ingredients: List[str] = field(default_factory=list)
+    recommended_ingredients: List[str] = field(default_factory=list)
     exception_active: bool = False
     exception_reason: Optional[str] = None
+    sex_specific: Optional[str] = None
 
 
 @dataclass
@@ -125,6 +140,7 @@ class BloodworkDataLoader:
             self._reference_ranges = None
             self._marker_lookup = {}  # alias -> canonical code
             self._conversion_lookup = {}  # (code, from_unit, to_unit) -> multiplier
+            self._safety_gates_config = {}  # Loaded gate definitions
             self._load_data()
             BloodworkDataLoader._loaded = True
     
@@ -148,22 +164,40 @@ class BloodworkDataLoader:
             logger.error(f"Marker registry not found: {registry_path}")
             self._marker_registry = {"markers": [], "allowed_marker_codes": [], "lab_profiles": []}
         
-        # Load reference ranges
-        ranges_path = data_dir / "reference_ranges_v1_0.json"
+        # Load reference ranges - v2.0 with comprehensive safety gates
+        ranges_path = data_dir / "reference_ranges_v2_0.json"
+        if not ranges_path.exists():
+            # Fallback to v1.0 if v2.0 doesn't exist
+            ranges_path = data_dir / "reference_ranges_v1_0.json"
+            logger.warning(f"v2.0 ranges not found, falling back to v1.0")
+        
         if ranges_path.exists():
             with open(ranges_path, "r", encoding="utf-8") as f:
                 self._reference_ranges = json.load(f)
             range_count = len(self._reference_ranges.get("ranges", []))
-            logger.info(f"Loaded reference ranges v{self._reference_ranges.get('version', '?')} ({range_count} ranges)")
+            gate_count = self._count_safety_gates()
+            logger.info(f"Loaded reference ranges v{self._reference_ranges.get('version', '?')} ({range_count} ranges, {gate_count} safety gates)")
         else:
-            logger.warning(f"Reference ranges not found: {ranges_path}")
-            self._reference_ranges = {"ranges": [], "lab_profiles": [], "policy": {}}
+            logger.warning(f"Reference ranges not found")
+            self._reference_ranges = {"ranges": [], "lab_profiles": [], "policy": {}, "safety_gates": {}}
+        
+        # Load safety gates configuration
+        self._safety_gates_config = self._reference_ranges.get("safety_gates", {})
         
         # Build lookup indexes
         self._build_indexes()
         
         # Validate ranges against registry
         self._validate_ranges()
+    
+    def _count_safety_gates(self) -> int:
+        """Count total safety gates across all tiers."""
+        gates = self._reference_ranges.get("safety_gates", {})
+        count = 0
+        for tier_name, tier_data in gates.items():
+            if isinstance(tier_data, dict) and "gates" in tier_data:
+                count += len(tier_data["gates"])
+        return count
     
     def _build_indexes(self):
         """Build fast lookup indexes from registry data."""
@@ -235,7 +269,34 @@ class BloodworkDataLoader:
     
     def get_safety_gates(self) -> Dict:
         """Get safety gate definitions."""
-        return self._reference_ranges.get("safety_gates", {})
+        return self._safety_gates_config
+    
+    def get_safety_gate_summary(self) -> Dict:
+        """Get summary of safety gates by tier."""
+        summary = {
+            "total_gates": 0,
+            "tier1_safety": 0,
+            "tier2_optimization": 0,
+            "tier3_genetic_hormonal": 0,
+            "gates_by_tier": {}
+        }
+        
+        for tier_name, tier_data in self._safety_gates_config.items():
+            if isinstance(tier_data, dict) and "gates" in tier_data:
+                gates = tier_data["gates"]
+                gate_count = len(gates)
+                summary["total_gates"] += gate_count
+                summary[tier_name] = gate_count
+                summary["gates_by_tier"][tier_name] = {
+                    g["gate_id"]: {
+                        "name": g.get("name"),
+                        "trigger_marker": g.get("trigger_marker"),
+                        "action": g.get("action")
+                    }
+                    for g in gates
+                }
+        
+        return summary
     
     def get_marker_definition(self, code_or_alias: str) -> Optional[Dict]:
         """Get marker definition by code or alias."""
@@ -330,7 +391,7 @@ class BloodworkEngine:
     - Normalize markers to canonical codes and units
     - Apply unit conversions
     - Lookup reference ranges
-    - Evaluate safety gates based on decision limits
+    - Evaluate safety gates based on decision limits (31 gates)
     - Emit routing constraints and flags
     """
     
@@ -388,8 +449,8 @@ class BloodworkEngine:
             if result.range_status in [RangeStatus.CRITICAL_LOW, RangeStatus.CRITICAL_HIGH]:
                 routing_constraints.append(f"CRITICAL:{result.canonical_code}:{result.range_status.value}")
         
-        # Evaluate cross-marker safety gates
-        safety_gates = self._evaluate_safety_gates(processed, sex)
+        # Evaluate cross-marker safety gates (all 31 gates from v2.0)
+        safety_gates = self._evaluate_safety_gates(processed, sex, age)
         
         # Add safety gate routing constraints
         for gate in safety_gates:
@@ -405,9 +466,11 @@ class BloodworkEngine:
             "require_review": sum(1 for p in processed if p.range_status == RangeStatus.REQUIRE_REVIEW),
             "conversions_applied": sum(1 for p in processed if p.conversion_applied),
             "in_range": sum(1 for p in processed if p.range_status == RangeStatus.IN_RANGE),
+            "optimal": sum(1 for p in processed if p.range_status == RangeStatus.OPTIMAL),
             "out_of_range": sum(1 for p in processed if p.range_status in [RangeStatus.LOW, RangeStatus.HIGH]),
             "critical": sum(1 for p in processed if p.range_status in [RangeStatus.CRITICAL_LOW, RangeStatus.CRITICAL_HIGH]),
-            "safety_gates_triggered": len([g for g in safety_gates if not g.exception_active])
+            "genetic_markers": sum(1 for p in processed if p.is_genetic_marker),
+            "computed_markers": sum(1 for p in processed if p.is_computed)
         }
         
         # Create result (without output_hash initially)
@@ -466,6 +529,8 @@ class BloodworkEngine:
         marker_def = self.loader.get_marker_definition(canonical_code)
         canonical_unit = marker_def["canonical_unit"]
         allowed_units = [u.lower() for u in marker_def.get("allowed_units", [])]
+        is_genetic = marker_def.get("is_genetic", False)
+        is_computed = marker_def.get("is_computed", False)
         
         # Step 3: Validate and convert unit
         original_value = float(value) if value is not None else 0.0
@@ -536,29 +601,43 @@ class BloodworkEngine:
                 status=MarkerStatus.VALID if not conversion_applied else MarkerStatus.CONVERSION_APPLIED,
                 range_status=RangeStatus.MISSING_RANGE,
                 reference_range=None,
+                genomax_optimal=None,
                 decision_limits=None,
                 lab_profile_used=profile_used,
                 fallback_used=fallback_used,
                 conversion_applied=conversion_applied,
                 conversion_multiplier=conversion_multiplier,
                 flags=flags,
-                log_entries=log_entries
+                log_entries=log_entries,
+                is_genetic_marker=is_genetic,
+                is_computed=is_computed
             )
         
-        # Step 7: Evaluate value against range
-        range_status = self._evaluate_range(canonical_value, range_def)
+        # Step 7: Evaluate value against range (v2.0 format with genomax_optimal)
+        range_status = self._evaluate_range_v2(canonical_value, range_def)
         
         # Step 8: Extract decision limits for safety gate evaluation
         decision_limits = range_def.get("decision_limits")
+        genomax_optimal = range_def.get("genomax_optimal")
+        lab_reference = range_def.get("lab_reference")
+        critical = range_def.get("critical")
+        
+        # Build reference range dict for compatibility
+        reference_range = {}
+        if lab_reference:
+            reference_range["low"] = lab_reference.get("low")
+            reference_range["high"] = lab_reference.get("high")
+        if critical:
+            reference_range["critical_low"] = critical.get("low")
+            reference_range["critical_high"] = critical.get("high")
         
         # Log decision limit breaches
         if decision_limits:
             for limit_name, limit_value in decision_limits.items():
                 if limit_value is not None:
-                    if "threshold" in limit_name.lower() or "flag" in limit_name.lower():
-                        if canonical_value > limit_value:
-                            log_entries.append(f"DECISION_LIMIT: {limit_name} breached ({canonical_value} > {limit_value})")
-                            flags.append(f"LIMIT_BREACH:{limit_name}")
+                    if canonical_value > limit_value:
+                        log_entries.append(f"DECISION_LIMIT: {limit_name} breached ({canonical_value} > {limit_value})")
+                        flags.append(f"LIMIT_BREACH:{limit_name}")
         
         return ProcessedMarker(
             original_code=code,
@@ -569,45 +648,68 @@ class BloodworkEngine:
             canonical_unit=canonical_unit,
             status=MarkerStatus.VALID if not conversion_applied else MarkerStatus.CONVERSION_APPLIED,
             range_status=range_status,
-            reference_range={
-                "low": range_def.get("low"),
-                "high": range_def.get("high"),
-                "critical_low": range_def.get("critical_low"),
-                "critical_high": range_def.get("critical_high")
-            },
+            reference_range=reference_range if reference_range else None,
+            genomax_optimal=genomax_optimal,
             decision_limits=decision_limits,
             lab_profile_used=profile_used,
             fallback_used=fallback_used,
             conversion_applied=conversion_applied,
             conversion_multiplier=conversion_multiplier,
             flags=flags,
-            log_entries=log_entries
+            log_entries=log_entries,
+            is_genetic_marker=is_genetic,
+            is_computed=is_computed
         )
     
-    def _evaluate_range(self, value: float, range_def: Dict) -> RangeStatus:
-        """Evaluate a value against a reference range."""
-        critical_low = range_def.get("critical_low")
-        critical_high = range_def.get("critical_high")
-        low = range_def.get("low")
-        high = range_def.get("high")
+    def _evaluate_range_v2(self, value: float, range_def: Dict) -> RangeStatus:
+        """Evaluate a value against v2.0 reference range format."""
+        # Get critical limits
+        critical = range_def.get("critical", {})
+        critical_low = critical.get("low") if isinstance(critical, dict) else None
+        critical_high = critical.get("high") if isinstance(critical, dict) else None
         
+        # Get lab reference (normal range)
+        lab_ref = range_def.get("lab_reference", {})
+        low = lab_ref.get("low") if isinstance(lab_ref, dict) else None
+        high = lab_ref.get("high") if isinstance(lab_ref, dict) else None
+        
+        # Get genomax optimal
+        optimal = range_def.get("genomax_optimal", {})
+        optimal_low = optimal.get("low") if isinstance(optimal, dict) else None
+        optimal_high = optimal.get("high") if isinstance(optimal, dict) else None
+        
+        # Check critical first
         if critical_low is not None and value < critical_low:
             return RangeStatus.CRITICAL_LOW
         if critical_high is not None and value > critical_high:
             return RangeStatus.CRITICAL_HIGH
+        
+        # Check lab reference (normal range)
         if low is not None and value < low:
             return RangeStatus.LOW
         if high is not None and value > high:
             return RangeStatus.HIGH
         
+        # Check optimal range
+        if optimal_low is not None and optimal_high is not None:
+            if optimal_low <= value <= optimal_high:
+                return RangeStatus.OPTIMAL
+        
         return RangeStatus.IN_RANGE
     
-    def _evaluate_safety_gates(self, processed_markers: List[ProcessedMarker], sex: Optional[str]) -> List[SafetyGate]:
+    def _evaluate_safety_gates(
+        self, 
+        processed_markers: List[ProcessedMarker], 
+        sex: Optional[str],
+        age: Optional[int] = None
+    ) -> List[SafetyGate]:
         """
-        Evaluate cross-marker safety gates.
+        Evaluate all safety gates dynamically from v2.0 configuration.
         
-        Safety gates are triggered based on decision_limits and may have exceptions
-        based on other markers (e.g., iron block exception when CRP indicates acute inflammation).
+        Loads 31 gates across 3 tiers:
+        - tier1_safety: Hard safety gates (14 gates)
+        - tier2_optimization: Optimization flags (6 gates)
+        - tier3_genetic_hormonal: Advanced routing (11 gates)
         """
         safety_gates = []
         
@@ -622,131 +724,167 @@ class BloodworkEngine:
         
         # Get CRP value for exception checking
         crp_value = marker_values.get("hs_crp")
-        crp_limits = marker_decision_limits.get("hs_crp", {})
-        acute_inflammation_threshold = crp_limits.get("acute_inflammation_threshold", 3.0)
-        crp_acute = crp_value is not None and crp_value > acute_inflammation_threshold
+        crp_acute = crp_value is not None and crp_value > 3.0
         
-        # 1. IRON BLOCK GATE
-        ferritin_value = marker_values.get("ferritin")
-        ferritin_limits = marker_decision_limits.get("ferritin", {})
-        iron_block_threshold = ferritin_limits.get("iron_block_threshold")
+        # Get safety gates configuration
+        gates_config = self.loader.get_safety_gates()
         
-        if ferritin_value is not None and iron_block_threshold is not None:
-            if ferritin_value > iron_block_threshold:
-                safety_gates.append(SafetyGate(
-                    gate_id="iron_block",
-                    description="Block iron supplementation when ferritin is elevated",
-                    trigger_marker="ferritin",
-                    trigger_value=ferritin_value,
-                    threshold=iron_block_threshold,
-                    routing_constraint="BLOCK_IRON",
-                    exception_active=crp_acute,
-                    exception_reason="Acute inflammation detected (hs-CRP > threshold) - defer ferritin interpretation" if crp_acute else None
-                ))
-        
-        # 2. VITAMIN D CAUTION GATE
-        calcium_value = marker_values.get("calcium_serum")
-        calcium_limits = marker_decision_limits.get("calcium_serum", {})
-        vitamin_d_caution_threshold = calcium_limits.get("vitamin_d_caution_threshold")
-        
-        if calcium_value is not None and vitamin_d_caution_threshold is not None:
-            if calcium_value > vitamin_d_caution_threshold:
-                safety_gates.append(SafetyGate(
-                    gate_id="vitamin_d_caution",
-                    description="Caution on vitamin D when calcium is elevated",
-                    trigger_marker="calcium_serum",
-                    trigger_value=calcium_value,
-                    threshold=vitamin_d_caution_threshold,
-                    routing_constraint="CAUTION_VITAMIN_D"
-                ))
-        
-        # 3. HEPATIC CAUTION GATE (ALT or AST)
-        alt_value = marker_values.get("alt")
-        ast_value = marker_values.get("ast")
-        alt_limits = marker_decision_limits.get("alt", {})
-        ast_limits = marker_decision_limits.get("ast", {})
-        
-        alt_threshold = alt_limits.get("hepatic_caution_threshold")
-        ast_threshold = ast_limits.get("hepatic_caution_threshold")
-        
-        hepatic_triggered = False
-        hepatic_trigger_marker = None
-        hepatic_trigger_value = None
-        hepatic_trigger_threshold = None
-        
-        if alt_value is not None and alt_threshold is not None and alt_value > alt_threshold:
-            hepatic_triggered = True
-            hepatic_trigger_marker = "alt"
-            hepatic_trigger_value = alt_value
-            hepatic_trigger_threshold = alt_threshold
-        
-        if ast_value is not None and ast_threshold is not None and ast_value > ast_threshold:
-            if not hepatic_triggered or (ast_value > alt_value if alt_value else True):
-                hepatic_triggered = True
-                hepatic_trigger_marker = "ast"
-                hepatic_trigger_value = ast_value
-                hepatic_trigger_threshold = ast_threshold
-        
-        if hepatic_triggered:
-            safety_gates.append(SafetyGate(
-                gate_id="hepatic_caution",
-                description="Caution on hepatotoxic supplements when liver enzymes elevated",
-                trigger_marker=hepatic_trigger_marker,
-                trigger_value=hepatic_trigger_value,
-                threshold=hepatic_trigger_threshold,
-                routing_constraint="CAUTION_HEPATOTOXIC"
-            ))
-        
-        # 4. RENAL CAUTION GATE (eGFR or Creatinine)
-        egfr_value = marker_values.get("egfr")
-        creatinine_value = marker_values.get("creatinine")
-        egfr_limits = marker_decision_limits.get("egfr", {})
-        creatinine_limits = marker_decision_limits.get("creatinine", {})
-        
-        egfr_threshold = egfr_limits.get("renal_caution_threshold")
-        creatinine_threshold = creatinine_limits.get("renal_caution_threshold")
-        
-        renal_triggered = False
-        renal_trigger_marker = None
-        renal_trigger_value = None
-        renal_trigger_threshold = None
-        
-        # eGFR low (below threshold)
-        if egfr_value is not None and egfr_threshold is not None and egfr_value < egfr_threshold:
-            renal_triggered = True
-            renal_trigger_marker = "egfr"
-            renal_trigger_value = egfr_value
-            renal_trigger_threshold = egfr_threshold
-        
-        # Creatinine high (above threshold)
-        if creatinine_value is not None and creatinine_threshold is not None and creatinine_value > creatinine_threshold:
-            renal_triggered = True
-            renal_trigger_marker = "creatinine"
-            renal_trigger_value = creatinine_value
-            renal_trigger_threshold = creatinine_threshold
-        
-        if renal_triggered:
-            safety_gates.append(SafetyGate(
-                gate_id="renal_caution",
-                description="Caution on renally-cleared supplements when kidney function impaired",
-                trigger_marker=renal_trigger_marker,
-                trigger_value=renal_trigger_value,
-                threshold=renal_trigger_threshold,
-                routing_constraint="CAUTION_RENAL"
-            ))
-        
-        # 5. ACUTE INFLAMMATION FLAG
-        if crp_acute:
-            safety_gates.append(SafetyGate(
-                gate_id="acute_inflammation",
-                description="Flag acute inflammation - defer iron interpretation",
-                trigger_marker="hs_crp",
-                trigger_value=crp_value,
-                threshold=acute_inflammation_threshold,
-                routing_constraint="FLAG_ACUTE_INFLAMMATION"
-            ))
+        # Process each tier
+        for tier_name, tier_data in gates_config.items():
+            if not isinstance(tier_data, dict) or "gates" not in tier_data:
+                continue
+            
+            for gate_def in tier_data["gates"]:
+                triggered_gate = self._evaluate_single_gate(
+                    gate_def=gate_def,
+                    tier_name=tier_name,
+                    marker_values=marker_values,
+                    sex=sex,
+                    age=age,
+                    crp_acute=crp_acute
+                )
+                
+                if triggered_gate:
+                    safety_gates.append(triggered_gate)
         
         return safety_gates
+    
+    def _evaluate_single_gate(
+        self,
+        gate_def: Dict,
+        tier_name: str,
+        marker_values: Dict[str, float],
+        sex: Optional[str],
+        age: Optional[int],
+        crp_acute: bool
+    ) -> Optional[SafetyGate]:
+        """Evaluate a single safety gate definition."""
+        gate_id = gate_def.get("gate_id", "")
+        gate_name = gate_def.get("name", "")
+        trigger_marker = gate_def.get("trigger_marker")
+        condition = gate_def.get("condition", "")
+        action = gate_def.get("action", "")
+        
+        # Check sex-specific gates
+        gate_sex = gate_def.get("sex")
+        if gate_sex and sex and gate_sex != sex:
+            return None  # Skip sex-specific gate for wrong sex
+        
+        # Handle single marker triggers
+        if isinstance(trigger_marker, str):
+            value = marker_values.get(trigger_marker)
+            if value is None:
+                return None  # Marker not present
+            
+            # Get threshold (sex-specific or general)
+            threshold = None
+            if sex == "male" and "threshold_male" in gate_def:
+                threshold = gate_def["threshold_male"]
+            elif sex == "female" and "threshold_female" in gate_def:
+                threshold = gate_def["threshold_female"]
+            elif "threshold" in gate_def:
+                threshold = gate_def["threshold"]
+            
+            if threshold is None:
+                return None
+            
+            # Evaluate condition
+            triggered = False
+            if ">" in condition:
+                triggered = value > threshold
+            elif "<" in condition:
+                triggered = value < threshold
+            
+            if not triggered:
+                return None
+            
+            # Check for exceptions
+            exception_active = False
+            exception_reason = None
+            
+            # Iron block exception for acute inflammation
+            if gate_name == "iron_block" and crp_acute:
+                exception_active = True
+                exception_reason = "Acute inflammation detected (hs-CRP > 3.0) - defer ferritin interpretation"
+            
+            # Build routing constraint
+            routing_constraint = action
+            
+            return SafetyGate(
+                gate_id=gate_id,
+                name=gate_name,
+                tier=tier_name,
+                description=gate_def.get("rationale", ""),
+                trigger_marker=trigger_marker,
+                trigger_value=value,
+                threshold=threshold,
+                action=action,
+                routing_constraint=routing_constraint,
+                blocked_ingredients=gate_def.get("blocked_ingredients", []),
+                caution_ingredients=gate_def.get("caution_ingredients", []),
+                recommended_ingredients=gate_def.get("recommended_ingredients", []),
+                exception_active=exception_active,
+                exception_reason=exception_reason,
+                sex_specific=gate_sex
+            )
+        
+        # Handle multi-marker triggers (e.g., ["alt", "ast"])
+        elif isinstance(trigger_marker, list):
+            # For OR conditions (any marker triggers)
+            if " OR " in condition:
+                for marker in trigger_marker:
+                    value = marker_values.get(marker)
+                    if value is None:
+                        continue
+                    
+                    # Get threshold
+                    threshold = None
+                    threshold_key = f"threshold_{sex}" if sex else "threshold"
+                    if threshold_key in gate_def:
+                        threshold = gate_def[threshold_key]
+                    elif "threshold" in gate_def:
+                        threshold = gate_def["threshold"]
+                    
+                    # Check marker-specific thresholds
+                    if f"{marker}_threshold" in gate_def:
+                        threshold = gate_def[f"{marker}_threshold"]
+                    
+                    if threshold is None:
+                        continue
+                    
+                    triggered = False
+                    if ">" in condition:
+                        triggered = value > threshold
+                    elif "<" in condition:
+                        triggered = value < threshold
+                    
+                    if triggered:
+                        return SafetyGate(
+                            gate_id=gate_id,
+                            name=gate_name,
+                            tier=tier_name,
+                            description=gate_def.get("rationale", ""),
+                            trigger_marker=marker,
+                            trigger_value=value,
+                            threshold=threshold,
+                            action=action,
+                            routing_constraint=action,
+                            blocked_ingredients=gate_def.get("blocked_ingredients", []),
+                            caution_ingredients=gate_def.get("caution_ingredients", []),
+                            recommended_ingredients=gate_def.get("recommended_ingredients", []),
+                            sex_specific=gate_def.get("sex")
+                        )
+            
+            # For AND conditions (all markers must trigger)
+            elif " AND " in condition:
+                all_values = {m: marker_values.get(m) for m in trigger_marker}
+                if None in all_values.values():
+                    return None  # Not all markers present
+                
+                # Complex AND logic - simplified for now
+                # Would need more sophisticated parsing for real conditions
+        
+        return None
     
     def _compute_hash(self, data: Any) -> str:
         """Compute deterministic hash of input data."""
