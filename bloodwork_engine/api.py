@@ -121,7 +121,7 @@ def register_bloodwork_endpoints(app):
         from bloodwork_engine.api import register_bloodwork_endpoints
         register_bloodwork_endpoints(app)
     """
-    from bloodwork_engine.engine_v2 import get_engine, get_loader, BloodworkDataLoaderV2, GateTier, GateAction
+    from bloodwork_engine.engine_v2 import get_engine, get_loader, BloodworkDataLoader, GateTier, GateAction
     
     # ---------------------------------------------------------
     # GET /api/v1/bloodwork/lab-profiles
@@ -434,7 +434,7 @@ def register_bloodwork_endpoints(app):
                     name=cm.name,
                     value=cm.value,
                     formula=cm.formula,
-                    interpretation=cm.interpretation,
+                    interpretation=getattr(cm, 'interpretation', ''),
                     source_markers=cm.source_markers
                 ))
         
@@ -485,8 +485,8 @@ def register_bloodwork_endpoints(app):
                     trigger_value=g.trigger_value,
                     threshold=g.threshold,
                     routing_constraint=g.routing_constraint,
-                    gate_tier=getattr(g, 'gate_tier', GateTier.TIER1_SAFETY).value if hasattr(getattr(g, 'gate_tier', None), 'value') else "TIER1_SAFETY",
-                    gate_action=getattr(g, 'gate_action', GateAction.FLAG).value if hasattr(getattr(g, 'gate_action', None), 'value') else "FLAG",
+                    gate_tier=g.tier.value if hasattr(g.tier, 'value') else str(g.tier),
+                    gate_action=g.action.value if hasattr(g.action, 'value') else str(g.action),
                     exception_active=g.exception_active,
                     exception_reason=g.exception_reason,
                     blocked_ingredients=getattr(g, 'blocked_ingredients', [])
@@ -526,6 +526,9 @@ def register_bloodwork_endpoints(app):
         tier2_count = len([g for g in all_gates.values() if g.get("tier") == 2])
         tier3_count = len([g for g in all_gates.values() if g.get("tier") == 3])
         
+        # Get range count safely
+        range_count = len(ranges.get("ranges", []))
+        
         return {
             "engine_version": "2.0.0",
             "status": "operational",
@@ -542,9 +545,9 @@ def register_bloodwork_endpoints(app):
             },
             "reference_ranges": {
                 "version": ranges.get("version"),
-                "range_count": loader.range_count,
+                "range_count": range_count,
                 "loaded": True,
-                "ranges_active": loader.range_count > 0
+                "ranges_active": range_count > 0
             },
             "safety_gates": {
                 "total_defined": len(all_gates),
@@ -570,7 +573,7 @@ def register_bloodwork_endpoints(app):
                 "ranges_exists": ranges_path.exists(),
                 "ranges_size_bytes": ranges_path.stat().st_size if ranges_path.exists() else 0,
                 "cwd": os.getcwd(),
-                "singleton_loaded": BloodworkDataLoaderV2._loaded
+                "singleton_loaded": BloodworkDataLoader._loaded
             }
         }
     
@@ -584,17 +587,20 @@ def register_bloodwork_endpoints(app):
         Use this if data files were updated but singleton cache is stale.
         """
         # Reset the singleton
-        BloodworkDataLoaderV2.reset()
+        BloodworkDataLoader.reset()
         
         # Re-initialize
         loader = get_loader()
         all_gates = loader.get_safety_gates()
         
+        # Get range count safely
+        range_count = len(loader.reference_ranges.get("ranges", []))
+        
         return {
             "status": "reloaded",
             "engine_version": "2.0.0",
             "marker_count": len(loader.allowed_marker_codes),
-            "range_count": loader.range_count,
+            "range_count": range_count,
             "safety_gate_count": len(all_gates),
             "ruleset_version": loader.ruleset_version
         }
