@@ -1,7 +1,14 @@
 """
 GenoMAX² API Server
 Gender-Optimized Biological Operating System
-Version 3.28.0 - Bloodwork Engine v2.0
+Version 3.29.0 - Bloodwork Engine Integration
+
+v3.29.0:
+- orchestrate/v2 now supports bloodwork_input mode (raw markers)
+- Dual mode: bloodwork_input (recommended) or bloodwork_signal (legacy)
+- bloodwork_input sends markers to Bloodwork Engine for processing
+- STRICT MODE: Bloodwork Engine failures are hard aborts (503/502)
+- New models: MarkerInputModel, BloodworkInputModel
 
 v3.28.0:
 - Bloodwork Engine upgraded to v2.0 (40 markers, 31 safety gates)
@@ -80,7 +87,19 @@ from app.catalog.override import router as override_router
 # Telemetry Emitter imports (v3.17.0 - Issue #9 Stage 2)
 from app.telemetry import get_emitter, derive_run_summary, derive_events
 
-API_VERSION = "3.28.0"
+# Bloodwork Handoff imports (v3.29.0 - orchestrate/v2 bloodwork_input support)
+from app.brain.orchestrate_v2_bloodwork import (
+    BloodworkInputV2,
+    MarkerInput,
+    orchestrate_with_bloodwork_input,
+    build_bloodwork_error_response
+)
+from app.brain.bloodwork_handoff import (
+    BloodworkHandoffException,
+    BloodworkHandoffError
+)
+
+API_VERSION = "3.29.0"
 
 app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version=API_VERSION)
 
@@ -244,8 +263,31 @@ class BloodworkSignalV1(BaseModel):
         return v
 
 
+class MarkerInputModel(BaseModel):
+    """Single biomarker input for orchestrate/v2."""
+    code: str = Field(..., description="Marker code (e.g., 'ferritin', 'vitamin_d')")
+    value: float = Field(..., description="Numeric value")
+    unit: str = Field(..., description="Unit of measurement (e.g., 'ng/mL')")
+
+
+class BloodworkInputModel(BaseModel):
+    """Raw bloodwork input - sends markers to Bloodwork Engine."""
+    markers: List[MarkerInputModel] = Field(..., min_length=1, description="Array of biomarker readings")
+    lab_profile: str = Field(default="GLOBAL_CONSERVATIVE", description="Lab profile for reference ranges")
+    sex: Optional[str] = Field(default=None, description="Biological sex (male/female)")
+    age: Optional[int] = Field(default=None, ge=0, le=150, description="Age in years")
+
+
 class OrchestrateInputV2(BaseModel):
-    bloodwork_signal: BloodworkSignalV1
+    """
+    Orchestrate V2 request supporting two modes:
+    1. bloodwork_input (RECOMMENDED): Raw markers sent to Bloodwork Engine
+    2. bloodwork_signal (LEGACY): Pre-computed bloodwork signal
+    
+    If bloodwork_input is provided, it takes precedence.
+    """
+    bloodwork_signal: Optional[BloodworkSignalV1] = Field(default=None, description="Pre-computed bloodwork signal (legacy mode)")
+    bloodwork_input: Optional[BloodworkInputModel] = Field(default=None, description="Raw markers to send to Bloodwork Engine (recommended)")
     verify_hash: bool = True
     selected_goals: List[str] = Field(default_factory=list)
     assessment_context: Dict[str, Any] = Field(default_factory=dict)
@@ -256,7 +298,7 @@ class OrchestrateInputV2(BaseModel):
         forbidden_keys = {'markers', 'biomarkers', 'labs', 'lab_results', 'blood_values'}
         found = forbidden_keys.intersection(set(v.keys()))
         if found:
-            raise ValueError(f"Raw marker data detected: {found}. Use bloodwork_signal.")
+            raise ValueError(f"Raw marker data detected: {found}. Use bloodwork_signal or bloodwork_input.")
         return v
 
 
@@ -665,7 +707,7 @@ def version():
         "override_version": "excel_override_v1",
         "launch_v1_version": "launch_enforcement_v1",
         "contract_version": CONTRACT_VERSION,
-        "features": ["orchestrate", "orchestrate_v2", "compose", "route", "resolve", "supplier-gating", "catalog-governance", "routing-layer", "matching-layer", "explainability", "painpoints", "lifestyle-schema", "telemetry", "telemetry-instrumented", "intake-system", "safety-gate", "qa-audit", "excel-override", "launch-v1-enforcement", "bloodwork-engine-v2"]
+        "features": ["orchestrate", "orchestrate_v2", "orchestrate_v2_bloodwork_input", "compose", "route", "resolve", "supplier-gating", "catalog-governance", "routing-layer", "matching-layer", "explainability", "painpoints", "lifestyle-schema", "telemetry", "telemetry-instrumented", "intake-system", "safety-gate", "qa-audit", "excel-override", "launch-v1-enforcement", "bloodwork-engine-v2"]
     }
 
 
@@ -866,8 +908,127 @@ def brain_resolve(request: ResolveRequest):
 
 @app.post("/api/v1/brain/orchestrate/v2", response_model=OrchestrateOutputV2)
 async def brain_orchestrate_v2(request: OrchestrateInputV2) -> OrchestrateOutputV2:
-    signal = request.bloodwork_signal
+    """
+    Orchestrate V2 endpoint with dual mode support:
+    1. bloodwork_input (RECOMMENDED): Raw markers sent to Bloodwork Engine for processing
+    2. bloodwork_signal (LEGACY): Pre-computed BloodworkSignalV1
+    
+    If bloodwork_input is provided, it takes precedence.
+    """
     created_at = now_iso()
+    
+    # Validate at least one input mode is provided
+    if not request.bloodwork_input and not request.bloodwork_signal:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "NO_BLOODWORK_DATA", "message": "Either bloodwork_input or bloodwork_signal is required"}
+        )
+    
+    # MODE 1: bloodwork_input - send raw markers to Bloodwork Engine
+    if request.bloodwork_input:
+        try:
+            # Convert API models to internal BloodworkInputV2
+            markers_internal = [
+                MarkerInput(code=m.code, value=m.value, unit=m.unit)
+                for m in request.bloodwork_input.markers
+            ]
+            bloodwork_input_v2 = BloodworkInputV2(
+                markers=markers_internal,
+                lab_profile=request.bloodwork_input.lab_profile,
+                sex=request.bloodwork_input.sex or request.assessment_context.get("sex") or request.assessment_context.get("gender"),
+                age=request.bloodwork_input.age or request.assessment_context.get("age")
+            )
+            
+            # Call Bloodwork Engine integration
+            result = await orchestrate_with_bloodwork_input(
+                bloodwork_input=bloodwork_input_v2,
+                selected_goals=request.selected_goals,
+                assessment_context=request.assessment_context
+            )
+            
+            # Build response from orchestrate_with_bloodwork_input result
+            run_id = result.run_id
+            routing_constraints = result.routing_constraints
+            signal_id = result.handoff_id or f"bloodwork_input_{run_id}"
+            signal_hash = result.handoff_hash or compute_hash({"bloodwork_input": bloodwork_input_v2.model_dump()})
+            hash_verified = True  # Hash verification N/A for bloodwork_input mode
+            
+            chain_entry = {
+                "stage": "brain_orchestrate_v2_bloodwork_input",
+                "engine": "brain_1.5.0",
+                "bloodwork_engine": "2.0.0",
+                "timestamp": created_at,
+                "input_mode": "bloodwork_input",
+                "output_hash": result.output_hash
+            }
+            
+            # Persist to decision_outputs
+            conn = get_db()
+            if conn:
+                try:
+                    cur = conn.cursor()
+                    output_data = {
+                        "run_id": run_id,
+                        "signal_id": signal_id,
+                        "input_mode": "bloodwork_input",
+                        "routing_constraints": routing_constraints,
+                        "selected_goals": request.selected_goals,
+                        "assessment_context": request.assessment_context,
+                        "handoff": result.handoff_data
+                    }
+                    cur.execute(
+                        "INSERT INTO brain_runs (id, user_id, status, input_hash, output_hash, created_at) VALUES (%s, %s, %s, %s, %s, NOW())",
+                        (run_id, request.assessment_context.get("user_id", "anonymous"), "completed", signal_hash, result.output_hash)
+                    )
+                    cur.execute(
+                        "INSERT INTO decision_outputs (run_id, phase, output_json, output_hash) VALUES (%s, %s, %s, %s)",
+                        (run_id, "orchestrate_v2", json.dumps(output_data, default=str), result.output_hash)
+                    )
+                    conn.commit()
+                    cur.close()
+                    conn.close()
+                except Exception as e:
+                    print(f"[orchestrate_v2] DB persist error: {e}")
+                    try: conn.close()
+                    except: pass
+            
+            response = OrchestrateOutputV2(
+                run_id=run_id,
+                signal_id=signal_id,
+                signal_hash=signal_hash,
+                hash_verified=hash_verified,
+                routing_constraints=routing_constraints,
+                blocked_targets=routing_constraints.get("blocked_targets", []),
+                caution_targets=routing_constraints.get("caution_targets", []),
+                assessment_context=request.assessment_context,
+                selected_goals=request.selected_goals,
+                chain_of_custody=[chain_entry],
+                next_phase="compose"
+            )
+            
+            # Emit telemetry
+            _emit_telemetry_for_phase(
+                run_id=run_id,
+                phase="orchestrate_v2",
+                request_dict={"bloodwork_input": True, "markers_count": len(request.bloodwork_input.markers), "selected_goals": request.selected_goals},
+                response_dict=response.model_dump(),
+                has_bloodwork=True,
+            )
+            
+            return response
+            
+        except BloodworkHandoffException as e:
+            # STRICT MODE: Bloodwork Engine failures are hard aborts
+            error_response = build_bloodwork_error_response(e)
+            if e.error_type == BloodworkHandoffError.BLOODWORK_UNAVAILABLE:
+                raise HTTPException(status_code=503, detail=error_response)
+            elif e.error_type == BloodworkHandoffError.INVALID_HANDOFF:
+                raise HTTPException(status_code=502, detail=error_response)
+            else:
+                raise HTTPException(status_code=500, detail=error_response)
+    
+    # MODE 2: bloodwork_signal (legacy) - use pre-computed signal
+    signal = request.bloodwork_signal
     hash_verified = True if not request.verify_hash else verify_signal_hash(signal)
     if request.verify_hash and not hash_verified:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"error": "SIGNAL_HASH_MISMATCH"})
@@ -875,9 +1036,9 @@ async def brain_orchestrate_v2(request: OrchestrateInputV2) -> OrchestrateOutput
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail={"error": "INVALID_SCHEMA_VERSION"})
     routing_constraints = build_routing_constraints_from_gates(signal)
     run_id = str(uuid.uuid4())
-    output_data = {"run_id": run_id, "signal_id": signal.signal_id, "routing_constraints": routing_constraints, "selected_goals": request.selected_goals, "assessment_context": request.assessment_context}
+    output_data = {"run_id": run_id, "signal_id": signal.signal_id, "input_mode": "bloodwork_signal", "routing_constraints": routing_constraints, "selected_goals": request.selected_goals, "assessment_context": request.assessment_context}
     output_hash = compute_hash(output_data)
-    chain_entry = {"stage": "brain_orchestrate_v2", "engine": "brain_1.5.0", "timestamp": created_at, "input_hashes": [signal.audit.output_hash], "output_hash": output_hash}
+    chain_entry = {"stage": "brain_orchestrate_v2", "engine": "brain_1.5.0", "timestamp": created_at, "input_mode": "bloodwork_signal", "input_hashes": [signal.audit.output_hash], "output_hash": output_hash}
     conn = get_db()
     if conn:
         try:
