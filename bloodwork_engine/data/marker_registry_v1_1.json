@@ -1,0 +1,322 @@
+{
+  "version": "1.1",
+  "scope": "GenoMAX² Bloodwork Engine v1.1 (Metabolic + Safety Gates + Optimization)",
+  "changelog": {
+    "1.1": "Added 12 new markers for expanded safety gates and optimization routing",
+    "1.0": "Initial release with 13 core metabolic markers"
+  },
+  "allowed_marker_codes": [
+    "ferritin",
+    "vitamin_d_25oh",
+    "calcium_serum",
+    "hs_crp",
+    "fasting_glucose",
+    "hba1c",
+    "creatinine",
+    "egfr",
+    "alt",
+    "ast",
+    "magnesium_serum",
+    "hemoglobin",
+    "total_testosterone",
+    "potassium",
+    "tsh",
+    "vitamin_b12",
+    "folate_serum",
+    "homocysteine",
+    "uric_acid",
+    "platelet_count",
+    "omega3_index",
+    "zinc_serum",
+    "copper_serum",
+    "fasting_insulin",
+    "triglycerides"
+  ],
+  "lab_profiles": [
+    "GLOBAL_CONSERVATIVE",
+    "IL_HMO_GENERIC",
+    "US_QUEST",
+    "US_LABCORP",
+    "EU_GENERIC"
+  ],
+  "markers": [
+    {
+      "code": "ferritin",
+      "aliases": ["Ferritin", "Serum Ferritin"],
+      "canonical_unit": "ng/mL",
+      "allowed_units": ["ng/mL", "µg/L", "ug/L", "mcg/L"],
+      "conversions": [
+        {"from": "µg/L", "to": "ng/mL", "multiplier": 1.0},
+        {"from": "ug/L", "to": "ng/mL", "multiplier": 1.0},
+        {"from": "mcg/L", "to": "ng/mL", "multiplier": 1.0}
+      ],
+      "sex_relevance": "both"
+    },
+    {
+      "code": "vitamin_d_25oh",
+      "aliases": ["Vitamin D", "25-OH Vitamin D", "25(OH)D", "25-hydroxyvitamin D", "Vitamin D 25-Hydroxy"],
+      "canonical_unit": "ng/mL",
+      "allowed_units": ["ng/mL", "nmol/L"],
+      "conversions": [
+        {"from": "nmol/L", "to": "ng/mL", "multiplier": 0.4}
+      ],
+      "sex_relevance": "both"
+    },
+    {
+      "code": "calcium_serum",
+      "aliases": ["Calcium", "Serum Calcium", "Ca", "Total Calcium"],
+      "canonical_unit": "mg/dL",
+      "allowed_units": ["mg/dL", "mmol/L"],
+      "conversions": [
+        {"from": "mmol/L", "to": "mg/dL", "multiplier": 4.0078}
+      ],
+      "sex_relevance": "both"
+    },
+    {
+      "code": "hs_crp",
+      "aliases": ["hs-CRP", "High sensitivity CRP", "CRP", "C-Reactive Protein", "hsCRP"],
+      "canonical_unit": "mg/L",
+      "allowed_units": ["mg/L", "mg/dL"],
+      "conversions": [
+        {"from": "mg/dL", "to": "mg/L", "multiplier": 10.0}
+      ],
+      "sex_relevance": "both"
+    },
+    {
+      "code": "fasting_glucose",
+      "aliases": ["Fasting Glucose", "Glucose (fasting)", "Glucose", "Blood Glucose", "FBG"],
+      "canonical_unit": "mg/dL",
+      "allowed_units": ["mg/dL", "mmol/L"],
+      "conversions": [
+        {"from": "mmol/L", "to": "mg/dL", "multiplier": 18.01559}
+      ],
+      "sex_relevance": "both"
+    },
+    {
+      "code": "hba1c",
+      "aliases": ["HbA1c", "Hemoglobin A1c", "A1c", "Glycated Hemoglobin", "Glycohemoglobin"],
+      "canonical_unit": "%",
+      "allowed_units": ["%", "mmol/mol"],
+      "conversions": [
+        {"from": "mmol/mol", "to": "%", "multiplier": 0.0915, "offset": 2.15}
+      ],
+      "sex_relevance": "both",
+      "notes": "IFCC mmol/mol to NGSP %: (mmol/mol * 0.0915) + 2.15"
+    },
+    {
+      "code": "creatinine",
+      "aliases": ["Creatinine", "Serum Creatinine", "Cr"],
+      "canonical_unit": "mg/dL",
+      "allowed_units": ["mg/dL", "µmol/L", "umol/L"],
+      "conversions": [
+        {"from": "µmol/L", "to": "mg/dL", "multiplier": 0.0113},
+        {"from": "umol/L", "to": "mg/dL", "multiplier": 0.0113}
+      ],
+      "sex_relevance": "both"
+    },
+    {
+      "code": "egfr",
+      "aliases": ["eGFR", "Estimated GFR", "GFR", "Glomerular Filtration Rate"],
+      "canonical_unit": "mL/min/1.73m2",
+      "allowed_units": ["mL/min/1.73m2", "mL/min"],
+      "conversions": [],
+      "sex_relevance": "both"
+    },
+    {
+      "code": "alt",
+      "aliases": ["ALT", "Alanine Aminotransferase", "SGPT", "Alanine Transaminase"],
+      "canonical_unit": "U/L",
+      "allowed_units": ["U/L", "IU/L"],
+      "conversions": [
+        {"from": "IU/L", "to": "U/L", "multiplier": 1.0}
+      ],
+      "sex_relevance": "both"
+    },
+    {
+      "code": "ast",
+      "aliases": ["AST", "Aspartate Aminotransferase", "SGOT", "Aspartate Transaminase"],
+      "canonical_unit": "U/L",
+      "allowed_units": ["U/L", "IU/L"],
+      "conversions": [
+        {"from": "IU/L", "to": "U/L", "multiplier": 1.0}
+      ],
+      "sex_relevance": "both"
+    },
+    {
+      "code": "magnesium_serum",
+      "aliases": ["Magnesium", "Serum Magnesium", "Mg"],
+      "canonical_unit": "mg/dL",
+      "allowed_units": ["mg/dL", "mmol/L", "mEq/L"],
+      "conversions": [
+        {"from": "mmol/L", "to": "mg/dL", "multiplier": 2.4305},
+        {"from": "mEq/L", "to": "mg/dL", "multiplier": 1.2153}
+      ],
+      "sex_relevance": "both"
+    },
+    {
+      "code": "hemoglobin",
+      "aliases": ["Hemoglobin", "Hb", "HGB", "Hgb"],
+      "canonical_unit": "g/dL",
+      "allowed_units": ["g/dL", "g/L"],
+      "conversions": [
+        {"from": "g/L", "to": "g/dL", "multiplier": 0.1}
+      ],
+      "sex_relevance": "both"
+    },
+    {
+      "code": "total_testosterone",
+      "aliases": ["Total Testosterone", "Testosterone (total)", "Testosterone", "T"],
+      "canonical_unit": "ng/dL",
+      "allowed_units": ["ng/dL", "nmol/L"],
+      "conversions": [
+        {"from": "nmol/L", "to": "ng/dL", "multiplier": 28.842}
+      ],
+      "sex_relevance": "male"
+    },
+    {
+      "code": "potassium",
+      "aliases": ["Potassium", "K", "K+", "Serum Potassium"],
+      "canonical_unit": "mEq/L",
+      "allowed_units": ["mEq/L", "mmol/L"],
+      "conversions": [
+        {"from": "mmol/L", "to": "mEq/L", "multiplier": 1.0}
+      ],
+      "sex_relevance": "both",
+      "added_in": "1.1"
+    },
+    {
+      "code": "tsh",
+      "aliases": ["TSH", "Thyroid Stimulating Hormone", "Thyrotropin"],
+      "canonical_unit": "mIU/L",
+      "allowed_units": ["mIU/L", "µIU/mL", "uIU/mL"],
+      "conversions": [
+        {"from": "µIU/mL", "to": "mIU/L", "multiplier": 1.0},
+        {"from": "uIU/mL", "to": "mIU/L", "multiplier": 1.0}
+      ],
+      "sex_relevance": "both",
+      "added_in": "1.1"
+    },
+    {
+      "code": "vitamin_b12",
+      "aliases": ["Vitamin B12", "B12", "Cobalamin", "Cyanocobalamin"],
+      "canonical_unit": "pg/mL",
+      "allowed_units": ["pg/mL", "pmol/L", "ng/L"],
+      "conversions": [
+        {"from": "pmol/L", "to": "pg/mL", "multiplier": 1.355},
+        {"from": "ng/L", "to": "pg/mL", "multiplier": 1.0}
+      ],
+      "sex_relevance": "both",
+      "added_in": "1.1"
+    },
+    {
+      "code": "folate_serum",
+      "aliases": ["Folate", "Folic Acid", "Serum Folate", "Vitamin B9"],
+      "canonical_unit": "ng/mL",
+      "allowed_units": ["ng/mL", "nmol/L"],
+      "conversions": [
+        {"from": "nmol/L", "to": "ng/mL", "multiplier": 0.4413}
+      ],
+      "sex_relevance": "both",
+      "added_in": "1.1"
+    },
+    {
+      "code": "homocysteine",
+      "aliases": ["Homocysteine", "Hcy", "Total Homocysteine"],
+      "canonical_unit": "µmol/L",
+      "allowed_units": ["µmol/L", "umol/L", "mcmol/L"],
+      "conversions": [
+        {"from": "umol/L", "to": "µmol/L", "multiplier": 1.0},
+        {"from": "mcmol/L", "to": "µmol/L", "multiplier": 1.0}
+      ],
+      "sex_relevance": "both",
+      "added_in": "1.1"
+    },
+    {
+      "code": "uric_acid",
+      "aliases": ["Uric Acid", "UA", "Serum Uric Acid"],
+      "canonical_unit": "mg/dL",
+      "allowed_units": ["mg/dL", "µmol/L", "umol/L"],
+      "conversions": [
+        {"from": "µmol/L", "to": "mg/dL", "multiplier": 0.01681},
+        {"from": "umol/L", "to": "mg/dL", "multiplier": 0.01681}
+      ],
+      "sex_relevance": "both",
+      "added_in": "1.1"
+    },
+    {
+      "code": "platelet_count",
+      "aliases": ["Platelets", "Platelet Count", "PLT", "Thrombocytes"],
+      "canonical_unit": "x10^3/µL",
+      "allowed_units": ["x10^3/µL", "x10^9/L", "K/uL", "10^3/uL"],
+      "conversions": [
+        {"from": "x10^9/L", "to": "x10^3/µL", "multiplier": 1.0},
+        {"from": "K/uL", "to": "x10^3/µL", "multiplier": 1.0},
+        {"from": "10^3/uL", "to": "x10^3/µL", "multiplier": 1.0}
+      ],
+      "sex_relevance": "both",
+      "added_in": "1.1"
+    },
+    {
+      "code": "omega3_index",
+      "aliases": ["Omega-3 Index", "Omega 3 Index", "O3I", "EPA+DHA Index"],
+      "canonical_unit": "%",
+      "allowed_units": ["%"],
+      "conversions": [],
+      "sex_relevance": "both",
+      "added_in": "1.1",
+      "notes": "Specialized test measuring EPA+DHA as percentage of total RBC fatty acids"
+    },
+    {
+      "code": "zinc_serum",
+      "aliases": ["Zinc", "Serum Zinc", "Zn"],
+      "canonical_unit": "µg/dL",
+      "allowed_units": ["µg/dL", "ug/dL", "mcg/dL", "µmol/L", "umol/L"],
+      "conversions": [
+        {"from": "ug/dL", "to": "µg/dL", "multiplier": 1.0},
+        {"from": "mcg/dL", "to": "µg/dL", "multiplier": 1.0},
+        {"from": "µmol/L", "to": "µg/dL", "multiplier": 6.54},
+        {"from": "umol/L", "to": "µg/dL", "multiplier": 6.54}
+      ],
+      "sex_relevance": "both",
+      "added_in": "1.1"
+    },
+    {
+      "code": "copper_serum",
+      "aliases": ["Copper", "Serum Copper", "Cu"],
+      "canonical_unit": "µg/dL",
+      "allowed_units": ["µg/dL", "ug/dL", "mcg/dL", "µmol/L", "umol/L"],
+      "conversions": [
+        {"from": "ug/dL", "to": "µg/dL", "multiplier": 1.0},
+        {"from": "mcg/dL", "to": "µg/dL", "multiplier": 1.0},
+        {"from": "µmol/L", "to": "µg/dL", "multiplier": 6.355},
+        {"from": "umol/L", "to": "µg/dL", "multiplier": 6.355}
+      ],
+      "sex_relevance": "both",
+      "added_in": "1.1"
+    },
+    {
+      "code": "fasting_insulin",
+      "aliases": ["Fasting Insulin", "Insulin (fasting)", "Insulin", "Serum Insulin"],
+      "canonical_unit": "µIU/mL",
+      "allowed_units": ["µIU/mL", "uIU/mL", "mIU/L", "pmol/L"],
+      "conversions": [
+        {"from": "uIU/mL", "to": "µIU/mL", "multiplier": 1.0},
+        {"from": "mIU/L", "to": "µIU/mL", "multiplier": 1.0},
+        {"from": "pmol/L", "to": "µIU/mL", "multiplier": 0.1442}
+      ],
+      "sex_relevance": "both",
+      "added_in": "1.1"
+    },
+    {
+      "code": "triglycerides",
+      "aliases": ["Triglycerides", "TG", "Trigs", "Serum Triglycerides"],
+      "canonical_unit": "mg/dL",
+      "allowed_units": ["mg/dL", "mmol/L"],
+      "conversions": [
+        {"from": "mmol/L", "to": "mg/dL", "multiplier": 88.57}
+      ],
+      "sex_relevance": "both",
+      "added_in": "1.1"
+    }
+  ]
+}
