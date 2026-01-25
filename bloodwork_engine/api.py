@@ -438,37 +438,14 @@ def register_bloodwork_endpoints(app):
                     source_markers=cm.source_markers
                 ))
         
-        # Build gate summary from the triggered safety gates
-        # Compute detailed breakdown by tier
-        tier1_gates = [g for g in result.safety_gates if g.tier == GateTier.TIER1_SAFETY]
-        tier2_gates = [g for g in result.safety_gates if g.tier == GateTier.TIER2_OPTIMIZATION]
-        tier3_gates = [g for g in result.safety_gates if g.tier == GateTier.TIER3_GENETIC_HORMONAL]
-        
-        def count_by_action(gates_list, action):
-            return len([g for g in gates_list if g.action == action and not g.exception_active])
-        
+        # Convert gate summary
         gate_summary = GateSummaryResponse(
-            tier1_safety={
-                "blocks": count_by_action(tier1_gates, GateAction.BLOCK),
-                "cautions": count_by_action(tier1_gates, GateAction.CAUTION),
-                "flags": count_by_action(tier1_gates, GateAction.FLAG),
-                "total": len(tier1_gates)
-            },
-            tier2_optimization={
-                "blocks": count_by_action(tier2_gates, GateAction.BLOCK),
-                "cautions": count_by_action(tier2_gates, GateAction.CAUTION),
-                "flags": count_by_action(tier2_gates, GateAction.FLAG),
-                "total": len(tier2_gates)
-            },
-            tier3_genetic_hormonal={
-                "blocks": count_by_action(tier3_gates, GateAction.BLOCK),
-                "cautions": count_by_action(tier3_gates, GateAction.CAUTION),
-                "flags": count_by_action(tier3_gates, GateAction.FLAG),
-                "total": len(tier3_gates)
-            },
-            total_blocks=count_by_action(result.safety_gates, GateAction.BLOCK),
-            total_cautions=count_by_action(result.safety_gates, GateAction.CAUTION),
-            total_flags=count_by_action(result.safety_gates, GateAction.FLAG)
+            tier1_safety=result.gate_summary.get("tier1", {"blocks": 0, "cautions": 0, "flags": 0}) if hasattr(result, 'gate_summary') else {"blocks": 0, "cautions": 0, "flags": 0},
+            tier2_optimization=result.gate_summary.get("tier2", {"blocks": 0, "cautions": 0, "flags": 0}) if hasattr(result, 'gate_summary') else {"blocks": 0, "cautions": 0, "flags": 0},
+            tier3_genetic_hormonal=result.gate_summary.get("tier3", {"blocks": 0, "cautions": 0, "flags": 0}) if hasattr(result, 'gate_summary') else {"blocks": 0, "cautions": 0, "flags": 0},
+            total_blocks=result.gate_summary.get("total_blocks", 0) if hasattr(result, 'gate_summary') else 0,
+            total_cautions=result.gate_summary.get("total_cautions", 0) if hasattr(result, 'gate_summary') else 0,
+            total_flags=result.gate_summary.get("total_flags", 0) if hasattr(result, 'gate_summary') else 0
         )
         
         # Convert dataclass result to response
@@ -615,8 +592,6 @@ def register_bloodwork_endpoints(app):
         # Re-initialize
         loader = get_loader()
         all_gates = loader.get_safety_gates()
-        
-        # Get range count safely
         range_count = len(loader.reference_ranges.get("ranges", []))
         
         return {
