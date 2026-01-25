@@ -10,6 +10,7 @@ v2.0 Features:
 - Computed markers (HOMA-IR, ratios)
 - Hormonal routing
 - OCR parsing for lab reports
+- Lab API integration (Vital)
 """
 
 import os
@@ -17,7 +18,7 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 from dataclasses import asdict
-from fastapi import UploadFile, File, Body
+from fastapi import UploadFile, File, Body, Query
 
 # ============================================================
 # REQUEST/RESPONSE MODELS
@@ -104,6 +105,24 @@ class ProcessMarkersResponse(BaseModel):
     ruleset_version: str
     input_hash: str
     output_hash: str
+
+
+# Lab API Models
+class CreateVitalUserRequest(BaseModel):
+    """Request to create a Vital user."""
+    external_id: str = Field(..., description="GenoMAX user ID")
+    first_name: Optional[str] = None
+    last_name: Optional[str] = None
+    email: Optional[str] = None
+
+
+class CreateLabOrderRequest(BaseModel):
+    """Request to create a lab order."""
+    user_id: str = Field(..., description="Vital user ID")
+    lab_test_id: str = Field(..., description="Lab test ID to order")
+    collection_method: str = Field(default="walk_in_test", description="walk_in_test, at_home_phlebotomy, or testkit")
+    patient_details: Optional[Dict[str, Any]] = Field(default=None, description="Patient info: first_name, last_name, dob, gender, email, phone_number")
+    patient_address: Optional[Dict[str, Any]] = Field(default=None, description="Address: street, city, state, zip_code, country")
 
 
 # ============================================================
@@ -694,5 +713,438 @@ def register_bloodwork_endpoints(app):
                 "error": "PARSE_ERROR",
                 "message": str(e)
             }
+    
+    # =========================================================
+    # LAB API ENDPOINTS (Vital Integration)
+    # =========================================================
+    
+    # ---------------------------------------------------------
+    # GET /api/v1/labs/status
+    # ---------------------------------------------------------
+    @app.get("/api/v1/labs/status", tags=["Lab API"])
+    def labs_status():
+        """Get status of all configured lab providers."""
+        try:
+            from bloodwork_engine.lab_adapters import list_providers, get_vital_status
+            
+            providers = list_providers()
+            vital_status = get_vital_status()
+            
+            return {
+                "status": "operational",
+                "providers": providers,
+                "primary_provider": "vital",
+                "vital_configured": vital_status.get("valid", False),
+                "documentation": "https://docs.tryvital.io/"
+            }
+        except ImportError as e:
+            return {
+                "status": "error",
+                "error": f"Lab adapters not available: {e}",
+                "providers": []
+            }
+        except Exception as e:
+            return {
+                "status": "error",
+                "error": str(e),
+                "providers": []
+            }
+    
+    # ---------------------------------------------------------
+    # GET /api/v1/labs/vital/status
+    # ---------------------------------------------------------
+    @app.get("/api/v1/labs/vital/status", tags=["Lab API"])
+    def vital_status():
+        """Check Vital API configuration and connectivity."""
+        api_key = os.environ.get("VITAL_API_KEY")
+        environment = os.environ.get("VITAL_ENVIRONMENT", "sandbox")
+        
+        if not api_key:
+            return {
+                "configured": False,
+                "error": "VITAL_API_KEY environment variable not set",
+                "environment": environment,
+                "setup_instructions": {
+                    "step_1": "Sign up at https://tryvital.io",
+                    "step_2": "Get API key from dashboard",
+                    "step_3": "Set VITAL_API_KEY environment variable",
+                    "step_4": "Optionally set VITAL_ENVIRONMENT to 'production' (default: sandbox)"
+                }
+            }
+        
+        try:
+            from bloodwork_engine.lab_adapters import VitalAdapter
+            
+            adapter = VitalAdapter(api_key=api_key, environment=environment)
+            validation = adapter.validate_credentials()
+            
+            return {
+                "configured": True,
+                "valid": validation.get("valid", False),
+                "environment": environment,
+                "api_key_preview": f"{api_key[:8]}...{api_key[-4:]}" if len(api_key) > 12 else "***",
+                "base_url": adapter.base_url,
+                "validation_result": validation,
+                "features": {
+                    "walk_in_tests": True,
+                    "at_home_phlebotomy": True,
+                    "test_kits": True,
+                    "quest_locations": True,
+                    "labcorp_locations": True,
+                    "restricted_states": ["NY", "NJ", "RI"]
+                }
+            }
+        except Exception as e:
+            return {
+                "configured": True,
+                "valid": False,
+                "error": str(e),
+                "environment": environment
+            }
+    
+    # ---------------------------------------------------------
+    # GET /api/v1/labs/vital/tests
+    # ---------------------------------------------------------
+    @app.get("/api/v1/labs/vital/tests", tags=["Lab API"])
+    def list_vital_tests():
+        """List available lab tests from Vital."""
+        api_key = os.environ.get("VITAL_API_KEY")
+        if not api_key:
+            return {"error": "VITAL_API_KEY not configured"}
+        
+        try:
+            from bloodwork_engine.lab_adapters import VitalAdapter
+            
+            environment = os.environ.get("VITAL_ENVIRONMENT", "sandbox")
+            adapter = VitalAdapter(api_key=api_key, environment=environment)
+            tests = adapter.list_lab_tests()
+            
+            return {
+                "test_count": len(tests),
+                "tests": [
+                    {
+                        "test_id": t.test_id,
+                        "name": t.name,
+                        "description": t.description,
+                        "markers": t.markers,
+                        "sample_type": t.sample_type,
+                        "fasting_required": t.fasting_required,
+                        "turnaround_days": t.turnaround_days,
+                        "lab_provider": t.lab_provider
+                    }
+                    for t in tests
+                ]
+            }
+        except Exception as e:
+            return {"error": str(e)}
+    
+    # ---------------------------------------------------------
+    # GET /api/v1/labs/vital/markers
+    # ---------------------------------------------------------
+    @app.get("/api/v1/labs/vital/markers", tags=["Lab API"])
+    def list_vital_markers():
+        """List available biomarkers from Vital."""
+        api_key = os.environ.get("VITAL_API_KEY")
+        if not api_key:
+            return {"error": "VITAL_API_KEY not configured"}
+        
+        try:
+            from bloodwork_engine.lab_adapters import VitalAdapter
+            
+            environment = os.environ.get("VITAL_ENVIRONMENT", "sandbox")
+            adapter = VitalAdapter(api_key=api_key, environment=environment)
+            markers = adapter.list_markers()
+            
+            return {
+                "marker_count": len(markers),
+                "markers": markers,
+                "genomax_panel": adapter.GENOMAX_PANEL_MARKERS
+            }
+        except Exception as e:
+            return {"error": str(e)}
+    
+    # ---------------------------------------------------------
+    # GET /api/v1/labs/vital/locations
+    # ---------------------------------------------------------
+    @app.get("/api/v1/labs/vital/locations", tags=["Lab API"])
+    def find_vital_locations(
+        zip_code: str = Query(..., description="US ZIP code"),
+        radius_miles: int = Query(default=25, description="Search radius in miles"),
+        lab: Optional[str] = Query(default=None, description="Filter by lab (quest, labcorp)")
+    ):
+        """Find nearby lab locations for walk-in tests."""
+        api_key = os.environ.get("VITAL_API_KEY")
+        if not api_key:
+            return {"error": "VITAL_API_KEY not configured"}
+        
+        try:
+            from bloodwork_engine.lab_adapters import VitalAdapter
+            
+            environment = os.environ.get("VITAL_ENVIRONMENT", "sandbox")
+            adapter = VitalAdapter(api_key=api_key, environment=environment)
+            locations = adapter.find_lab_locations(
+                zip_code=zip_code,
+                radius_miles=radius_miles,
+                lab_id=lab
+            )
+            
+            return {
+                "zip_code": zip_code,
+                "radius_miles": radius_miles,
+                "location_count": len(locations),
+                "locations": locations
+            }
+        except Exception as e:
+            return {"error": str(e)}
+    
+    # ---------------------------------------------------------
+    # POST /api/v1/labs/vital/users
+    # ---------------------------------------------------------
+    @app.post("/api/v1/labs/vital/users", tags=["Lab API"])
+    def create_vital_user(request: CreateVitalUserRequest):
+        """Create a user in Vital for lab ordering."""
+        api_key = os.environ.get("VITAL_API_KEY")
+        if not api_key:
+            return {"error": "VITAL_API_KEY not configured"}
+        
+        try:
+            from bloodwork_engine.lab_adapters import VitalAdapter, LabPatient
+            
+            environment = os.environ.get("VITAL_ENVIRONMENT", "sandbox")
+            adapter = VitalAdapter(api_key=api_key, environment=environment)
+            
+            patient = LabPatient(
+                external_id=request.external_id,
+                first_name=request.first_name,
+                last_name=request.last_name,
+                email=request.email
+            )
+            
+            result = adapter.create_user(patient)
+            
+            return {
+                "success": True,
+                "user_id": result.get("user_id"),
+                "client_user_id": result.get("client_user_id"),
+                "created_at": result.get("created_at")
+            }
+        except Exception as e:
+            return {"error": str(e)}
+    
+    # ---------------------------------------------------------
+    # POST /api/v1/labs/vital/orders
+    # ---------------------------------------------------------
+    @app.post("/api/v1/labs/vital/orders", tags=["Lab API"])
+    def create_vital_order(request: CreateLabOrderRequest):
+        """Create a lab test order."""
+        api_key = os.environ.get("VITAL_API_KEY")
+        if not api_key:
+            return {"error": "VITAL_API_KEY not configured"}
+        
+        try:
+            from bloodwork_engine.lab_adapters import VitalAdapter
+            
+            environment = os.environ.get("VITAL_ENVIRONMENT", "sandbox")
+            adapter = VitalAdapter(api_key=api_key, environment=environment)
+            
+            order = adapter.create_order(
+                user_id=request.user_id,
+                lab_test_id=request.lab_test_id,
+                collection_method=request.collection_method,
+                patient_details=request.patient_details,
+                patient_address=request.patient_address
+            )
+            
+            return {
+                "success": True,
+                "order_id": order.order_id,
+                "status": order.status,
+                "lab_provider": order.lab_provider,
+                "collection_method": order.collection_method,
+                "requisition_url": order.requisition_url,
+                "ordered_at": order.ordered_at.isoformat() if order.ordered_at else None
+            }
+        except Exception as e:
+            return {"error": str(e)}
+    
+    # ---------------------------------------------------------
+    # GET /api/v1/labs/vital/orders/{order_id}
+    # ---------------------------------------------------------
+    @app.get("/api/v1/labs/vital/orders/{order_id}", tags=["Lab API"])
+    def get_vital_order_status(order_id: str):
+        """Get the status of a lab order."""
+        api_key = os.environ.get("VITAL_API_KEY")
+        if not api_key:
+            return {"error": "VITAL_API_KEY not configured"}
+        
+        try:
+            from bloodwork_engine.lab_adapters import VitalAdapter
+            
+            environment = os.environ.get("VITAL_ENVIRONMENT", "sandbox")
+            adapter = VitalAdapter(api_key=api_key, environment=environment)
+            
+            order = adapter.get_order_status(order_id)
+            
+            return {
+                "order_id": order.order_id,
+                "status": order.status,
+                "lab_provider": order.lab_provider,
+                "collection_method": order.collection_method,
+                "requisition_url": order.requisition_url,
+                "ordered_at": order.ordered_at.isoformat() if order.ordered_at else None,
+                "completed_at": order.completed_at.isoformat() if order.completed_at else None
+            }
+        except Exception as e:
+            return {"error": str(e)}
+    
+    # ---------------------------------------------------------
+    # POST /api/v1/labs/vital/orders/{order_id}/cancel
+    # ---------------------------------------------------------
+    @app.post("/api/v1/labs/vital/orders/{order_id}/cancel", tags=["Lab API"])
+    def cancel_vital_order(order_id: str):
+        """Cancel a pending lab order."""
+        api_key = os.environ.get("VITAL_API_KEY")
+        if not api_key:
+            return {"error": "VITAL_API_KEY not configured"}
+        
+        try:
+            from bloodwork_engine.lab_adapters import VitalAdapter
+            
+            environment = os.environ.get("VITAL_ENVIRONMENT", "sandbox")
+            adapter = VitalAdapter(api_key=api_key, environment=environment)
+            
+            result = adapter.cancel_order(order_id)
+            
+            return {
+                "order_id": order_id,
+                "cancelled": True,
+                "result": result
+            }
+        except Exception as e:
+            return {"error": str(e)}
+    
+    # ---------------------------------------------------------
+    # GET /api/v1/labs/vital/results
+    # ---------------------------------------------------------
+    @app.get("/api/v1/labs/vital/results", tags=["Lab API"])
+    def get_vital_results(
+        user_id: Optional[str] = Query(default=None, description="Vital user ID"),
+        order_id: Optional[str] = Query(default=None, description="Specific order ID"),
+        process_through_engine: bool = Query(default=True, description="Process results through Bloodwork Engine"),
+        lab_profile: str = Query(default="GLOBAL_CONSERVATIVE", description="Lab profile for engine processing"),
+        sex: Optional[str] = Query(default=None, description="Biological sex for engine processing"),
+        age: Optional[int] = Query(default=None, description="Age for engine processing")
+    ):
+        """
+        Fetch lab results from Vital.
+        
+        Optionally processes results through the Bloodwork Engine to get
+        safety gates, routing constraints, and optimization recommendations.
+        """
+        api_key = os.environ.get("VITAL_API_KEY")
+        if not api_key:
+            return {"error": "VITAL_API_KEY not configured"}
+        
+        if not user_id and not order_id:
+            return {"error": "Either user_id or order_id is required"}
+        
+        try:
+            from bloodwork_engine.lab_adapters import VitalAdapter
+            
+            environment = os.environ.get("VITAL_ENVIRONMENT", "sandbox")
+            adapter = VitalAdapter(api_key=api_key, environment=environment)
+            
+            results = adapter.fetch_results(user_id=user_id, order_id=order_id)
+            
+            if not results:
+                return {
+                    "results_found": 0,
+                    "message": "No results found",
+                    "user_id": user_id,
+                    "order_id": order_id
+                }
+            
+            # Format results
+            formatted_results = []
+            for r in results:
+                result_data = {
+                    "result_id": r.result_id,
+                    "order_id": r.order_id,
+                    "lab_provider": r.lab_provider,
+                    "report_date": r.report_date.isoformat() if r.report_date else None,
+                    "status": r.status,
+                    "pdf_url": r.pdf_url,
+                    "markers": [
+                        {
+                            "code": m.marker_code,
+                            "name": m.marker_name,
+                            "value": m.value,
+                            "unit": m.unit,
+                            "reference_low": m.reference_low,
+                            "reference_high": m.reference_high,
+                            "flag": m.flag,
+                            "loinc_code": m.loinc_code
+                        }
+                        for m in r.markers
+                    ]
+                }
+                
+                # Process through engine if requested
+                if process_through_engine and r.markers:
+                    engine = get_engine(lab_profile=lab_profile)
+                    markers_input = adapter.to_engine_input(r)
+                    
+                    if markers_input:
+                        engine_result = engine.process_markers(
+                            markers=markers_input,
+                            sex=sex,
+                            age=age
+                        )
+                        
+                        result_data["engine_result"] = {
+                            "processed_at": engine_result.processed_at,
+                            "markers_processed": len(engine_result.markers),
+                            "routing_constraints": engine_result.routing_constraints,
+                            "safety_gates_triggered": len(engine_result.safety_gates),
+                            "require_review": engine_result.require_review,
+                            "summary": engine_result.summary,
+                            "gate_summary": engine_result.gate_summary
+                        }
+                
+                formatted_results.append(result_data)
+            
+            return {
+                "results_found": len(formatted_results),
+                "user_id": user_id,
+                "order_id": order_id,
+                "results": formatted_results
+            }
+        except Exception as e:
+            return {"error": str(e)}
+    
+    # ---------------------------------------------------------
+    # GET /api/v1/labs/vital/results/{order_id}/pdf
+    # ---------------------------------------------------------
+    @app.get("/api/v1/labs/vital/results/{order_id}/pdf", tags=["Lab API"])
+    def get_vital_result_pdf(order_id: str):
+        """Get PDF URL for lab results."""
+        api_key = os.environ.get("VITAL_API_KEY")
+        if not api_key:
+            return {"error": "VITAL_API_KEY not configured"}
+        
+        try:
+            from bloodwork_engine.lab_adapters import VitalAdapter
+            
+            environment = os.environ.get("VITAL_ENVIRONMENT", "sandbox")
+            adapter = VitalAdapter(api_key=api_key, environment=environment)
+            
+            pdf_url = adapter.get_result_pdf(order_id)
+            
+            return {
+                "order_id": order_id,
+                "pdf_url": pdf_url
+            }
+        except Exception as e:
+            return {"error": str(e)}
     
     return app
