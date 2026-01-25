@@ -1,4 +1,4 @@
-# GenoMAX² API Server v3.21.0 Requirements
+# GenoMAX² API Server v3.28.0 Requirements
 
 # Web Framework
 fastapi==0.109.0
@@ -25,6 +25,9 @@ jsonschema==4.21.1
 # Excel Processing (v3.21.0 - Override Module)
 openpyxl==3.1.2
 pandas==2.1.4
+
+# OCR Processing (v3.28.0 - Bloodwork Engine v2.0)
+google-cloud-vision==3.7.0
 
 # Testing
 pytest==8.0.0
