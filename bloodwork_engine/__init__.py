@@ -1,35 +1,56 @@
 """
-GenoMAX² Bloodwork Engine v1.0
+GenoMAX² Bloodwork Engine v2.0
 ==============================
-Safety and routing layer for biomarker normalization.
+Safety and routing layer for biomarker normalization with complete
+support for 40 biomarkers, 31 safety gates, genetic markers (MTHFR),
+computed markers (HOMA-IR), and hormonal routing.
 
 Usage:
     from bloodwork_engine import get_engine, get_loader
     from bloodwork_engine.api import register_bloodwork_endpoints
+
+For v1 compatibility:
+    from bloodwork_engine.engine import BloodworkEngine as BloodworkEngineV1
 """
 
-from bloodwork_engine.engine import (
-    BloodworkEngine,
-    BloodworkDataLoader,
+# V2 Engine (default) - 40 markers, 31 gates, genetic/hormonal support
+from bloodwork_engine.engine_v2 import (
+    BloodworkEngineV2,
+    BloodworkDataLoaderV2,
     BloodworkResult,
     ProcessedMarker,
+    ComputedMarker,
     MarkerStatus,
     RangeStatus,
+    GateTier,
+    GateAction,
     get_engine,
     get_loader
 )
 
+# API endpoints
 from bloodwork_engine.api import register_bloodwork_endpoints
 
-__version__ = "1.0.0"
+# Aliases for backward compatibility
+BloodworkEngine = BloodworkEngineV2
+BloodworkDataLoader = BloodworkDataLoaderV2
+
+__version__ = "2.0.0"
 __all__ = [
+    # V2 Engine (default)
     "BloodworkEngine",
-    "BloodworkDataLoader", 
+    "BloodworkEngineV2",
+    "BloodworkDataLoader",
+    "BloodworkDataLoaderV2",
     "BloodworkResult",
     "ProcessedMarker",
+    "ComputedMarker",
     "MarkerStatus",
     "RangeStatus",
+    "GateTier",
+    "GateAction",
     "get_engine",
     "get_loader",
+    # API
     "register_bloodwork_endpoints"
 ]
