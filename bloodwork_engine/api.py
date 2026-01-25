@@ -1,7 +1,14 @@
 """
-GenoMAX² Bloodwork Engine v1.0 - API Endpoints
+GenoMAX² Bloodwork Engine v2.0 - API Endpoints
 ===============================================
 FastAPI endpoints for bloodwork processing and data access.
+
+v2.0 Features:
+- 40 biomarkers (13 original + 27 new)
+- 31 safety gates across 3 tiers
+- Genetic marker support (MTHFR)
+- Computed markers (HOMA-IR, ratios)
+- Hormonal routing
 """
 
 import os
@@ -10,9 +17,6 @@ from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 from dataclasses import asdict
 
-# These will be registered on the main FastAPI app
-# Import: from bloodwork_engine.api import register_bloodwork_endpoints
-
 # ============================================================
 # REQUEST/RESPONSE MODELS
 # ============================================================
@@ -20,8 +24,8 @@ from dataclasses import asdict
 class MarkerInput(BaseModel):
     """Single marker input for processing."""
     code: str = Field(..., description="Marker code or alias (e.g., 'ferritin', 'Vitamin D')")
-    value: float = Field(..., description="Numeric value")
-    unit: str = Field(..., description="Unit of measurement (e.g., 'ng/mL', 'nmol/L')")
+    value: Any = Field(..., description="Numeric value or categorical (for genetic markers)")
+    unit: str = Field(..., description="Unit of measurement (e.g., 'ng/mL', 'nmol/L', 'categorical')")
 
 
 class ProcessMarkersRequest(BaseModel):
@@ -36,13 +40,14 @@ class ProcessedMarkerResponse(BaseModel):
     """Response for a single processed marker."""
     original_code: str
     canonical_code: Optional[str]
-    original_value: float
-    canonical_value: float
+    original_value: Any
+    canonical_value: Any
     original_unit: str
     canonical_unit: Optional[str]
     status: str
     range_status: str
     reference_range: Optional[Dict[str, Optional[float]]]
+    genomax_optimal: Optional[Dict[str, Optional[float]]] = None
     decision_limits: Optional[Dict[str, Optional[float]]]
     lab_profile_used: Optional[str]
     fallback_used: bool
@@ -50,6 +55,17 @@ class ProcessedMarkerResponse(BaseModel):
     conversion_multiplier: Optional[float]
     flags: List[str]
     log_entries: List[str]
+    genetic_interpretation: Optional[str] = None
+
+
+class ComputedMarkerResponse(BaseModel):
+    """Response for a computed/derived marker."""
+    code: str
+    name: str
+    value: float
+    formula: str
+    interpretation: str
+    source_markers: List[str]
 
 
 class SafetyGateResponse(BaseModel):
@@ -57,11 +73,24 @@ class SafetyGateResponse(BaseModel):
     gate_id: str
     description: str
     trigger_marker: str
-    trigger_value: float
-    threshold: float
+    trigger_value: Any
+    threshold: Any
     routing_constraint: str
+    gate_tier: str
+    gate_action: str
     exception_active: bool
     exception_reason: Optional[str]
+    blocked_ingredients: List[str] = []
+
+
+class GateSummaryResponse(BaseModel):
+    """Summary of gates by tier."""
+    tier1_safety: Dict[str, int]
+    tier2_optimization: Dict[str, int]
+    tier3_genetic_hormonal: Dict[str, int]
+    total_blocks: int
+    total_cautions: int
+    total_flags: int
 
 
 class ProcessMarkersResponse(BaseModel):
@@ -69,8 +98,10 @@ class ProcessMarkersResponse(BaseModel):
     processed_at: str
     lab_profile: str
     markers: List[ProcessedMarkerResponse]
+    computed_markers: List[ComputedMarkerResponse] = []
     routing_constraints: List[str]
     safety_gates: List[SafetyGateResponse]
+    gate_summary: GateSummaryResponse
     require_review: bool
     summary: Dict[str, int]
     ruleset_version: str
@@ -90,7 +121,7 @@ def register_bloodwork_endpoints(app):
         from bloodwork_engine.api import register_bloodwork_endpoints
         register_bloodwork_endpoints(app)
     """
-    from bloodwork_engine.engine import get_engine, get_loader, BloodworkDataLoader
+    from bloodwork_engine.engine_v2 import get_engine, get_loader, BloodworkDataLoaderV2, GateTier, GateAction
     
     # ---------------------------------------------------------
     # GET /api/v1/bloodwork/lab-profiles
@@ -113,21 +144,40 @@ def register_bloodwork_endpoints(app):
     # GET /api/v1/bloodwork/markers
     # ---------------------------------------------------------
     @app.get("/api/v1/bloodwork/markers", tags=["Bloodwork Engine"])
-    def list_markers():
+    def list_markers(tier: Optional[str] = None):
         """
         List all allowed biomarkers in the registry.
         
-        Only markers in this registry can be processed.
-        Any other marker code will be flagged as UNKNOWN.
+        v2.0 includes 40 biomarkers across 4 tiers:
+        - original: 13 core metabolic markers (ferritin, vitamin D, etc.)
+        - tier 1: Safety-critical markers (potassium, TSH, B12, etc.)
+        - tier 2: Optimization markers (omega-3 index, zinc, copper, etc.)
+        - tier 3: Genetic/hormonal markers (MTHFR, cortisol, estradiol, etc.)
+        
+        Optional filter:
+        - tier: Filter by marker tier (original, 1, 2, 3)
         """
         loader = get_loader()
         registry = loader.marker_registry
+        
+        markers = registry.get("markers", [])
+        
+        # Apply tier filter
+        if tier:
+            tier_value = tier.lower().replace("tier ", "")
+            markers = [m for m in markers if str(m.get("tier", "original")).lower() == tier_value]
         
         return {
             "version": registry.get("version"),
             "scope": registry.get("scope"),
             "allowed_marker_codes": loader.allowed_marker_codes,
             "marker_count": len(loader.allowed_marker_codes),
+            "tier_counts": {
+                "original": len([m for m in registry.get("markers", []) if m.get("tier", "original") == "original"]),
+                "tier_1": len([m for m in registry.get("markers", []) if m.get("tier") == "1"]),
+                "tier_2": len([m for m in registry.get("markers", []) if m.get("tier") == "2"]),
+                "tier_3": len([m for m in registry.get("markers", []) if m.get("tier") == "3"])
+            },
             "markers": [
                 {
                     "code": m["code"],
@@ -135,9 +185,12 @@ def register_bloodwork_endpoints(app):
                     "canonical_unit": m["canonical_unit"],
                     "allowed_units": m.get("allowed_units", []),
                     "sex_relevance": m.get("sex_relevance", "both"),
-                    "has_conversions": len(m.get("conversions", [])) > 0
+                    "has_conversions": len(m.get("conversions", [])) > 0,
+                    "tier": m.get("tier", "original"),
+                    "is_genetic": m.get("canonical_unit") == "categorical",
+                    "notes": m.get("notes")
                 }
-                for m in registry.get("markers", [])
+                for m in markers
             ]
         }
     
@@ -167,7 +220,12 @@ def register_bloodwork_endpoints(app):
             "canonical_unit": marker_def["canonical_unit"],
             "allowed_units": marker_def.get("allowed_units", []),
             "conversions": marker_def.get("conversions", []),
-            "sex_relevance": marker_def.get("sex_relevance", "both")
+            "sex_relevance": marker_def.get("sex_relevance", "both"),
+            "tier": marker_def.get("tier", "original"),
+            "added_in": marker_def.get("added_in"),
+            "notes": marker_def.get("notes"),
+            "is_genetic": marker_def.get("canonical_unit") == "categorical",
+            "categorical_values": marker_def.get("categorical_values")
         }
     
     # ---------------------------------------------------------
@@ -181,10 +239,11 @@ def register_bloodwork_endpoints(app):
         """
         List reference ranges.
         
-        v1.0 includes ranges for all 13 core biomarkers:
-        - ferritin, vitamin_d_25oh, calcium_serum, hs_crp
-        - fasting_glucose, hba1c, creatinine, egfr
-        - alt, ast, magnesium_serum, hemoglobin, total_testosterone
+        v2.0 includes ranges for all 40 biomarkers with:
+        - lab_reference: Standard lab ranges
+        - genomax_optimal: Functional optimal ranges
+        - decision_limits: Gate trigger thresholds
+        - critical: Emergency thresholds
         
         Optional filters:
         - lab_profile: Filter by specific lab profile
@@ -210,32 +269,125 @@ def register_bloodwork_endpoints(app):
             "policy": ranges_data.get("policy"),
             "lab_profiles": ranges_data.get("lab_profiles", []),
             "range_count": len(ranges),
-            "ranges": ranges,
-            "safety_gates": ranges_data.get("safety_gates", {})
+            "ranges": ranges
         }
     
     # ---------------------------------------------------------
     # GET /api/v1/bloodwork/safety-gates
     # ---------------------------------------------------------
     @app.get("/api/v1/bloodwork/safety-gates", tags=["Bloodwork Engine"])
-    def list_safety_gates():
+    def list_safety_gates(tier: Optional[str] = None):
         """
         List all defined safety gates.
         
-        Safety gates are cross-marker constraints that block or caution
-        certain supplement categories based on biomarker values.
+        v2.0 includes 31 safety gates across 3 tiers:
         
-        Gates in v1.0:
-        - iron_block: Block iron when ferritin high (unless CRP acute)
-        - vitamin_d_caution: Caution vitamin D when calcium high
-        - hepatic_caution: Caution hepatotoxic when ALT/AST high
-        - renal_caution: Caution renal-cleared when eGFR low / creatinine high
-        - acute_inflammation: Flag when hs-CRP indicates acute inflammation
+        TIER 1 - Safety Gates (14):
+        - Critical blocks (iron, potassium, iodine)
+        - Organ function cautions (hepatic, renal)
+        - Deficiency flags (B12, folate, coagulation)
+        
+        TIER 2 - Optimization Gates (6):
+        - Nutrient optimization (omega-3, zinc:copper ratio)
+        - Metabolic support (insulin resistance, triglycerides)
+        
+        TIER 3 - Genetic/Hormonal Gates (11):
+        - Genetic routing (MTHFR methylfolate requirement)
+        - Hormonal balance (cortisol, thyroid conversion, testosterone)
+        - Cardiovascular markers (ApoB, Lp(a))
+        
+        Optional filter:
+        - tier: Filter by gate tier (1, 2, 3)
         """
         loader = get_loader()
+        all_gates = loader.get_safety_gates()
+        
+        # Apply tier filter
+        if tier:
+            tier_num = tier.replace("tier", "").replace(" ", "").strip()
+            all_gates = {k: v for k, v in all_gates.items() if str(v.get("tier", "1")) == tier_num}
+        
+        # Group by tier
+        tier1_gates = {k: v for k, v in all_gates.items() if v.get("tier") == 1}
+        tier2_gates = {k: v for k, v in all_gates.items() if v.get("tier") == 2}
+        tier3_gates = {k: v for k, v in all_gates.items() if v.get("tier") == 3}
+        
         return {
             "version": loader.reference_ranges.get("version"),
-            "safety_gates": loader.get_safety_gates()
+            "total_gates": len(all_gates),
+            "tier_summary": {
+                "tier1_safety": len(tier1_gates),
+                "tier2_optimization": len(tier2_gates),
+                "tier3_genetic_hormonal": len(tier3_gates)
+            },
+            "gates_by_tier": {
+                "tier1_safety": tier1_gates,
+                "tier2_optimization": tier2_gates,
+                "tier3_genetic_hormonal": tier3_gates
+            },
+            "all_gates": all_gates if not tier else None
+        }
+    
+    # ---------------------------------------------------------
+    # GET /api/v1/bloodwork/computed-markers
+    # ---------------------------------------------------------
+    @app.get("/api/v1/bloodwork/computed-markers", tags=["Bloodwork Engine"])
+    def list_computed_markers():
+        """
+        List available computed/derived markers.
+        
+        Computed markers are calculated from other biomarkers:
+        - homa_ir: (fasting_glucose * fasting_insulin) / 405
+        - zinc_copper_ratio: zinc_serum / copper_serum
+        - rt3_ft3_ratio: (reverse_t3 / free_t3) * 100
+        - estradiol_progesterone_ratio: estradiol / progesterone (female only)
+        """
+        return {
+            "computed_markers": [
+                {
+                    "code": "homa_ir",
+                    "name": "HOMA-IR (Insulin Resistance)",
+                    "formula": "(fasting_glucose * fasting_insulin) / 405",
+                    "required_markers": ["fasting_glucose", "fasting_insulin"],
+                    "interpretation": {
+                        "optimal": "<1.0",
+                        "normal": "<2.5",
+                        "elevated": "2.5-3.0",
+                        "high": ">3.0"
+                    }
+                },
+                {
+                    "code": "zinc_copper_ratio",
+                    "name": "Zinc:Copper Ratio",
+                    "formula": "zinc_serum / copper_serum",
+                    "required_markers": ["zinc_serum", "copper_serum"],
+                    "interpretation": {
+                        "optimal": "0.7-1.0",
+                        "elevated_zinc": ">1.5 (caution on zinc supplementation)"
+                    }
+                },
+                {
+                    "code": "rt3_ft3_ratio",
+                    "name": "Reverse T3 to Free T3 Ratio",
+                    "formula": "(reverse_t3 / free_t3) * 100",
+                    "required_markers": ["reverse_t3", "free_t3"],
+                    "interpretation": {
+                        "optimal": "<10",
+                        "elevated": ">10 (poor T4-T3 conversion)"
+                    }
+                },
+                {
+                    "code": "estradiol_progesterone_ratio",
+                    "name": "Estradiol:Progesterone Ratio",
+                    "formula": "estradiol / progesterone",
+                    "required_markers": ["estradiol", "progesterone"],
+                    "sex_specific": "female",
+                    "interpretation": {
+                        "optimal_luteal": "10-20",
+                        "estrogen_dominance": ">20"
+                    }
+                }
+            ]
         }
     
     # ---------------------------------------------------------
@@ -244,22 +396,20 @@ def register_bloodwork_endpoints(app):
     @app.post("/api/v1/bloodwork/process", tags=["Bloodwork Engine"], response_model=ProcessMarkersResponse)
     def process_markers(request: ProcessMarkersRequest):
         """
-        Process biomarkers through the Bloodwork Engine.
+        Process biomarkers through the Bloodwork Engine v2.0.
         
         This endpoint:
-        1. Validates markers against the registry (unknown -> UNKNOWN status)
+        1. Validates markers against the registry (40 markers, including genetic)
         2. Converts units to canonical units (with logging)
-        3. Looks up reference ranges (lab_profile -> GLOBAL_CONSERVATIVE fallback)
-        4. Evaluates decision limits and flags breaches
-        5. Triggers safety gates based on cross-marker analysis
+        3. Looks up reference ranges AND GenoMAX optimal ranges
+        4. Calculates computed markers (HOMA-IR, ratios)
+        5. Evaluates 31 safety gates across 3 tiers
         6. Returns processed markers with flags and routing constraints
         
-        Safety gates evaluated:
-        - BLOCK_IRON: Ferritin above iron_block_threshold
-        - CAUTION_VITAMIN_D: Calcium above vitamin_d_caution_threshold
-        - CAUTION_HEPATOTOXIC: ALT or AST above hepatic_caution_threshold
-        - CAUTION_RENAL: eGFR below or creatinine above renal_caution_threshold
-        - FLAG_ACUTE_INFLAMMATION: hs-CRP above acute_inflammation_threshold
+        Safety Gate Tiers:
+        - TIER 1 (Safety): BLOCK/CAUTION actions for critical markers
+        - TIER 2 (Optimization): FLAG actions for nutrient optimization
+        - TIER 3 (Genetic/Hormonal): Specialized routing for MTHFR, hormones
         """
         engine = get_engine(lab_profile=request.lab_profile)
         
@@ -273,6 +423,29 @@ def register_bloodwork_endpoints(app):
             markers=markers_input,
             sex=request.sex,
             age=request.age
+        )
+        
+        # Convert computed markers
+        computed_markers_response = []
+        if hasattr(result, 'computed_markers') and result.computed_markers:
+            for cm in result.computed_markers:
+                computed_markers_response.append(ComputedMarkerResponse(
+                    code=cm.code,
+                    name=cm.name,
+                    value=cm.value,
+                    formula=cm.formula,
+                    interpretation=cm.interpretation,
+                    source_markers=cm.source_markers
+                ))
+        
+        # Convert gate summary
+        gate_summary = GateSummaryResponse(
+            tier1_safety=result.gate_summary.get("tier1", {"blocks": 0, "cautions": 0, "flags": 0}) if hasattr(result, 'gate_summary') else {"blocks": 0, "cautions": 0, "flags": 0},
+            tier2_optimization=result.gate_summary.get("tier2", {"blocks": 0, "cautions": 0, "flags": 0}) if hasattr(result, 'gate_summary') else {"blocks": 0, "cautions": 0, "flags": 0},
+            tier3_genetic_hormonal=result.gate_summary.get("tier3", {"blocks": 0, "cautions": 0, "flags": 0}) if hasattr(result, 'gate_summary') else {"blocks": 0, "cautions": 0, "flags": 0},
+            total_blocks=result.gate_summary.get("total_blocks", 0) if hasattr(result, 'gate_summary') else 0,
+            total_cautions=result.gate_summary.get("total_cautions", 0) if hasattr(result, 'gate_summary') else 0,
+            total_flags=result.gate_summary.get("total_flags", 0) if hasattr(result, 'gate_summary') else 0
         )
         
         # Convert dataclass result to response
@@ -290,16 +463,19 @@ def register_bloodwork_endpoints(app):
                     status=m.status.value if hasattr(m.status, 'value') else m.status,
                     range_status=m.range_status.value if hasattr(m.range_status, 'value') else m.range_status,
                     reference_range=m.reference_range,
+                    genomax_optimal=getattr(m, 'genomax_optimal', None),
                     decision_limits=m.decision_limits,
                     lab_profile_used=m.lab_profile_used,
                     fallback_used=m.fallback_used,
                     conversion_applied=m.conversion_applied,
                     conversion_multiplier=m.conversion_multiplier,
                     flags=m.flags,
-                    log_entries=m.log_entries
+                    log_entries=m.log_entries,
+                    genetic_interpretation=getattr(m, 'genetic_interpretation', None)
                 )
                 for m in result.markers
             ],
+            computed_markers=computed_markers_response,
             routing_constraints=result.routing_constraints,
             safety_gates=[
                 SafetyGateResponse(
@@ -309,11 +485,15 @@ def register_bloodwork_endpoints(app):
                     trigger_value=g.trigger_value,
                     threshold=g.threshold,
                     routing_constraint=g.routing_constraint,
+                    gate_tier=getattr(g, 'gate_tier', GateTier.TIER1_SAFETY).value if hasattr(getattr(g, 'gate_tier', None), 'value') else "TIER1_SAFETY",
+                    gate_action=getattr(g, 'gate_action', GateAction.FLAG).value if hasattr(getattr(g, 'gate_action', None), 'value') else "FLAG",
                     exception_active=g.exception_active,
-                    exception_reason=g.exception_reason
+                    exception_reason=g.exception_reason,
+                    blocked_ingredients=getattr(g, 'blocked_ingredients', [])
                 )
                 for g in result.safety_gates
             ],
+            gate_summary=gate_summary,
             require_review=result.require_review,
             summary=result.summary,
             ruleset_version=result.ruleset_version,
@@ -337,16 +517,28 @@ def register_bloodwork_endpoints(app):
         # Diagnostic: check file paths
         engine_file = Path(__file__).resolve()
         data_dir = engine_file.parent / "data"
-        registry_path = data_dir / "marker_registry_v1_0.json"
-        ranges_path = data_dir / "reference_ranges_v1_0.json"
+        registry_path = data_dir / "marker_registry_v2_0.json"
+        ranges_path = data_dir / "reference_ranges_v2_0.json"
+        
+        # Count gates by tier
+        all_gates = loader.get_safety_gates()
+        tier1_count = len([g for g in all_gates.values() if g.get("tier") == 1])
+        tier2_count = len([g for g in all_gates.values() if g.get("tier") == 2])
+        tier3_count = len([g for g in all_gates.values() if g.get("tier") == 3])
         
         return {
-            "engine_version": "1.0",
+            "engine_version": "2.0.0",
             "status": "operational",
             "marker_registry": {
                 "version": registry.get("version"),
                 "marker_count": len(loader.allowed_marker_codes),
-                "loaded": True
+                "loaded": True,
+                "tier_breakdown": {
+                    "original": len([m for m in registry.get("markers", []) if m.get("tier", "original") == "original"]),
+                    "tier_1": len([m for m in registry.get("markers", []) if m.get("tier") == "1"]),
+                    "tier_2": len([m for m in registry.get("markers", []) if m.get("tier") == "2"]),
+                    "tier_3": len([m for m in registry.get("markers", []) if m.get("tier") == "3"])
+                }
             },
             "reference_ranges": {
                 "version": ranges.get("version"),
@@ -355,8 +547,14 @@ def register_bloodwork_endpoints(app):
                 "ranges_active": loader.range_count > 0
             },
             "safety_gates": {
-                "defined": len(loader.get_safety_gates()),
-                "gates": list(loader.get_safety_gates().keys())
+                "total_defined": len(all_gates),
+                "tier1_safety": tier1_count,
+                "tier2_optimization": tier2_count,
+                "tier3_genetic_hormonal": tier3_count,
+                "gates": list(all_gates.keys())
+            },
+            "computed_markers": {
+                "available": ["homa_ir", "zinc_copper_ratio", "rt3_ft3_ratio", "estradiol_progesterone_ratio"]
             },
             "lab_profiles": loader.lab_profiles,
             "policy": ranges.get("policy", {}),
@@ -372,7 +570,7 @@ def register_bloodwork_endpoints(app):
                 "ranges_exists": ranges_path.exists(),
                 "ranges_size_bytes": ranges_path.stat().st_size if ranges_path.exists() else 0,
                 "cwd": os.getcwd(),
-                "singleton_loaded": BloodworkDataLoader._loaded
+                "singleton_loaded": BloodworkDataLoaderV2._loaded
             }
         }
     
@@ -386,15 +584,18 @@ def register_bloodwork_endpoints(app):
         Use this if data files were updated but singleton cache is stale.
         """
         # Reset the singleton
-        BloodworkDataLoader.reset()
+        BloodworkDataLoaderV2.reset()
         
         # Re-initialize
         loader = get_loader()
+        all_gates = loader.get_safety_gates()
         
         return {
             "status": "reloaded",
+            "engine_version": "2.0.0",
             "marker_count": len(loader.allowed_marker_codes),
             "range_count": loader.range_count,
+            "safety_gate_count": len(all_gates),
             "ruleset_version": loader.ruleset_version
         }
     
