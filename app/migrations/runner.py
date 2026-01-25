@@ -686,6 +686,313 @@ def check_migration_007() -> Dict[str, Any]:
         raise HTTPException(status_code=500, detail=f"Check error: {str(e)}")
 
 
+# =============================================================================
+# MIGRATION 013: Bloodwork Engine v2.0 Schema
+# =============================================================================
+
+@router.post("/run/013-bloodwork-v2-schema")
+def run_migration_013() -> Dict[str, Any]:
+    """
+    Run migration 013: Bloodwork Engine v2.0 Schema.
+    
+    Creates:
+    - routing_constraint_blocks: Maps safety gates to ingredient blocks (seeded with 23 rows)
+    - bloodwork_uploads: Stores OCR/API bloodwork uploads  
+    - bloodwork_results: Stores processed results with routing constraints
+    - bloodwork_markers: Individual marker results
+    
+    Safe to run multiple times (idempotent via IF NOT EXISTS and ON CONFLICT).
+    """
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    results = []
+    
+    try:
+        cur = conn.cursor()
+        
+        # 1. Create routing_constraint_blocks table
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS routing_constraint_blocks (
+                id SERIAL PRIMARY KEY,
+                gate_id VARCHAR(50) NOT NULL,
+                routing_constraint VARCHAR(100) NOT NULL,
+                gate_tier INTEGER NOT NULL DEFAULT 1,
+                gate_action VARCHAR(20) NOT NULL DEFAULT 'BLOCK',
+                ingredient_canonical_name VARCHAR(255) NOT NULL,
+                ingredient_pattern VARCHAR(255),
+                block_reason TEXT NOT NULL,
+                exception_condition TEXT,
+                exception_note TEXT,
+                effective_from TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                effective_until TIMESTAMP WITH TIME ZONE,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                created_by VARCHAR(100) DEFAULT 'system',
+                CONSTRAINT uk_gate_ingredient UNIQUE (gate_id, ingredient_canonical_name)
+            )
+        """)
+        results.append("Created/verified routing_constraint_blocks table")
+        
+        # Create indexes
+        for idx_name, idx_col in [
+            ('idx_rcb_routing_constraint', 'routing_constraint'),
+            ('idx_rcb_ingredient', 'ingredient_canonical_name'),
+            ('idx_rcb_gate_tier', 'gate_tier'),
+        ]:
+            cur.execute(f"SELECT 1 FROM pg_indexes WHERE indexname = %s", (idx_name,))
+            if not cur.fetchone():
+                cur.execute(f"CREATE INDEX {idx_name} ON routing_constraint_blocks({idx_col})")
+                results.append(f"Created index {idx_name}")
+        
+        # 2. Create bloodwork_uploads table
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS bloodwork_uploads (
+                id SERIAL PRIMARY KEY,
+                upload_id UUID DEFAULT gen_random_uuid() UNIQUE NOT NULL,
+                user_id VARCHAR(255),
+                session_id VARCHAR(255),
+                source_type VARCHAR(50) NOT NULL,
+                source_provider VARCHAR(100),
+                original_filename VARCHAR(255),
+                file_mime_type VARCHAR(100),
+                file_size_bytes INTEGER,
+                raw_ocr_text TEXT,
+                raw_api_response JSONB,
+                parsed_markers JSONB NOT NULL,
+                lab_name VARCHAR(255),
+                lab_report_date DATE,
+                patient_name VARCHAR(255),
+                patient_dob DATE,
+                status VARCHAR(50) DEFAULT 'pending',
+                error_message TEXT,
+                processing_started_at TIMESTAMP WITH TIME ZONE,
+                processing_completed_at TIMESTAMP WITH TIME ZONE,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                updated_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        results.append("Created/verified bloodwork_uploads table")
+        
+        # 3. Create bloodwork_results table
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS bloodwork_results (
+                id SERIAL PRIMARY KEY,
+                result_id UUID DEFAULT gen_random_uuid() UNIQUE NOT NULL,
+                upload_id UUID REFERENCES bloodwork_uploads(upload_id),
+                user_id VARCHAR(255),
+                sex VARCHAR(10),
+                age INTEGER,
+                lab_profile VARCHAR(50) NOT NULL,
+                engine_version VARCHAR(20) NOT NULL,
+                ruleset_version VARCHAR(100) NOT NULL,
+                processed_at TIMESTAMP WITH TIME ZONE NOT NULL,
+                total_markers INTEGER NOT NULL,
+                valid_markers INTEGER NOT NULL,
+                unknown_markers INTEGER NOT NULL,
+                optimal_markers INTEGER NOT NULL,
+                total_gates_triggered INTEGER DEFAULT 0,
+                tier1_blocks INTEGER DEFAULT 0,
+                tier1_cautions INTEGER DEFAULT 0,
+                tier1_flags INTEGER DEFAULT 0,
+                tier2_blocks INTEGER DEFAULT 0,
+                tier2_cautions INTEGER DEFAULT 0,
+                tier2_flags INTEGER DEFAULT 0,
+                tier3_blocks INTEGER DEFAULT 0,
+                tier3_cautions INTEGER DEFAULT 0,
+                tier3_flags INTEGER DEFAULT 0,
+                routing_constraints TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[],
+                computed_markers JSONB,
+                full_result JSONB NOT NULL,
+                input_hash VARCHAR(64) NOT NULL,
+                output_hash VARCHAR(64) NOT NULL,
+                require_review BOOLEAN DEFAULT false,
+                reviewed_at TIMESTAMP WITH TIME ZONE,
+                reviewed_by VARCHAR(100),
+                review_notes TEXT,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        """)
+        results.append("Created/verified bloodwork_results table")
+        
+        # 4. Create bloodwork_markers table
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS bloodwork_markers (
+                id SERIAL PRIMARY KEY,
+                result_id UUID REFERENCES bloodwork_results(result_id) ON DELETE CASCADE,
+                original_code VARCHAR(100) NOT NULL,
+                canonical_code VARCHAR(100),
+                original_value NUMERIC,
+                canonical_value NUMERIC,
+                original_unit VARCHAR(50) NOT NULL,
+                canonical_unit VARCHAR(50),
+                status VARCHAR(50) NOT NULL,
+                range_status VARCHAR(50) NOT NULL,
+                lab_profile_used VARCHAR(50),
+                fallback_used BOOLEAN DEFAULT false,
+                reference_low NUMERIC,
+                reference_high NUMERIC,
+                genomax_optimal_low NUMERIC,
+                genomax_optimal_high NUMERIC,
+                conversion_applied BOOLEAN DEFAULT false,
+                conversion_multiplier NUMERIC,
+                flags TEXT[] DEFAULT ARRAY[]::TEXT[],
+                log_entries TEXT[] DEFAULT ARRAY[]::TEXT[],
+                is_genetic BOOLEAN DEFAULT false,
+                genetic_value VARCHAR(50),
+                genetic_interpretation TEXT
+            )
+        """)
+        results.append("Created/verified bloodwork_markers table")
+        
+        # 5. Seed routing constraint blocks (23 rows)
+        seed_sql = """
+            INSERT INTO routing_constraint_blocks (gate_id, routing_constraint, gate_tier, gate_action, ingredient_canonical_name, block_reason, exception_condition, exception_note)
+            VALUES
+                ('GATE_001', 'BLOCK_IRON', 1, 'BLOCK', 'iron', 'Ferritin >300(M)/200(F) indicates iron overload risk', 'hs_crp > 3.0', 'Acute inflammation may artificially elevate ferritin'),
+                ('GATE_001', 'BLOCK_IRON', 1, 'BLOCK', 'iron_bisglycinate', 'Ferritin >300(M)/200(F) indicates iron overload risk', 'hs_crp > 3.0', 'Acute inflammation may artificially elevate ferritin'),
+                ('GATE_001', 'BLOCK_IRON', 1, 'BLOCK', 'ferrous_sulfate', 'Ferritin >300(M)/200(F) indicates iron overload risk', 'hs_crp > 3.0', 'Acute inflammation may artificially elevate ferritin'),
+                ('GATE_002', 'CAUTION_VITAMIN_D', 1, 'CAUTION', 'vitamin_d3', 'Calcium >10.5 mg/dL - vitamin D may increase calcium absorption', NULL, NULL),
+                ('GATE_002', 'CAUTION_VITAMIN_D', 1, 'CAUTION', 'vitamin_d2', 'Calcium >10.5 mg/dL - vitamin D may increase calcium absorption', NULL, NULL),
+                ('GATE_003', 'CAUTION_HEPATOTOXIC', 1, 'CAUTION', 'kava', 'ALT/AST >50(M)/40(F) - hepatotoxic risk', NULL, NULL),
+                ('GATE_003', 'BLOCK_ASHWAGANDHA', 1, 'BLOCK', 'ashwagandha', 'ALT/AST >50(M)/40(F) - documented hepatotoxicity risk', NULL, NULL),
+                ('GATE_003', 'CAUTION_HEPATOTOXIC', 1, 'CAUTION', 'green_tea_extract', 'ALT/AST >50(M)/40(F) - high-dose EGCG hepatotoxicity', NULL, NULL),
+                ('GATE_003', 'CAUTION_HEPATOTOXIC', 1, 'CAUTION', 'niacin', 'ALT/AST >50(M)/40(F) - high-dose niacin hepatotoxicity', NULL, NULL),
+                ('GATE_004', 'CAUTION_RENAL', 1, 'CAUTION', 'creatine', 'eGFR <60 or Creatinine elevated - renal-cleared supplement', NULL, NULL),
+                ('GATE_004', 'CAUTION_RENAL', 1, 'CAUTION', 'magnesium', 'eGFR <60 or Creatinine elevated - renal excretion required', NULL, NULL),
+                ('GATE_006', 'BLOCK_POTASSIUM', 1, 'BLOCK', 'potassium', 'K+ >5.0 mEq/L - hyperkalemia risk', NULL, NULL),
+                ('GATE_006', 'BLOCK_POTASSIUM', 1, 'BLOCK', 'potassium_citrate', 'K+ >5.0 mEq/L - hyperkalemia risk', NULL, NULL),
+                ('GATE_008', 'BLOCK_IODINE', 1, 'BLOCK', 'iodine', 'TSH <0.4 - hyperthyroid state, iodine contraindicated', NULL, NULL),
+                ('GATE_008', 'BLOCK_IODINE', 1, 'BLOCK', 'kelp', 'TSH <0.4 - hyperthyroid state, high-iodine source', NULL, NULL),
+                ('GATE_014', 'CAUTION_BLOOD_THINNING', 1, 'CAUTION', 'fish_oil', 'Platelets <100K - may potentiate bleeding', NULL, NULL),
+                ('GATE_014', 'CAUTION_BLOOD_THINNING', 1, 'CAUTION', 'vitamin_e', 'Platelets <100K - may potentiate bleeding', NULL, NULL),
+                ('GATE_014', 'CAUTION_BLOOD_THINNING', 1, 'CAUTION', 'ginkgo', 'Platelets <100K - may potentiate bleeding', NULL, NULL),
+                ('GATE_014', 'CAUTION_BLOOD_THINNING', 1, 'CAUTION', 'garlic_extract', 'Platelets <100K - may potentiate bleeding', NULL, NULL),
+                ('GATE_017', 'CAUTION_ZINC_EXCESS', 2, 'CAUTION', 'zinc', 'Zn:Cu ratio >1.5 - may worsen copper deficiency', NULL, NULL),
+                ('GATE_017', 'CAUTION_ZINC_EXCESS', 2, 'CAUTION', 'zinc_picolinate', 'Zn:Cu ratio >1.5 - may worsen copper deficiency', NULL, NULL),
+                ('GATE_020', 'CAUTION_FISH_OIL_DOSE', 2, 'CAUTION', 'fish_oil_high', 'Triglycerides >500 - requires medical-grade fish oil dosing', NULL, NULL),
+                ('GATE_021', 'BLOCK_FOLIC_ACID', 3, 'BLOCK', 'folic_acid', 'MTHFR TT or compound heterozygous - cannot metabolize folic acid', NULL, NULL)
+            ON CONFLICT (gate_id, ingredient_canonical_name) DO UPDATE SET
+                routing_constraint = EXCLUDED.routing_constraint,
+                block_reason = EXCLUDED.block_reason,
+                exception_condition = EXCLUDED.exception_condition,
+                exception_note = EXCLUDED.exception_note
+        """
+        cur.execute(seed_sql)
+        results.append(f"Seeded routing_constraint_blocks (upserted {cur.rowcount} rows)")
+        
+        # Create update trigger for bloodwork_uploads
+        cur.execute("""
+            CREATE OR REPLACE FUNCTION update_bloodwork_uploads_timestamp()
+            RETURNS TRIGGER AS $$
+            BEGIN
+                NEW.updated_at = NOW();
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+        """)
+        
+        cur.execute("DROP TRIGGER IF EXISTS trg_bloodwork_uploads_updated ON bloodwork_uploads")
+        cur.execute("""
+            CREATE TRIGGER trg_bloodwork_uploads_updated
+                BEFORE UPDATE ON bloodwork_uploads
+                FOR EACH ROW
+                EXECUTE FUNCTION update_bloodwork_uploads_timestamp()
+        """)
+        results.append("Created update timestamp trigger")
+        
+        # Get counts
+        cur.execute("SELECT COUNT(*) as count FROM routing_constraint_blocks")
+        rcb_count = cur.fetchone()['count']
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        return {
+            "status": "success",
+            "migration": "013-bloodwork-v2-schema",
+            "tables_created": [
+                "routing_constraint_blocks",
+                "bloodwork_uploads", 
+                "bloodwork_results",
+                "bloodwork_markers"
+            ],
+            "routing_constraint_blocks_seeded": rcb_count,
+            "steps": results
+        }
+        
+    except Exception as e:
+        try:
+            conn.rollback()
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Migration error: {str(e)}")
+
+
+@router.get("/status/013-bloodwork-v2-schema")
+def check_migration_013() -> Dict[str, Any]:
+    """Check if migration 013 has been applied."""
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        cur = conn.cursor()
+        
+        tables = ['routing_constraint_blocks', 'bloodwork_uploads', 'bloodwork_results', 'bloodwork_markers']
+        table_status = {}
+        
+        for table in tables:
+            cur.execute("""
+                SELECT 1 FROM information_schema.tables
+                WHERE table_name = %s
+            """, (table,))
+            exists = cur.fetchone() is not None
+            
+            row_count = 0
+            if exists:
+                cur.execute(f"SELECT COUNT(*) as count FROM {table}")
+                row_count = cur.fetchone()['count']
+            
+            table_status[table] = {
+                "exists": exists,
+                "row_count": row_count
+            }
+        
+        # Sample routing constraints
+        samples = []
+        if table_status['routing_constraint_blocks']['exists']:
+            cur.execute("""
+                SELECT gate_id, routing_constraint, ingredient_canonical_name, gate_tier, gate_action
+                FROM routing_constraint_blocks
+                ORDER BY gate_id, ingredient_canonical_name
+                LIMIT 10
+            """)
+            samples = [dict(r) for r in cur.fetchall()]
+        
+        cur.close()
+        conn.close()
+        
+        all_exist = all(t['exists'] for t in table_status.values())
+        rcb_seeded = table_status['routing_constraint_blocks']['row_count'] >= 20
+        
+        return {
+            "migration": "013-bloodwork-v2-schema",
+            "applied": all_exist and rcb_seeded,
+            "tables": table_status,
+            "routing_constraint_samples": samples
+        }
+        
+    except Exception as e:
+        try:
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Check error: {str(e)}")
+
+
 @router.get("/sanity-check/topical")
 def topical_sanity_check() -> Dict[str, Any]:
     """Dedicated QA sanity check for TOPICAL products."""
