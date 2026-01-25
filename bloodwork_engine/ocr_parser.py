@@ -15,11 +15,17 @@ Usage:
     
     # Or use the convenience function
     markers = parse_bloodwork_image(image_path="/path/to/report.pdf")
+
+Environment Variables:
+    GOOGLE_APPLICATION_CREDENTIALS: Path to service account JSON file
+    GOOGLE_CREDENTIALS_BASE64: Base64-encoded service account JSON (for Railway/cloud)
 """
 
 import re
 import json
 import base64
+import tempfile
+import os
 import logging
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Tuple
@@ -69,6 +75,54 @@ class ParseResult:
             {"code": m.code, "value": m.value, "unit": m.unit}
             for m in self.markers
         ]
+
+
+def setup_google_credentials() -> Optional[str]:
+    """
+    Set up Google Cloud credentials from environment variables.
+    
+    Supports two methods:
+    1. GOOGLE_APPLICATION_CREDENTIALS - path to JSON file
+    2. GOOGLE_CREDENTIALS_BASE64 - base64-encoded JSON (for Railway/cloud)
+    
+    Returns:
+        Path to credentials file, or None if not configured
+    """
+    # Method 1: Already configured via file path
+    if os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"):
+        cred_path = os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
+        if os.path.exists(cred_path):
+            logger.info(f"Using Google credentials from: {cred_path}")
+            return cred_path
+    
+    # Method 2: Base64-encoded credentials (Railway/cloud deployment)
+    base64_creds = os.environ.get("GOOGLE_CREDENTIALS_BASE64")
+    if base64_creds:
+        try:
+            # Decode and write to temp file
+            creds_json = base64.b64decode(base64_creds).decode("utf-8")
+            
+            # Validate it's valid JSON
+            json.loads(creds_json)
+            
+            # Write to temp file
+            temp_dir = tempfile.gettempdir()
+            cred_path = os.path.join(temp_dir, "google_credentials.json")
+            
+            with open(cred_path, "w") as f:
+                f.write(creds_json)
+            
+            # Set the environment variable for Google libraries
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = cred_path
+            logger.info(f"Created Google credentials from base64 at: {cred_path}")
+            return cred_path
+            
+        except Exception as e:
+            logger.error(f"Failed to decode GOOGLE_CREDENTIALS_BASE64: {e}")
+            return None
+    
+    logger.warning("No Google Cloud credentials configured")
+    return None
 
 
 class OCRParser:
@@ -188,21 +242,39 @@ class OCRParser:
         
         Args:
             google_credentials_path: Path to Google Cloud credentials JSON.
-                                    If None, uses GOOGLE_APPLICATION_CREDENTIALS env var.
+                                    If None, uses environment variables.
         """
         self.credentials_path = google_credentials_path
         self._client = None
+        self._credentials_setup = False
+    
+    def _ensure_credentials(self) -> bool:
+        """Ensure Google credentials are configured."""
+        if self._credentials_setup:
+            return True
+        
+        if self.credentials_path:
+            os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = self.credentials_path
+            self._credentials_setup = True
+            return True
+        
+        result = setup_google_credentials()
+        self._credentials_setup = result is not None
+        return self._credentials_setup
     
     @property
     def client(self):
         """Lazy-load Google Cloud Vision client."""
         if self._client is None:
             try:
-                from google.cloud import vision
-                import os
+                # Ensure credentials are set up first
+                if not self._ensure_credentials():
+                    raise RuntimeError(
+                        "Google Cloud credentials not configured. "
+                        "Set GOOGLE_APPLICATION_CREDENTIALS or GOOGLE_CREDENTIALS_BASE64"
+                    )
                 
-                if self.credentials_path:
-                    os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = self.credentials_path
+                from google.cloud import vision
                 
                 self._client = vision.ImageAnnotatorClient()
                 logger.info("Google Cloud Vision client initialized")
@@ -215,6 +287,14 @@ class OCRParser:
                 raise RuntimeError(f"Failed to initialize Google Cloud Vision: {e}")
         
         return self._client
+    
+    @classmethod
+    def is_configured(cls) -> bool:
+        """Check if OCR is properly configured."""
+        return bool(
+            os.environ.get("GOOGLE_APPLICATION_CREDENTIALS") or
+            os.environ.get("GOOGLE_CREDENTIALS_BASE64")
+        )
     
     def parse_image(self, image_data: bytes, mime_type: str = "image/png") -> ParseResult:
         """
@@ -390,17 +470,11 @@ class OCRParser:
         Returns:
             Tuple of (value, unit, confidence)
         """
-        # Common patterns for value extraction
-        # Pattern 1: value unit (e.g., "45.2 ng/mL")
-        # Pattern 2: value  range (e.g., "45.2  30-100")
-        # Pattern 3: result: value (e.g., "Result: 45.2")
-        
         value = None
         unit = "unknown"
         confidence = 0.5
         
         # Try to find a numeric value
-        # Handle values like: 45.2, <0.5, >100, 1,234.5
         value_pattern = r"(?:(?:result|value|level)[\s:]+)?([<>]?\s*[\d,]+\.?\d*)"
         value_match = re.search(value_pattern, line, re.IGNORECASE)
         
@@ -409,14 +483,12 @@ class OCRParser:
             
             # Handle < and > prefixes
             if raw_value.startswith("<"):
-                # Use half the threshold for "below detection"
                 try:
                     value = float(raw_value[1:].strip()) / 2
                     confidence = 0.7
                 except ValueError:
                     return None, "", 0.0
             elif raw_value.startswith(">"):
-                # Use 1.1x the threshold for "above detection"
                 try:
                     value = float(raw_value[1:].strip()) * 1.1
                     confidence = 0.7
@@ -447,11 +519,10 @@ class OCRParser:
     
     def _extract_date(self, text: str) -> Optional[str]:
         """Extract report date from text."""
-        # Common date patterns
         date_patterns = [
-            r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",  # MM/DD/YYYY or DD-MM-YYYY
-            r"(\d{4}[/-]\d{1,2}[/-]\d{1,2})",     # YYYY-MM-DD
-            r"((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{4})",  # Month DD, YYYY
+            r"(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})",
+            r"(\d{4}[/-]\d{1,2}[/-]\d{1,2})",
+            r"((?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{4})",
         ]
         
         for pattern in date_patterns:
@@ -510,3 +581,35 @@ def parse_text_fallback(raw_text: str) -> ParseResult:
     """
     parser = OCRParser()
     return parser._parse_text(raw_text)
+
+
+def get_ocr_status() -> Dict[str, Any]:
+    """
+    Get OCR configuration status.
+    
+    Returns:
+        Dict with configuration status and details
+    """
+    has_file_path = bool(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"))
+    has_base64 = bool(os.environ.get("GOOGLE_CREDENTIALS_BASE64"))
+    
+    status = {
+        "configured": has_file_path or has_base64,
+        "method": None,
+        "details": {}
+    }
+    
+    if has_file_path:
+        cred_path = os.environ["GOOGLE_APPLICATION_CREDENTIALS"]
+        status["method"] = "file_path"
+        status["details"] = {
+            "path": cred_path,
+            "exists": os.path.exists(cred_path)
+        }
+    elif has_base64:
+        status["method"] = "base64"
+        status["details"] = {
+            "length": len(os.environ["GOOGLE_CREDENTIALS_BASE64"])
+        }
+    
+    return status
