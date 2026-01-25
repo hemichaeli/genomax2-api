@@ -1,6 +1,13 @@
 """
-GenoMAX2 API Server Entry Point v3.29.0
-Bloodwork Engine v2.0 with Webhook Integration
+GenoMAX2 API Server Entry Point v3.30.0
+Bloodwork Engine v2.0 with Supliful Catalog Integration
+
+v3.30.0:
+- Supliful catalog integration with 185+ products
+- MAXimo² (male) and MAXima² (female) product lines
+- Append-only governance for catalog entries
+- Biomarker-to-product recommendation engine
+- Safety gate validation for product selection
 
 v3.29.0:
 - Add webhook endpoints for lab result notifications
@@ -84,6 +91,16 @@ try:
     print("Webhook endpoints registered successfully")
 except Exception as e:
     print(f"ERROR loading Webhook endpoints: {type(e).__name__}: {e}")
+    import traceback
+    traceback.print_exc()
+
+# ===== CATALOG ENDPOINTS (v3.30.0) =====
+try:
+    from bloodwork_engine.api_catalog_endpoints import register_catalog_endpoints
+    catalog_routes = register_catalog_endpoints(app)
+    print(f"Catalog endpoints registered successfully ({len(catalog_routes)} routes)")
+except Exception as e:
+    print(f"ERROR loading Catalog endpoints: {type(e).__name__}: {e}")
     import traceback
     traceback.print_exc()
 
@@ -186,10 +203,14 @@ def debug_routes():
     # Filter for webhook routes
     webhook_routes = [r for r in routes if 'webhook' in r['path'].lower()]
     
+    # Filter for catalog routes
+    catalog_routes = [r for r in routes if 'catalog' in r['path'].lower()]
+    
     return {
         "total_routes": len(routes),
         "bloodwork_routes": bloodwork_routes,
         "webhook_routes": webhook_routes,
+        "catalog_routes": catalog_routes,
         "health_routes": health_routes,
         "shopify_routes": shopify_routes,
         "launch_routes": launch_routes,
