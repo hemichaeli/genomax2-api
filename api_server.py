@@ -1,7 +1,14 @@
 """
 GenoMAX² API Server
 Gender-Optimized Biological Operating System
-Version 3.27.0 - Launch v1 Enforcement
+Version 3.28.0 - Bloodwork Engine v2.0
+
+v3.28.0:
+- Bloodwork Engine upgraded to v2.0 (40 markers, 31 safety gates)
+- Auto-migration runner on startup
+- OCR parser service for blood test uploads
+- Lab adapter interface for API integrations
+- Safety routing service for ingredient filtering
 
 v3.27.0:
 - Launch v1 enforcement with HARD GUARDRAILS
@@ -10,70 +17,6 @@ v3.27.0:
 - GET /api/v1/launch-v1/products - List Launch v1 products with base_handle
 - Shopify endpoints now enforce is_launch_v1 = TRUE filter
 - All external pipelines use LAUNCH_V1_SCOPE_FILTER
-
-v3.21.0:
-- Add Excel Override endpoints for catalog data sync
-- POST /api/v1/catalog/override/preflight - Validate Excel structure
-- POST /api/v1/catalog/override/dry-run - Compute diffs without changes
-- POST /api/v1/catalog/override/execute - Execute override with confirm=True
-- GET /api/v1/catalog/override/logs/{batch_id} - Retrieve audit logs
-- Implements Option D: Primary ingredient classification + Aggregate safety
-
-v3.20.0:
-- Add QA Audit endpoints for os_modules catalog validation
-- GET /api/v1/qa/audit/os-modules - Full validation audit
-- GET /api/v1/qa/audit/os-modules/summary - Quick summary
-- GET /api/v1/qa/audit/os-modules/export - Export for Excel comparison
-- Validates schema, uniqueness, field completeness, OS pairing
-- Supports catalog governance QA workflows
-
-v3.19.0:
-- Integrate Safety Gate module for ingredient safety blocking
-- GET /api/v1/safety/status - Overall safety gate status
-- GET /api/v1/safety/blocked-ingredients - List rejected ingredients
-- GET /api/v1/safety/blocked-modules - List blocked modules
-- POST /api/v1/safety/check - Check specific modules for safety
-- GET /api/v1/safety/health - Safety gate health check
-- Enforces "Blood does not negotiate" principle - rejected ingredients permanently blocked
-
-v3.18.0:
-- Register Product Intake System router (catalog governance)
-- POST /api/v1/catalog/intake - Create draft intake from Supliful
-- POST /api/v1/catalog/approve - Approve and insert to os_modules (append-only)
-- POST /api/v1/catalog/reject - Reject with audit trail
-- GET /api/v1/catalog/intakes - List intakes
-- Governance: append-only, no updates/deletes, full audit trail
-
-v3.17.0:
-- Instrument Brain endpoints with TelemetryEmitter (Issue #9 Stage 2)
-- Add telemetry emission to /api/v1/brain/resolve
-- Add telemetry emission to /api/v1/brain/orchestrate/v2
-- Add telemetry emission to /api/v1/brain/orchestrate
-- Add telemetry emission to /api/v1/brain/compose
-- Add telemetry emission to /api/v1/brain/route
-- Every Brain run now writes to telemetry_runs table
-- Events emitted for: ROUTING_BLOCK, MATCHING_UNMATCHED_INTENT, LOW_CONFIDENCE
-- No PII: only counts, codes, age_bucket, sex
-
-v3.16.0:
-- Register Telemetry Admin router (Issue #9)
-- Add telemetry admin endpoints
-
-v3.15.1:
-- Add GET /api/v1/brain/painpoints endpoint
-- Add GET /api/v1/brain/lifestyle-schema endpoint  
-
-v3.15.0:
-- Integrate Explainability Layer endpoints (Issue #8)
-
-v3.14.0:
-- Integrate Matching Layer endpoints (Issue #7)
-
-v3.13.0:
-- Integrate Routing Layer endpoints (Issue #6)
-
-v3.12.0:
-- Integrate Catalog Governance admin endpoints (Issue #5)
 """
 
 import os
@@ -137,7 +80,9 @@ from app.catalog.override import router as override_router
 # Telemetry Emitter imports (v3.17.0 - Issue #9 Stage 2)
 from app.telemetry import get_emitter, derive_run_summary, derive_events
 
-app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version="3.27.0")
+API_VERSION = "3.28.0"
+
+app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version=API_VERSION)
 
 app.add_middleware(
     CORSMiddleware,
@@ -661,7 +606,7 @@ def _emit_telemetry_for_phase(
             sex=sex,
             age=age,
             has_bloodwork=has_bloodwork or summary.has_bloodwork,
-            api_version="3.27.0",
+            api_version=API_VERSION,
         )
         
         # Complete run with aggregates
@@ -694,20 +639,21 @@ def _emit_telemetry_for_phase(
 
 @app.get("/")
 def root():
-    return {"service": "GenoMAX² API", "version": "3.27.0", "status": "operational"}
+    return {"service": "GenoMAX² API", "version": API_VERSION, "status": "operational"}
 
 
 @app.get("/health")
 def health():
-    return {"status": "healthy", "version": "3.27.0"}
+    return {"status": "healthy", "version": API_VERSION}
 
 
 @app.get("/version")
 def version():
     return {
-        "api_version": "3.27.0",
+        "api_version": API_VERSION,
         "brain_version": "1.5.0",
         "resolver_version": "1.0.0",
+        "bloodwork_engine_version": "2.0.0",
         "catalog_version": "catalog_governance_v1",
         "routing_version": "routing_layer_v1",
         "matching_version": "matching_layer_v1",
@@ -719,7 +665,7 @@ def version():
         "override_version": "excel_override_v1",
         "launch_v1_version": "launch_enforcement_v1",
         "contract_version": CONTRACT_VERSION,
-        "features": ["orchestrate", "orchestrate_v2", "compose", "route", "resolve", "supplier-gating", "catalog-governance", "routing-layer", "matching-layer", "explainability", "painpoints", "lifestyle-schema", "telemetry", "telemetry-instrumented", "intake-system", "safety-gate", "qa-audit", "excel-override", "launch-v1-enforcement"]
+        "features": ["orchestrate", "orchestrate_v2", "compose", "route", "resolve", "supplier-gating", "catalog-governance", "routing-layer", "matching-layer", "explainability", "painpoints", "lifestyle-schema", "telemetry", "telemetry-instrumented", "intake-system", "safety-gate", "qa-audit", "excel-override", "launch-v1-enforcement", "bloodwork-engine-v2"]
     }
 
 
