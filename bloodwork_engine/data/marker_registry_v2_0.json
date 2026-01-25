@@ -1,0 +1,558 @@
+{
+  "version": "2.0",
+  "scope": "GenoMAX² Bloodwork Engine v2.0 - Complete Biomarker Registry",
+  "changelog": {
+    "2.0": "Major expansion: Added Tier 2 optimization and Tier 3 genetic/hormonal markers (40 total)",
+    "1.1": "Added 12 new markers for expanded safety gates",
+    "1.0": "Initial release with 13 core metabolic markers"
+  },
+  "allowed_marker_codes": [
+    "ferritin",
+    "vitamin_d_25oh",
+    "calcium_serum",
+    "hs_crp",
+    "fasting_glucose",
+    "hba1c",
+    "creatinine",
+    "egfr",
+    "alt",
+    "ast",
+    "magnesium_serum",
+    "hemoglobin",
+    "total_testosterone",
+    "potassium",
+    "tsh",
+    "vitamin_b12",
+    "folate_serum",
+    "homocysteine",
+    "uric_acid",
+    "platelet_count",
+    "omega3_index",
+    "zinc_serum",
+    "copper_serum",
+    "fasting_insulin",
+    "triglycerides",
+    "mthfr_c677t",
+    "mthfr_a1298c",
+    "cortisol_am",
+    "dhea_s",
+    "estradiol",
+    "progesterone",
+    "free_t3",
+    "free_t4",
+    "reverse_t3",
+    "shbg",
+    "free_testosterone",
+    "ldl_cholesterol",
+    "hdl_cholesterol",
+    "apolipoprotein_b",
+    "lp_a",
+    "ggt"
+  ],
+  "lab_profiles": [
+    "GLOBAL_CONSERVATIVE",
+    "IL_HMO_GENERIC",
+    "US_QUEST",
+    "US_LABCORP",
+    "EU_GENERIC"
+  ],
+  "marker_categories": {
+    "metabolic_core": ["fasting_glucose", "hba1c", "fasting_insulin", "triglycerides"],
+    "iron_status": ["ferritin", "hemoglobin"],
+    "kidney_function": ["creatinine", "egfr"],
+    "liver_function": ["alt", "ast", "ggt"],
+    "inflammation": ["hs_crp"],
+    "electrolytes": ["potassium", "calcium_serum", "magnesium_serum"],
+    "thyroid_panel": ["tsh", "free_t3", "free_t4", "reverse_t3"],
+    "methylation": ["vitamin_b12", "folate_serum", "homocysteine", "mthfr_c677t", "mthfr_a1298c"],
+    "vitamins": ["vitamin_d_25oh"],
+    "minerals": ["zinc_serum", "copper_serum"],
+    "lipid_panel": ["triglycerides", "ldl_cholesterol", "hdl_cholesterol", "apolipoprotein_b", "lp_a"],
+    "male_hormones": ["total_testosterone", "free_testosterone", "shbg"],
+    "female_hormones": ["estradiol", "progesterone", "shbg"],
+    "adrenal": ["cortisol_am", "dhea_s"],
+    "specialty": ["omega3_index", "uric_acid", "platelet_count"]
+  },
+  "markers": [
+    {
+      "code": "ferritin",
+      "aliases": ["Ferritin", "Serum Ferritin", "Fer"],
+      "canonical_unit": "ng/mL",
+      "allowed_units": ["ng/mL", "µg/L", "ug/L", "mcg/L"],
+      "conversions": [
+        {"from": "µg/L", "to": "ng/mL", "multiplier": 1.0},
+        {"from": "ug/L", "to": "ng/mL", "multiplier": 1.0},
+        {"from": "mcg/L", "to": "ng/mL", "multiplier": 1.0}
+      ],
+      "sex_relevance": "both",
+      "tier": 1
+    },
+    {
+      "code": "vitamin_d_25oh",
+      "aliases": ["Vitamin D", "25-OH Vitamin D", "25(OH)D", "25-hydroxyvitamin D", "Vitamin D 25-Hydroxy", "25-OH D"],
+      "canonical_unit": "ng/mL",
+      "allowed_units": ["ng/mL", "nmol/L"],
+      "conversions": [
+        {"from": "nmol/L", "to": "ng/mL", "multiplier": 0.4}
+      ],
+      "sex_relevance": "both",
+      "tier": 1
+    },
+    {
+      "code": "calcium_serum",
+      "aliases": ["Calcium", "Serum Calcium", "Ca", "Total Calcium"],
+      "canonical_unit": "mg/dL",
+      "allowed_units": ["mg/dL", "mmol/L"],
+      "conversions": [
+        {"from": "mmol/L", "to": "mg/dL", "multiplier": 4.0078}
+      ],
+      "sex_relevance": "both",
+      "tier": 1
+    },
+    {
+      "code": "hs_crp",
+      "aliases": ["hs-CRP", "High sensitivity CRP", "CRP", "C-Reactive Protein", "hsCRP", "High Sensitivity C-Reactive Protein"],
+      "canonical_unit": "mg/L",
+      "allowed_units": ["mg/L", "mg/dL"],
+      "conversions": [
+        {"from": "mg/dL", "to": "mg/L", "multiplier": 10.0}
+      ],
+      "sex_relevance": "both",
+      "tier": 1
+    },
+    {
+      "code": "fasting_glucose",
+      "aliases": ["Fasting Glucose", "Glucose (fasting)", "Glucose", "Blood Glucose", "FBG", "Fasting Blood Glucose"],
+      "canonical_unit": "mg/dL",
+      "allowed_units": ["mg/dL", "mmol/L"],
+      "conversions": [
+        {"from": "mmol/L", "to": "mg/dL", "multiplier": 18.01559}
+      ],
+      "sex_relevance": "both",
+      "tier": 1
+    },
+    {
+      "code": "hba1c",
+      "aliases": ["HbA1c", "Hemoglobin A1c", "A1c", "Glycated Hemoglobin", "Glycohemoglobin"],
+      "canonical_unit": "%",
+      "allowed_units": ["%", "mmol/mol"],
+      "conversions": [
+        {"from": "mmol/mol", "to": "%", "multiplier": 0.0915, "offset": 2.15}
+      ],
+      "sex_relevance": "both",
+      "tier": 1,
+      "notes": "IFCC mmol/mol to NGSP %: (mmol/mol * 0.0915) + 2.15"
+    },
+    {
+      "code": "creatinine",
+      "aliases": ["Creatinine", "Serum Creatinine", "Cr"],
+      "canonical_unit": "mg/dL",
+      "allowed_units": ["mg/dL", "µmol/L", "umol/L"],
+      "conversions": [
+        {"from": "µmol/L", "to": "mg/dL", "multiplier": 0.0113},
+        {"from": "umol/L", "to": "mg/dL", "multiplier": 0.0113}
+      ],
+      "sex_relevance": "both",
+      "tier": 1
+    },
+    {
+      "code": "egfr",
+      "aliases": ["eGFR", "Estimated GFR", "GFR", "Glomerular Filtration Rate"],
+      "canonical_unit": "mL/min/1.73m2",
+      "allowed_units": ["mL/min/1.73m2", "mL/min"],
+      "conversions": [],
+      "sex_relevance": "both",
+      "tier": 1
+    },
+    {
+      "code": "alt",
+      "aliases": ["ALT", "Alanine Aminotransferase", "SGPT", "Alanine Transaminase"],
+      "canonical_unit": "U/L",
+      "allowed_units": ["U/L", "IU/L"],
+      "conversions": [
+        {"from": "IU/L", "to": "U/L", "multiplier": 1.0}
+      ],
+      "sex_relevance": "both",
+      "tier": 1
+    },
+    {
+      "code": "ast",
+      "aliases": ["AST", "Aspartate Aminotransferase", "SGOT", "Aspartate Transaminase"],
+      "canonical_unit": "U/L",
+      "allowed_units": ["U/L", "IU/L"],
+      "conversions": [
+        {"from": "IU/L", "to": "U/L", "multiplier": 1.0}
+      ],
+      "sex_relevance": "both",
+      "tier": 1
+    },
+    {
+      "code": "magnesium_serum",
+      "aliases": ["Magnesium", "Serum Magnesium", "Mg"],
+      "canonical_unit": "mg/dL",
+      "allowed_units": ["mg/dL", "mmol/L", "mEq/L"],
+      "conversions": [
+        {"from": "mmol/L", "to": "mg/dL", "multiplier": 2.4305},
+        {"from": "mEq/L", "to": "mg/dL", "multiplier": 1.2153}
+      ],
+      "sex_relevance": "both",
+      "tier": 1
+    },
+    {
+      "code": "hemoglobin",
+      "aliases": ["Hemoglobin", "Hb", "HGB", "Hgb"],
+      "canonical_unit": "g/dL",
+      "allowed_units": ["g/dL", "g/L"],
+      "conversions": [
+        {"from": "g/L", "to": "g/dL", "multiplier": 0.1}
+      ],
+      "sex_relevance": "both",
+      "tier": 1
+    },
+    {
+      "code": "total_testosterone",
+      "aliases": ["Total Testosterone", "Testosterone (total)", "Testosterone", "T", "TT"],
+      "canonical_unit": "ng/dL",
+      "allowed_units": ["ng/dL", "nmol/L"],
+      "conversions": [
+        {"from": "nmol/L", "to": "ng/dL", "multiplier": 28.842}
+      ],
+      "sex_relevance": "male",
+      "tier": 1
+    },
+    {
+      "code": "potassium",
+      "aliases": ["Potassium", "K", "K+", "Serum Potassium"],
+      "canonical_unit": "mEq/L",
+      "allowed_units": ["mEq/L", "mmol/L"],
+      "conversions": [
+        {"from": "mmol/L", "to": "mEq/L", "multiplier": 1.0}
+      ],
+      "sex_relevance": "both",
+      "tier": 1
+    },
+    {
+      "code": "tsh",
+      "aliases": ["TSH", "Thyroid Stimulating Hormone", "Thyrotropin"],
+      "canonical_unit": "mIU/L",
+      "allowed_units": ["mIU/L", "µIU/mL", "uIU/mL", "mU/L"],
+      "conversions": [
+        {"from": "µIU/mL", "to": "mIU/L", "multiplier": 1.0},
+        {"from": "uIU/mL", "to": "mIU/L", "multiplier": 1.0},
+        {"from": "mU/L", "to": "mIU/L", "multiplier": 1.0}
+      ],
+      "sex_relevance": "both",
+      "tier": 1
+    },
+    {
+      "code": "vitamin_b12",
+      "aliases": ["Vitamin B12", "B12", "Cobalamin", "Cyanocobalamin", "Serum B12"],
+      "canonical_unit": "pg/mL",
+      "allowed_units": ["pg/mL", "pmol/L", "ng/L"],
+      "conversions": [
+        {"from": "pmol/L", "to": "pg/mL", "multiplier": 1.355},
+        {"from": "ng/L", "to": "pg/mL", "multiplier": 1.0}
+      ],
+      "sex_relevance": "both",
+      "tier": 1
+    },
+    {
+      "code": "folate_serum",
+      "aliases": ["Folate", "Folic Acid", "Serum Folate", "Vitamin B9", "B9"],
+      "canonical_unit": "ng/mL",
+      "allowed_units": ["ng/mL", "nmol/L"],
+      "conversions": [
+        {"from": "nmol/L", "to": "ng/mL", "multiplier": 0.4413}
+      ],
+      "sex_relevance": "both",
+      "tier": 1
+    },
+    {
+      "code": "homocysteine",
+      "aliases": ["Homocysteine", "Hcy", "Total Homocysteine", "tHcy"],
+      "canonical_unit": "µmol/L",
+      "allowed_units": ["µmol/L", "umol/L", "mcmol/L"],
+      "conversions": [
+        {"from": "umol/L", "to": "µmol/L", "multiplier": 1.0},
+        {"from": "mcmol/L", "to": "µmol/L", "multiplier": 1.0}
+      ],
+      "sex_relevance": "both",
+      "tier": 1
+    },
+    {
+      "code": "uric_acid",
+      "aliases": ["Uric Acid", "UA", "Serum Uric Acid"],
+      "canonical_unit": "mg/dL",
+      "allowed_units": ["mg/dL", "µmol/L", "umol/L"],
+      "conversions": [
+        {"from": "µmol/L", "to": "mg/dL", "multiplier": 0.01681},
+        {"from": "umol/L", "to": "mg/dL", "multiplier": 0.01681}
+      ],
+      "sex_relevance": "both",
+      "tier": 1
+    },
+    {
+      "code": "platelet_count",
+      "aliases": ["Platelets", "Platelet Count", "PLT", "Thrombocytes"],
+      "canonical_unit": "x10^3/µL",
+      "allowed_units": ["x10^3/µL", "x10^9/L", "K/uL", "10^3/uL", "thousand/uL"],
+      "conversions": [
+        {"from": "x10^9/L", "to": "x10^3/µL", "multiplier": 1.0},
+        {"from": "K/uL", "to": "x10^3/µL", "multiplier": 1.0},
+        {"from": "10^3/uL", "to": "x10^3/µL", "multiplier": 1.0},
+        {"from": "thousand/uL", "to": "x10^3/µL", "multiplier": 1.0}
+      ],
+      "sex_relevance": "both",
+      "tier": 1
+    },
+    {
+      "code": "omega3_index",
+      "aliases": ["Omega-3 Index", "Omega 3 Index", "O3I", "EPA+DHA Index", "Omega3 Index"],
+      "canonical_unit": "%",
+      "allowed_units": ["%"],
+      "conversions": [],
+      "sex_relevance": "both",
+      "tier": 2,
+      "notes": "Specialized test measuring EPA+DHA as percentage of total RBC fatty acids"
+    },
+    {
+      "code": "zinc_serum",
+      "aliases": ["Zinc", "Serum Zinc", "Zn", "Plasma Zinc"],
+      "canonical_unit": "µg/dL",
+      "allowed_units": ["µg/dL", "ug/dL", "mcg/dL", "µmol/L", "umol/L"],
+      "conversions": [
+        {"from": "ug/dL", "to": "µg/dL", "multiplier": 1.0},
+        {"from": "mcg/dL", "to": "µg/dL", "multiplier": 1.0},
+        {"from": "µmol/L", "to": "µg/dL", "multiplier": 6.54},
+        {"from": "umol/L", "to": "µg/dL", "multiplier": 6.54}
+      ],
+      "sex_relevance": "both",
+      "tier": 2
+    },
+    {
+      "code": "copper_serum",
+      "aliases": ["Copper", "Serum Copper", "Cu", "Plasma Copper"],
+      "canonical_unit": "µg/dL",
+      "allowed_units": ["µg/dL", "ug/dL", "mcg/dL", "µmol/L", "umol/L"],
+      "conversions": [
+        {"from": "ug/dL", "to": "µg/dL", "multiplier": 1.0},
+        {"from": "mcg/dL", "to": "µg/dL", "multiplier": 1.0},
+        {"from": "µmol/L", "to": "µg/dL", "multiplier": 6.355},
+        {"from": "umol/L", "to": "µg/dL", "multiplier": 6.355}
+      ],
+      "sex_relevance": "both",
+      "tier": 2
+    },
+    {
+      "code": "fasting_insulin",
+      "aliases": ["Fasting Insulin", "Insulin (fasting)", "Insulin", "Serum Insulin"],
+      "canonical_unit": "µIU/mL",
+      "allowed_units": ["µIU/mL", "uIU/mL", "mIU/L", "pmol/L"],
+      "conversions": [
+        {"from": "uIU/mL", "to": "µIU/mL", "multiplier": 1.0},
+        {"from": "mIU/L", "to": "µIU/mL", "multiplier": 1.0},
+        {"from": "pmol/L", "to": "µIU/mL", "multiplier": 0.1442}
+      ],
+      "sex_relevance": "both",
+      "tier": 2
+    },
+    {
+      "code": "triglycerides",
+      "aliases": ["Triglycerides", "TG", "Trigs", "Serum Triglycerides"],
+      "canonical_unit": "mg/dL",
+      "allowed_units": ["mg/dL", "mmol/L"],
+      "conversions": [
+        {"from": "mmol/L", "to": "mg/dL", "multiplier": 88.57}
+      ],
+      "sex_relevance": "both",
+      "tier": 2
+    },
+    {
+      "code": "mthfr_c677t",
+      "aliases": ["MTHFR C677T", "C677T", "MTHFR 677"],
+      "canonical_unit": "genotype",
+      "allowed_units": ["genotype"],
+      "conversions": [],
+      "sex_relevance": "both",
+      "tier": 3,
+      "valid_values": ["CC", "CT", "TT"],
+      "notes": "Genetic variant. CC=normal, CT=heterozygous (40-60% reduced activity), TT=homozygous (70-80% reduced activity)"
+    },
+    {
+      "code": "mthfr_a1298c",
+      "aliases": ["MTHFR A1298C", "A1298C", "MTHFR 1298"],
+      "canonical_unit": "genotype",
+      "allowed_units": ["genotype"],
+      "conversions": [],
+      "sex_relevance": "both",
+      "tier": 3,
+      "valid_values": ["AA", "AC", "CC"],
+      "notes": "Genetic variant. AA=normal, AC=heterozygous, CC=homozygous (reduced activity but less than C677T)"
+    },
+    {
+      "code": "cortisol_am",
+      "aliases": ["Cortisol (AM)", "Morning Cortisol", "Cortisol", "Serum Cortisol"],
+      "canonical_unit": "µg/dL",
+      "allowed_units": ["µg/dL", "ug/dL", "mcg/dL", "nmol/L"],
+      "conversions": [
+        {"from": "ug/dL", "to": "µg/dL", "multiplier": 1.0},
+        {"from": "mcg/dL", "to": "µg/dL", "multiplier": 1.0},
+        {"from": "nmol/L", "to": "µg/dL", "multiplier": 0.03625}
+      ],
+      "sex_relevance": "both",
+      "tier": 3,
+      "notes": "Must be drawn 7-9 AM for accurate interpretation"
+    },
+    {
+      "code": "dhea_s",
+      "aliases": ["DHEA-S", "DHEA Sulfate", "Dehydroepiandrosterone Sulfate", "DHEAS"],
+      "canonical_unit": "µg/dL",
+      "allowed_units": ["µg/dL", "ug/dL", "mcg/dL", "µmol/L", "umol/L"],
+      "conversions": [
+        {"from": "ug/dL", "to": "µg/dL", "multiplier": 1.0},
+        {"from": "mcg/dL", "to": "µg/dL", "multiplier": 1.0},
+        {"from": "µmol/L", "to": "µg/dL", "multiplier": 36.84},
+        {"from": "umol/L", "to": "µg/dL", "multiplier": 36.84}
+      ],
+      "sex_relevance": "both",
+      "tier": 3
+    },
+    {
+      "code": "estradiol",
+      "aliases": ["Estradiol", "E2", "Serum Estradiol", "17-beta Estradiol"],
+      "canonical_unit": "pg/mL",
+      "allowed_units": ["pg/mL", "pmol/L"],
+      "conversions": [
+        {"from": "pmol/L", "to": "pg/mL", "multiplier": 0.2724}
+      ],
+      "sex_relevance": "both",
+      "tier": 3,
+      "notes": "Primary female hormone. In males, elevated levels may indicate aromatization"
+    },
+    {
+      "code": "progesterone",
+      "aliases": ["Progesterone", "P4", "Serum Progesterone"],
+      "canonical_unit": "ng/mL",
+      "allowed_units": ["ng/mL", "nmol/L"],
+      "conversions": [
+        {"from": "nmol/L", "to": "ng/mL", "multiplier": 0.3145}
+      ],
+      "sex_relevance": "female",
+      "tier": 3,
+      "notes": "Varies significantly with menstrual cycle phase"
+    },
+    {
+      "code": "free_t3",
+      "aliases": ["Free T3", "FT3", "Triiodothyronine Free", "Free Triiodothyronine"],
+      "canonical_unit": "pg/mL",
+      "allowed_units": ["pg/mL", "pmol/L"],
+      "conversions": [
+        {"from": "pmol/L", "to": "pg/mL", "multiplier": 0.651}
+      ],
+      "sex_relevance": "both",
+      "tier": 3
+    },
+    {
+      "code": "free_t4",
+      "aliases": ["Free T4", "FT4", "Thyroxine Free", "Free Thyroxine"],
+      "canonical_unit": "ng/dL",
+      "allowed_units": ["ng/dL", "pmol/L"],
+      "conversions": [
+        {"from": "pmol/L", "to": "ng/dL", "multiplier": 0.0777}
+      ],
+      "sex_relevance": "both",
+      "tier": 3
+    },
+    {
+      "code": "reverse_t3",
+      "aliases": ["Reverse T3", "rT3", "RT3"],
+      "canonical_unit": "ng/dL",
+      "allowed_units": ["ng/dL", "pmol/L"],
+      "conversions": [
+        {"from": "pmol/L", "to": "ng/dL", "multiplier": 0.0651}
+      ],
+      "sex_relevance": "both",
+      "tier": 3,
+      "notes": "Elevated rT3 with low fT3 suggests poor T4-to-T3 conversion"
+    },
+    {
+      "code": "shbg",
+      "aliases": ["SHBG", "Sex Hormone Binding Globulin"],
+      "canonical_unit": "nmol/L",
+      "allowed_units": ["nmol/L"],
+      "conversions": [],
+      "sex_relevance": "both",
+      "tier": 3
+    },
+    {
+      "code": "free_testosterone",
+      "aliases": ["Free Testosterone", "Free T", "Testosterone Free", "FT"],
+      "canonical_unit": "pg/mL",
+      "allowed_units": ["pg/mL", "pmol/L", "ng/dL"],
+      "conversions": [
+        {"from": "pmol/L", "to": "pg/mL", "multiplier": 0.2884},
+        {"from": "ng/dL", "to": "pg/mL", "multiplier": 10.0}
+      ],
+      "sex_relevance": "male",
+      "tier": 3
+    },
+    {
+      "code": "ldl_cholesterol",
+      "aliases": ["LDL", "LDL-C", "LDL Cholesterol", "Low Density Lipoprotein"],
+      "canonical_unit": "mg/dL",
+      "allowed_units": ["mg/dL", "mmol/L"],
+      "conversions": [
+        {"from": "mmol/L", "to": "mg/dL", "multiplier": 38.67}
+      ],
+      "sex_relevance": "both",
+      "tier": 2
+    },
+    {
+      "code": "hdl_cholesterol",
+      "aliases": ["HDL", "HDL-C", "HDL Cholesterol", "High Density Lipoprotein"],
+      "canonical_unit": "mg/dL",
+      "allowed_units": ["mg/dL", "mmol/L"],
+      "conversions": [
+        {"from": "mmol/L", "to": "mg/dL", "multiplier": 38.67}
+      ],
+      "sex_relevance": "both",
+      "tier": 2
+    },
+    {
+      "code": "apolipoprotein_b",
+      "aliases": ["ApoB", "Apolipoprotein B", "Apo B", "Apo-B"],
+      "canonical_unit": "mg/dL",
+      "allowed_units": ["mg/dL", "g/L"],
+      "conversions": [
+        {"from": "g/L", "to": "mg/dL", "multiplier": 100.0}
+      ],
+      "sex_relevance": "both",
+      "tier": 3,
+      "notes": "Better predictor of cardiovascular risk than LDL-C. One ApoB per atherogenic particle."
+    },
+    {
+      "code": "lp_a",
+      "aliases": ["Lp(a)", "Lipoprotein a", "Lipoprotein(a)", "Lp a"],
+      "canonical_unit": "nmol/L",
+      "allowed_units": ["nmol/L", "mg/dL"],
+      "conversions": [
+        {"from": "mg/dL", "to": "nmol/L", "multiplier": 2.4}
+      ],
+      "sex_relevance": "both",
+      "tier": 3,
+      "notes": "Genetically determined. >75 nmol/L (>30 mg/dL) indicates elevated cardiovascular risk."
+    },
+    {
+      "code": "ggt",
+      "aliases": ["GGT", "Gamma-GT", "Gamma-Glutamyl Transferase", "Gamma-Glutamyl Transpeptidase", "GGTP"],
+      "canonical_unit": "U/L",
+      "allowed_units": ["U/L", "IU/L"],
+      "conversions": [
+        {"from": "IU/L", "to": "U/L", "multiplier": 1.0}
+      ],
+      "sex_relevance": "both",
+      "tier": 2,
+      "notes": "Marker of oxidative stress, alcohol use, and liver function. Often elevated before ALT/AST."
+    }
+  ]
+}
