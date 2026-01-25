@@ -1,0 +1,9 @@
+v3.28.0 - Bloodwork Engine v2.0
+Deployed: 2026-01-25T15:50:00Z
+Features:
+- 40 biomarkers (13 original + 27 new)
+- 31 safety gates across 3 tiers
+- Auto-migration runner on startup
+- OCR parser service
+- Lab adapter interface
+- Safety routing service
