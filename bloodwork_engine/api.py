@@ -264,30 +264,43 @@ def register_bloodwork_endpoints(app):
     def list_safety_gates(tier: Optional[str] = None):
         """List all defined safety gates."""
         loader = get_loader()
-        all_gates = loader.get_safety_gates()
         
+        # Use the new helper methods for correct counting
+        summary = loader.get_safety_gate_summary()
+        gates_by_tier = loader.get_gates_by_tier()
+        all_gates = loader.get_all_gates_flat()
+        
+        # Filter by tier if requested
+        filtered_gates = all_gates
         if tier:
-            tier_num = tier.replace("tier", "").replace(" ", "").strip()
-            all_gates = {k: v for k, v in all_gates.items() if str(v.get("tier", "1")) == tier_num}
-        
-        tier1_gates = {k: v for k, v in all_gates.items() if v.get("tier") == 1}
-        tier2_gates = {k: v for k, v in all_gates.items() if v.get("tier") == 2}
-        tier3_gates = {k: v for k, v in all_gates.items() if v.get("tier") == 3}
+            # Normalize tier input
+            tier_key = tier.lower().replace(" ", "_")
+            if not tier_key.startswith("tier"):
+                tier_key = f"tier{tier_key}"
+            
+            # Map short forms to full tier keys
+            tier_mapping = {
+                "tier1": "tier1_safety",
+                "tier1_safety": "tier1_safety",
+                "tier2": "tier2_optimization",
+                "tier2_optimization": "tier2_optimization",
+                "tier3": "tier3_genetic_hormonal",
+                "tier3_genetic_hormonal": "tier3_genetic_hormonal"
+            }
+            matched_tier = tier_mapping.get(tier_key)
+            if matched_tier:
+                filtered_gates = gates_by_tier.get(matched_tier, {})
         
         return {
             "version": loader.reference_ranges.get("version"),
-            "total_gates": len(all_gates),
+            "total_gates": summary["total"],
             "tier_summary": {
-                "tier1_safety": len(tier1_gates),
-                "tier2_optimization": len(tier2_gates),
-                "tier3_genetic_hormonal": len(tier3_gates)
+                "tier1_safety": summary["tier1_safety"],
+                "tier2_optimization": summary["tier2_optimization"],
+                "tier3_genetic_hormonal": summary["tier3_genetic_hormonal"]
             },
-            "gates_by_tier": {
-                "tier1_safety": tier1_gates,
-                "tier2_optimization": tier2_gates,
-                "tier3_genetic_hormonal": tier3_gates
-            },
-            "all_gates": all_gates if not tier else None
+            "gates_by_tier": gates_by_tier,
+            "all_gates": filtered_gates if tier else all_gates
         }
     
     # ---------------------------------------------------------
@@ -438,10 +451,9 @@ def register_bloodwork_endpoints(app):
         registry_path = data_dir / "marker_registry_v2_0.json"
         ranges_path = data_dir / "reference_ranges_v2_0.json"
         
-        all_gates = loader.get_safety_gates()
-        tier1_count = len([g for g in all_gates.values() if g.get("tier") == 1])
-        tier2_count = len([g for g in all_gates.values() if g.get("tier") == 2])
-        tier3_count = len([g for g in all_gates.values() if g.get("tier") == 3])
+        # Use the new helper methods for correct counting
+        gate_summary = loader.get_safety_gate_summary()
+        all_gates = loader.get_all_gates_flat()
         
         range_count = len(ranges.get("ranges", []))
         
@@ -466,10 +478,10 @@ def register_bloodwork_endpoints(app):
                 "ranges_active": range_count > 0
             },
             "safety_gates": {
-                "total_defined": len(all_gates),
-                "tier1_safety": tier1_count,
-                "tier2_optimization": tier2_count,
-                "tier3_genetic_hormonal": tier3_count,
+                "total_defined": gate_summary["total"],
+                "tier1_safety": gate_summary["tier1_safety"],
+                "tier2_optimization": gate_summary["tier2_optimization"],
+                "tier3_genetic_hormonal": gate_summary["tier3_genetic_hormonal"],
                 "gates": list(all_gates.keys())
             },
             "computed_markers": {
@@ -501,7 +513,7 @@ def register_bloodwork_endpoints(app):
         """Force reload of bloodwork data files."""
         BloodworkDataLoader.reset()
         loader = get_loader()
-        all_gates = loader.get_safety_gates()
+        gate_summary = loader.get_safety_gate_summary()
         range_count = len(loader.reference_ranges.get("ranges", []))
         
         return {
@@ -509,7 +521,7 @@ def register_bloodwork_endpoints(app):
             "engine_version": "2.0.0",
             "marker_count": len(loader.allowed_marker_codes),
             "range_count": range_count,
-            "safety_gate_count": len(all_gates),
+            "safety_gate_count": gate_summary["total"],
             "ruleset_version": loader.ruleset_version
         }
     
