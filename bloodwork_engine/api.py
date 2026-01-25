@@ -9,6 +9,7 @@ v2.0 Features:
 - Genetic marker support (MTHFR)
 - Computed markers (HOMA-IR, ratios)
 - Hormonal routing
+- OCR parsing for lab reports
 """
 
 import os
@@ -16,6 +17,7 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 from dataclasses import asdict
+from fastapi import UploadFile, File, Body
 
 # ============================================================
 # REQUEST/RESPONSE MODELS
@@ -489,5 +491,208 @@ def register_bloodwork_endpoints(app):
             "safety_gate_count": len(all_gates),
             "ruleset_version": loader.ruleset_version
         }
+    
+    # =========================================================
+    # OCR ENDPOINTS
+    # =========================================================
+    
+    # ---------------------------------------------------------
+    # GET /api/v1/bloodwork/ocr/status
+    # ---------------------------------------------------------
+    @app.get("/api/v1/bloodwork/ocr/status", tags=["Bloodwork OCR"])
+    def ocr_status():
+        """Get OCR configuration status."""
+        try:
+            from bloodwork_engine.ocr_parser import OCRParser, get_ocr_status
+            status = get_ocr_status()
+            return {
+                "ocr_available": status["configured"],
+                "configuration": status,
+                "supported_formats": ["image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf"],
+                "max_file_size_mb": 20,
+                "provider": "Google Cloud Vision" if status["configured"] else None
+            }
+        except ImportError:
+            return {
+                "ocr_available": False,
+                "error": "google-cloud-vision package not installed",
+                "configuration": {"configured": False}
+            }
+        except Exception as e:
+            return {
+                "ocr_available": False,
+                "error": str(e),
+                "configuration": {"configured": False}
+            }
+    
+    # ---------------------------------------------------------
+    # POST /api/v1/bloodwork/ocr/parse
+    # ---------------------------------------------------------
+    @app.post("/api/v1/bloodwork/ocr/parse", tags=["Bloodwork OCR"])
+    async def parse_bloodwork_upload(
+        file: UploadFile = File(...),
+        lab_profile: str = "GLOBAL_CONSERVATIVE",
+        sex: Optional[str] = None,
+        age: Optional[int] = None
+    ):
+        """
+        Parse a bloodwork report image/PDF using OCR and process markers.
+        
+        Accepts: PNG, JPEG, GIF, WebP, PDF
+        Max size: 20MB
+        """
+        from bloodwork_engine.ocr_parser import OCRParser, get_ocr_status
+        
+        # Check configuration
+        status = get_ocr_status()
+        if not status["configured"]:
+            return {
+                "error": "OCR_NOT_CONFIGURED",
+                "message": "Google Cloud Vision credentials not configured",
+                "setup_instructions": {
+                    "option_1": "Set GOOGLE_APPLICATION_CREDENTIALS environment variable",
+                    "option_2": "Set GOOGLE_CREDENTIALS_BASE64 with base64-encoded service account JSON"
+                }
+            }
+        
+        # Validate file type
+        content_type = file.content_type or ""
+        valid_types = ["image/png", "image/jpeg", "image/gif", "image/webp", "application/pdf"]
+        if content_type not in valid_types:
+            return {
+                "error": "INVALID_FILE_TYPE",
+                "message": f"Unsupported file type: {content_type}",
+                "supported_types": valid_types
+            }
+        
+        # Read file
+        content = await file.read()
+        
+        # Check size (20MB max)
+        max_size = 20 * 1024 * 1024
+        if len(content) > max_size:
+            return {
+                "error": "FILE_TOO_LARGE",
+                "message": f"File size {len(content)} exceeds maximum {max_size} bytes",
+                "max_size_mb": 20
+            }
+        
+        try:
+            # Parse with OCR
+            parser = OCRParser()
+            parse_result = parser.parse_image(content, content_type)
+            
+            # If markers found, process through engine
+            engine_result = None
+            if parse_result.markers:
+                engine = get_engine(lab_profile=lab_profile)
+                markers_input = parse_result.to_engine_input()
+                engine_result = engine.process_markers(
+                    markers=markers_input,
+                    sex=sex,
+                    age=age
+                )
+            
+            return {
+                "status": "success",
+                "ocr_result": {
+                    "markers_found": len(parse_result.markers),
+                    "lab_detected": parse_result.lab_name,
+                    "report_date": parse_result.report_date,
+                    "parse_stats": parse_result.parse_stats,
+                    "raw_markers": [
+                        {
+                            "code": m.code,
+                            "value": m.value,
+                            "unit": m.unit,
+                            "confidence": m.confidence,
+                            "raw_text": m.raw_text
+                        }
+                        for m in parse_result.markers
+                    ]
+                },
+                "engine_result": {
+                    "processed_at": engine_result.processed_at,
+                    "markers": len(engine_result.markers),
+                    "routing_constraints": engine_result.routing_constraints,
+                    "safety_gates": len(engine_result.safety_gates),
+                    "require_review": engine_result.require_review,
+                    "summary": engine_result.summary
+                } if engine_result else None
+            }
+            
+        except Exception as e:
+            return {
+                "error": "OCR_PROCESSING_ERROR",
+                "message": str(e)
+            }
+    
+    # ---------------------------------------------------------
+    # POST /api/v1/bloodwork/ocr/parse-text
+    # ---------------------------------------------------------
+    @app.post("/api/v1/bloodwork/ocr/parse-text", tags=["Bloodwork OCR"])
+    def parse_text_input(
+        text: str = Body(..., embed=True),
+        lab_profile: str = "GLOBAL_CONSERVATIVE",
+        sex: Optional[str] = None,
+        age: Optional[int] = None
+    ):
+        """
+        Parse raw text (copy-pasted from lab report) without OCR.
+        
+        Useful for:
+        - Pre-extracted text
+        - Manual entry
+        - Testing
+        """
+        from bloodwork_engine.ocr_parser import parse_text_fallback
+        
+        try:
+            # Parse text
+            parse_result = parse_text_fallback(text)
+            
+            # Process through engine if markers found
+            engine_result = None
+            if parse_result.markers:
+                engine = get_engine(lab_profile=lab_profile)
+                markers_input = parse_result.to_engine_input()
+                engine_result = engine.process_markers(
+                    markers=markers_input,
+                    sex=sex,
+                    age=age
+                )
+            
+            return {
+                "status": "success",
+                "parse_result": {
+                    "markers_found": len(parse_result.markers),
+                    "lab_detected": parse_result.lab_name,
+                    "report_date": parse_result.report_date,
+                    "parse_stats": parse_result.parse_stats,
+                    "raw_markers": [
+                        {
+                            "code": m.code,
+                            "value": m.value,
+                            "unit": m.unit,
+                            "confidence": m.confidence
+                        }
+                        for m in parse_result.markers
+                    ]
+                },
+                "engine_result": {
+                    "processed_at": engine_result.processed_at,
+                    "markers": len(engine_result.markers),
+                    "routing_constraints": engine_result.routing_constraints,
+                    "safety_gates": len(engine_result.safety_gates),
+                    "require_review": engine_result.require_review,
+                    "summary": engine_result.summary
+                } if engine_result else None
+            }
+            
+        except Exception as e:
+            return {
+                "error": "PARSE_ERROR",
+                "message": str(e)
+            }
     
     return app
