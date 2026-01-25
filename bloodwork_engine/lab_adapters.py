@@ -1,9 +1,9 @@
 """
 GenoMAX² Lab API Adapter Interface
 ===================================
-Unified interface for lab API integrations (Vital/Junction, Quest, LabCorp, etc.)
+Unified interface for lab API integrations (Junction/Vital, Quest, LabCorp, etc.)
 
-Primary Integration: Vital (https://tryvital.io)
+Primary Integration: Junction (https://junction.com, formerly Vital/tryvital.io)
 - Aggregates Quest, LabCorp, BioReference through single API
 - Transparent pricing, no test upcharges
 - Operates in restricted states (NY, NJ, RI)
@@ -35,10 +35,10 @@ logger = logging.getLogger(__name__)
 
 class LabProvider(Enum):
     """Supported lab providers."""
-    VITAL = "vital"           # Vital (formerly Junction) - aggregator
-    QUEST = "quest"           # Quest Diagnostics (via Vital)
-    LABCORP = "labcorp"       # LabCorp (via Vital)
-    BIOREFERENCE = "bioreference"  # BioReference (via Vital)
+    VITAL = "vital"           # Junction (formerly Vital) - aggregator
+    QUEST = "quest"           # Quest Diagnostics (via Junction)
+    LABCORP = "labcorp"       # LabCorp (via Junction)
+    BIOREFERENCE = "bioreference"  # BioReference (via Junction)
     HEALTH_GORILLA = "health_gorilla"  # Health Gorilla aggregator
     LAB_TESTING_API = "lab_testing_api"  # Lab Testing API (Quest access)
     MANUAL = "manual"         # Manual entry / OCR upload
@@ -48,7 +48,7 @@ class LabProvider(Enum):
 class LabPatient:
     """Patient information for lab orders."""
     external_id: str          # GenoMAX user ID
-    lab_patient_id: Optional[str] = None  # Lab's patient ID (Vital user_id)
+    lab_patient_id: Optional[str] = None  # Lab's patient ID (Junction user_id)
     first_name: Optional[str] = None
     last_name: Optional[str] = None
     date_of_birth: Optional[date] = None
@@ -248,10 +248,10 @@ class LabAdapter(ABC):
 
 class VitalAdapter(LabAdapter):
     """
-    Adapter for Vital (formerly Junction) lab API.
+    Adapter for Junction (formerly Vital) lab API.
     
-    Vital aggregates multiple labs including Quest, LabCorp, and BioReference.
-    Documentation: https://docs.tryvital.io/
+    Junction aggregates multiple labs including Quest, LabCorp, and BioReference.
+    Documentation: https://docs.junction.com/
     
     Features:
     - Single API for multiple lab networks
@@ -259,6 +259,8 @@ class VitalAdapter(LabAdapter):
     - At-home phlebotomy service
     - At-home test kits
     - Operates in restricted states (NY, NJ, RI)
+    
+    API Version: v3 (updated January 2025)
     """
     
     provider = LabProvider.VITAL
@@ -289,14 +291,17 @@ class VitalAdapter(LabAdapter):
         self.region = region
         self.timeout = timeout
         
-        # Base URL depends on environment
+        # Base URL - Junction v3 API (updated January 2025)
+        # Supports both junction.com and tryvital.io domains
         if environment == "production":
-            self.base_url = "https://api.tryvital.io/v2"
+            self.base_url = "https://api.tryvital.io/v3"
         else:
-            self.base_url = "https://api.sandbox.tryvital.io/v2"
+            self.base_url = "https://api.sandbox.tryvital.io/v3"
         
+        # Authentication header per Junction docs
         self.headers = {
             "x-vital-api-key": self.api_key or "",
+            "Accept": "application/json",
             "Content-Type": "application/json"
         }
     
@@ -307,7 +312,7 @@ class VitalAdapter(LabAdapter):
         data: Optional[Dict] = None,
         params: Optional[Dict] = None
     ) -> Dict[str, Any]:
-        """Make HTTP request to Vital API."""
+        """Make HTTP request to Junction API."""
         url = f"{self.base_url}{endpoint}"
         
         try:
@@ -322,14 +327,14 @@ class VitalAdapter(LabAdapter):
                 response.raise_for_status()
                 return response.json()
         except httpx.HTTPStatusError as e:
-            logger.error(f"Vital API error: {e.response.status_code} - {e.response.text}")
+            logger.error(f"Junction API error: {e.response.status_code} - {e.response.text}")
             raise
         except Exception as e:
-            logger.error(f"Vital API request failed: {e}")
+            logger.error(f"Junction API request failed: {e}")
             raise
     
     def validate_credentials(self) -> Dict[str, Any]:
-        """Validate Vital API credentials."""
+        """Validate Junction API credentials."""
         if not self.api_key:
             return {
                 "valid": False,
@@ -338,13 +343,14 @@ class VitalAdapter(LabAdapter):
             }
         
         try:
-            # Test with team info endpoint
-            result = self._request("GET", "/team")
+            # Test with lab tests endpoint (valid v3 endpoint)
+            result = self._request("GET", "/lab_tests/labs")
             return {
                 "valid": True,
-                "team_id": result.get("team_id"),
+                "labs_available": len(result) if isinstance(result, list) else 0,
                 "environment": self.environment,
-                "region": self.region
+                "region": self.region,
+                "api_version": "v3"
             }
         except Exception as e:
             return {
@@ -359,7 +365,7 @@ class VitalAdapter(LabAdapter):
     
     def create_user(self, patient: LabPatient) -> Dict[str, Any]:
         """
-        Create a user in Vital.
+        Create a user in Junction.
         
         Args:
             patient: Patient information
@@ -373,17 +379,17 @@ class VitalAdapter(LabAdapter):
         
         result = self._request("POST", "/user", data=data)
         
-        # Update patient with Vital user_id
+        # Update patient with Junction user_id
         patient.lab_patient_id = result.get("user_id")
         
         return result
     
     def get_user(self, user_id: str) -> Dict[str, Any]:
-        """Get user details from Vital."""
+        """Get user details from Junction."""
         return self._request("GET", f"/user/{user_id}")
     
     def delete_user(self, user_id: str) -> Dict[str, Any]:
-        """Delete a user from Vital."""
+        """Delete a user from Junction."""
         return self._request("DELETE", f"/user/{user_id}")
     
     # =========================================================
@@ -392,7 +398,7 @@ class VitalAdapter(LabAdapter):
     
     def list_lab_tests(self) -> List[LabTest]:
         """
-        List available lab tests from Vital.
+        List available lab tests from Junction.
         
         Returns:
             List of LabTest objects
@@ -400,16 +406,18 @@ class VitalAdapter(LabAdapter):
         result = self._request("GET", "/lab_tests")
         
         tests = []
-        for test in result.get("lab_tests", []):
+        test_list = result.get("lab_tests", []) if isinstance(result, dict) else result
+        
+        for test in test_list:
             tests.append(LabTest(
-                test_id=test.get("id"),
+                test_id=str(test.get("id")),
                 name=test.get("name"),
                 description=test.get("description"),
                 markers=[m.get("name") for m in test.get("markers", [])],
                 sample_type=test.get("sample_type", "blood"),
                 fasting_required=test.get("fasting", False),
                 turnaround_days=test.get("turnaround_time_days"),
-                lab_provider=test.get("lab", {}).get("name")
+                lab_provider=test.get("lab", {}).get("name") if isinstance(test.get("lab"), dict) else test.get("lab")
             ))
         
         return tests
@@ -419,23 +427,44 @@ class VitalAdapter(LabAdapter):
         result = self._request("GET", f"/lab_tests/{test_id}")
         
         return LabTest(
-            test_id=result.get("id"),
+            test_id=str(result.get("id")),
             name=result.get("name"),
             description=result.get("description"),
             markers=[m.get("name") for m in result.get("markers", [])],
             sample_type=result.get("sample_type", "blood"),
             fasting_required=result.get("fasting", False),
             turnaround_days=result.get("turnaround_time_days"),
-            lab_provider=result.get("lab", {}).get("name")
+            lab_provider=result.get("lab", {}).get("name") if isinstance(result.get("lab"), dict) else result.get("lab")
         )
     
     def list_markers(self) -> List[Dict[str, Any]]:
-        """List all available biomarkers from Vital."""
+        """List all available biomarkers from Junction."""
         result = self._request("GET", "/lab_tests/markers")
-        return result.get("markers", [])
+        return result.get("markers", []) if isinstance(result, dict) else result
+    
+    def list_labs(self) -> List[Dict[str, Any]]:
+        """List all available labs from Junction."""
+        result = self._request("GET", "/lab_tests/labs")
+        return result if isinstance(result, list) else result.get("labs", [])
     
     # =========================================================
-    # LAB LOCATIONS
+    # AREA/COVERAGE INFO
+    # =========================================================
+    
+    def get_area_info(self, zip_code: str) -> Dict[str, Any]:
+        """
+        Check service coverage for a ZIP code.
+        
+        Args:
+            zip_code: US ZIP code
+        
+        Returns:
+            Coverage information for the area
+        """
+        return self._request("GET", f"/lab_tests/area_info", params={"zip_code": zip_code})
+    
+    # =========================================================
+    # LAB LOCATIONS (PSC - Patient Service Centers)
     # =========================================================
     
     def find_lab_locations(
@@ -462,8 +491,8 @@ class VitalAdapter(LabAdapter):
         if lab_id:
             params["lab_id"] = lab_id
         
-        result = self._request("GET", "/lab_tests/labs", params=params)
-        return result.get("labs", [])
+        result = self._request("GET", "/lab_tests/psc", params=params)
+        return result.get("pscs", []) if isinstance(result, dict) else result
     
     # =========================================================
     # ORDER MANAGEMENT
@@ -482,7 +511,7 @@ class VitalAdapter(LabAdapter):
         Create a lab test order.
         
         Args:
-            user_id: Vital user ID
+            user_id: Junction user ID
             lab_test_id: Lab test ID to order
             collection_method: 'walk_in_test', 'at_home_phlebotomy', or 'testkit'
             patient_details: {first_name, last_name, dob, gender, email, phone_number}
@@ -522,9 +551,9 @@ class VitalAdapter(LabAdapter):
             status=result.get("status", "pending"),
             tests_ordered=[lab_test_id],
             ordered_at=datetime.fromisoformat(result.get("created_at").replace("Z", "+00:00")) if result.get("created_at") else datetime.now(),
-            lab_provider=result.get("lab", {}).get("name"),
+            lab_provider=result.get("lab", {}).get("name") if isinstance(result.get("lab"), dict) else result.get("lab"),
             collection_method=collection_method,
-            requisition_url=result.get("requisition_form", {}).get("url")
+            requisition_url=result.get("requisition_form", {}).get("url") if isinstance(result.get("requisition_form"), dict) else None
         )
     
     def get_order_status(self, order_id: str) -> LabOrder:
@@ -552,12 +581,12 @@ class VitalAdapter(LabAdapter):
             order_id=result.get("id"),
             patient=patient,
             status=status_map.get(result.get("status"), result.get("status")),
-            tests_ordered=[result.get("lab_test", {}).get("id")],
+            tests_ordered=[result.get("lab_test", {}).get("id")] if isinstance(result.get("lab_test"), dict) else [],
             ordered_at=datetime.fromisoformat(result.get("created_at").replace("Z", "+00:00")) if result.get("created_at") else datetime.now(),
             completed_at=datetime.fromisoformat(result.get("completed_at").replace("Z", "+00:00")) if result.get("completed_at") else None,
-            lab_provider=result.get("lab", {}).get("name"),
-            collection_method=result.get("details", {}).get("type", "walk_in_test"),
-            requisition_url=result.get("requisition_form", {}).get("url")
+            lab_provider=result.get("lab", {}).get("name") if isinstance(result.get("lab"), dict) else result.get("lab"),
+            collection_method=result.get("details", {}).get("type", "walk_in_test") if isinstance(result.get("details"), dict) else "walk_in_test",
+            requisition_url=result.get("requisition_form", {}).get("url") if isinstance(result.get("requisition_form"), dict) else None
         )
     
     def cancel_order(self, order_id: str) -> Dict[str, Any]:
@@ -585,7 +614,9 @@ class VitalAdapter(LabAdapter):
         result = self._request("GET", "/orders", params=params)
         
         orders = []
-        for order in result.get("orders", []):
+        order_list = result.get("orders", []) if isinstance(result, dict) else result
+        
+        for order in order_list:
             patient = LabPatient(
                 external_id=order.get("user_id"),
                 lab_patient_id=order.get("user_id")
@@ -594,9 +625,9 @@ class VitalAdapter(LabAdapter):
                 order_id=order.get("id"),
                 patient=patient,
                 status=order.get("status"),
-                tests_ordered=[order.get("lab_test", {}).get("id")],
+                tests_ordered=[order.get("lab_test", {}).get("id")] if isinstance(order.get("lab_test"), dict) else [],
                 ordered_at=datetime.fromisoformat(order.get("created_at").replace("Z", "+00:00")) if order.get("created_at") else datetime.now(),
-                lab_provider=order.get("lab", {}).get("name")
+                lab_provider=order.get("lab", {}).get("name") if isinstance(order.get("lab"), dict) else order.get("lab")
             ))
         
         return orders
@@ -613,10 +644,10 @@ class VitalAdapter(LabAdapter):
         to_date: Optional[date] = None
     ) -> List[LabResults]:
         """
-        Fetch lab results from Vital.
+        Fetch lab results from Junction.
         
         Args:
-            user_id: Filter by Vital user ID
+            user_id: Filter by Junction user ID
             order_id: Filter by specific order ID
             from_date: Filter results from this date
             to_date: Filter results until this date
@@ -639,16 +670,20 @@ class VitalAdapter(LabAdapter):
         result = self._request("GET", f"/user/{user_id}/results", params=params)
         
         results = []
-        for r in result.get("results", []):
+        result_list = result.get("results", []) if isinstance(result, dict) else result
+        
+        for r in result_list:
             results.append(self._parse_result(r, r.get("order_id")))
         
         return results
     
     def _parse_result(self, data: Dict, order_id: str) -> LabResults:
-        """Parse Vital API result into LabResults object."""
+        """Parse Junction API result into LabResults object."""
         markers = []
         
-        for biomarker in data.get("results", []):
+        result_list = data.get("results", []) if isinstance(data, dict) else []
+        
+        for biomarker in result_list:
             markers.append(LabMarkerResult(
                 marker_code=biomarker.get("slug", biomarker.get("name", "")),
                 marker_name=biomarker.get("name", ""),
@@ -657,7 +692,7 @@ class VitalAdapter(LabAdapter):
                 reference_low=biomarker.get("min_range_value"),
                 reference_high=biomarker.get("max_range_value"),
                 flag=biomarker.get("flag"),
-                loinc_code=biomarker.get("loinc", {}).get("code")
+                loinc_code=biomarker.get("loinc", {}).get("code") if isinstance(biomarker.get("loinc"), dict) else None
             ))
         
         patient = LabPatient(
@@ -675,7 +710,7 @@ class VitalAdapter(LabAdapter):
             result_id=data.get("id", order_id),
             order_id=order_id,
             patient=patient,
-            lab_provider=data.get("provider", {}).get("name", "Vital"),
+            lab_provider=data.get("provider", {}).get("name", "Junction") if isinstance(data.get("provider"), dict) else "Junction",
             report_date=report_date,
             markers=markers,
             raw_response=data,
@@ -806,7 +841,7 @@ def list_providers() -> List[Dict[str, Any]]:
 
 
 def get_vital_status() -> Dict[str, Any]:
-    """Get Vital API configuration status."""
+    """Get Junction (Vital) API configuration status."""
     api_key = os.environ.get("VITAL_API_KEY")
     environment = os.environ.get("VITAL_ENVIRONMENT", "sandbox")
     
