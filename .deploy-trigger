@@ -1,5 +1,6 @@
 v3.28.0 - Bloodwork Engine v2.0
-Deployed: 2026-01-25T15:50:00Z
+Deployed: 2026-01-25T15:56:00Z
+Fix: BloodworkDataLoader class name corrected
 Features:
 - 40 biomarkers (13 original + 27 new)
 - 31 safety gates across 3 tiers
