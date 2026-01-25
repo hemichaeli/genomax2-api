@@ -1,6 +1,13 @@
 """
-GenoMAX2 API Server Entry Point v3.28.0
-Bloodwork Engine v2.0 with Auto-Migration
+GenoMAX2 API Server Entry Point v3.29.0
+Bloodwork Engine v2.0 with Webhook Integration
+
+v3.29.0:
+- Add webhook endpoints for lab result notifications
+- POST /api/v1/webhooks/vital - Junction (Vital) webhook receiver
+- POST /api/v1/webhooks/labtestingapi - Lab Testing API webhook receiver
+- GET /api/v1/webhooks/status - Webhook configuration status
+- POST /api/v1/webhooks/test - Test webhook processing
 
 v3.28.0:
 - Bloodwork Engine upgraded to v2.0 (40 markers, 31 safety gates)
@@ -67,6 +74,16 @@ try:
     print(f"Bloodwork Engine v{bw_version} endpoints registered successfully")
 except Exception as e:
     print(f"ERROR loading Bloodwork Engine: {type(e).__name__}: {e}")
+    import traceback
+    traceback.print_exc()
+
+# ===== WEBHOOK ENDPOINTS (v3.29.0) =====
+try:
+    from bloodwork_engine.api_webhook_endpoints import register_webhook_endpoints
+    register_webhook_endpoints(app)
+    print("Webhook endpoints registered successfully")
+except Exception as e:
+    print(f"ERROR loading Webhook endpoints: {type(e).__name__}: {e}")
     import traceback
     traceback.print_exc()
 
@@ -166,9 +183,13 @@ def debug_routes():
     # Filter for launch/tier routes
     launch_routes = [r for r in routes if 'launch' in r['path'].lower() or 'tier' in r['path'].lower()]
     
+    # Filter for webhook routes
+    webhook_routes = [r for r in routes if 'webhook' in r['path'].lower()]
+    
     return {
         "total_routes": len(routes),
         "bloodwork_routes": bloodwork_routes,
+        "webhook_routes": webhook_routes,
         "health_routes": health_routes,
         "shopify_routes": shopify_routes,
         "launch_routes": launch_routes,
