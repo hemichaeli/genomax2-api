@@ -1,6 +1,10 @@
 """
-GenoMAX2 API Server Entry Point v3.30.0
-Bloodwork Engine v2.0 with Supliful Catalog Integration
+GenoMAX2 API Server Entry Point v3.30.1
+Bloodwork Engine v2.0.1 with Supliful Catalog Integration
+
+v3.30.1:
+- Fix safety gate counting in API endpoints (31 gates: 14/6/11 by tier)
+- Bloodwork Engine v2.0.1 with correct get_safety_gate_summary()
 
 v3.30.0:
 - Supliful catalog integration with 185+ products
