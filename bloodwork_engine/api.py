@@ -46,15 +46,16 @@ class ProcessedMarkerResponse(BaseModel):
     canonical_unit: Optional[str]
     status: str
     range_status: str
-    reference_range: Optional[Dict[str, Optional[float]]]
+    reference_range: Optional[Dict[str, Optional[float]]] = None
     genomax_optimal: Optional[Dict[str, Optional[float]]] = None
-    decision_limits: Optional[Dict[str, Optional[float]]]
-    lab_profile_used: Optional[str]
-    fallback_used: bool
-    conversion_applied: bool
-    conversion_multiplier: Optional[float]
-    flags: List[str]
-    log_entries: List[str]
+    decision_limits: Optional[Dict[str, Optional[float]]] = None
+    lab_profile_used: Optional[str] = None
+    fallback_used: bool = False
+    conversion_applied: bool = False
+    conversion_multiplier: Optional[float] = None
+    flags: List[str] = []
+    log_entries: List[str] = []
+    is_genetic: bool = False
     genetic_interpretation: Optional[str] = None
 
 
@@ -64,46 +65,40 @@ class ComputedMarkerResponse(BaseModel):
     name: str
     value: float
     formula: str
-    interpretation: str
+    unit: str
     source_markers: List[str]
 
 
 class SafetyGateResponse(BaseModel):
     """Response for a triggered safety gate."""
     gate_id: str
+    name: str
+    tier: str
     description: str
     trigger_marker: str
     trigger_value: Any
     threshold: Any
+    action: str
     routing_constraint: str
-    gate_tier: str
-    gate_action: str
-    exception_active: bool
-    exception_reason: Optional[str]
     blocked_ingredients: List[str] = []
-
-
-class GateSummaryResponse(BaseModel):
-    """Summary of gates by tier."""
-    tier1_safety: Dict[str, int]
-    tier2_optimization: Dict[str, int]
-    tier3_genetic_hormonal: Dict[str, int]
-    total_blocks: int
-    total_cautions: int
-    total_flags: int
+    caution_ingredients: List[str] = []
+    recommended_ingredients: List[str] = []
+    exception_active: bool = False
+    exception_reason: Optional[str] = None
 
 
 class ProcessMarkersResponse(BaseModel):
     """Response from processing markers."""
     processed_at: str
+    engine_version: str
     lab_profile: str
     markers: List[ProcessedMarkerResponse]
     computed_markers: List[ComputedMarkerResponse] = []
     routing_constraints: List[str]
     safety_gates: List[SafetyGateResponse]
-    gate_summary: GateSummaryResponse
     require_review: bool
     summary: Dict[str, int]
+    gate_summary: Dict[str, int]
     ruleset_version: str
     input_hash: str
     output_hash: str
@@ -128,11 +123,7 @@ def register_bloodwork_endpoints(app):
     # ---------------------------------------------------------
     @app.get("/api/v1/bloodwork/lab-profiles", tags=["Bloodwork Engine"])
     def list_lab_profiles():
-        """
-        List available lab profiles for reference range lookup.
-        
-        Lab profiles determine which reference ranges are used for biomarker evaluation.
-        """
+        """List available lab profiles for reference range lookup."""
         loader = get_loader()
         return {
             "lab_profiles": loader.lab_profiles,
@@ -145,24 +136,12 @@ def register_bloodwork_endpoints(app):
     # ---------------------------------------------------------
     @app.get("/api/v1/bloodwork/markers", tags=["Bloodwork Engine"])
     def list_markers(tier: Optional[str] = None):
-        """
-        List all allowed biomarkers in the registry.
-        
-        v2.0 includes 40 biomarkers across 4 tiers:
-        - original: 13 core metabolic markers (ferritin, vitamin D, etc.)
-        - tier 1: Safety-critical markers (potassium, TSH, B12, etc.)
-        - tier 2: Optimization markers (omega-3 index, zinc, copper, etc.)
-        - tier 3: Genetic/hormonal markers (MTHFR, cortisol, estradiol, etc.)
-        
-        Optional filter:
-        - tier: Filter by marker tier (original, 1, 2, 3)
-        """
+        """List all allowed biomarkers in the registry."""
         loader = get_loader()
         registry = loader.marker_registry
         
         markers = registry.get("markers", [])
         
-        # Apply tier filter
         if tier:
             tier_value = tier.lower().replace("tier ", "")
             markers = [m for m in markers if str(m.get("tier", "original")).lower() == tier_value]
@@ -187,7 +166,7 @@ def register_bloodwork_endpoints(app):
                     "sex_relevance": m.get("sex_relevance", "both"),
                     "has_conversions": len(m.get("conversions", [])) > 0,
                     "tier": m.get("tier", "original"),
-                    "is_genetic": m.get("canonical_unit") == "categorical",
+                    "is_genetic": m.get("canonical_unit") == "genotype",
                     "notes": m.get("notes")
                 }
                 for m in markers
@@ -199,11 +178,7 @@ def register_bloodwork_endpoints(app):
     # ---------------------------------------------------------
     @app.get("/api/v1/bloodwork/markers/{code}", tags=["Bloodwork Engine"])
     def get_marker_details(code: str):
-        """
-        Get detailed information for a specific marker.
-        
-        Accepts canonical code or any alias.
-        """
+        """Get detailed information for a specific marker."""
         loader = get_loader()
         marker_def = loader.get_marker_definition(code)
         
@@ -224,8 +199,8 @@ def register_bloodwork_endpoints(app):
             "tier": marker_def.get("tier", "original"),
             "added_in": marker_def.get("added_in"),
             "notes": marker_def.get("notes"),
-            "is_genetic": marker_def.get("canonical_unit") == "categorical",
-            "categorical_values": marker_def.get("categorical_values")
+            "is_genetic": marker_def.get("canonical_unit") == "genotype",
+            "valid_values": marker_def.get("valid_values")
         }
     
     # ---------------------------------------------------------
@@ -236,25 +211,12 @@ def register_bloodwork_endpoints(app):
         lab_profile: Optional[str] = None,
         marker_code: Optional[str] = None
     ):
-        """
-        List reference ranges.
-        
-        v2.0 includes ranges for all 40 biomarkers with:
-        - lab_reference: Standard lab ranges
-        - genomax_optimal: Functional optimal ranges
-        - decision_limits: Gate trigger thresholds
-        - critical: Emergency thresholds
-        
-        Optional filters:
-        - lab_profile: Filter by specific lab profile
-        - marker_code: Filter by specific marker code
-        """
+        """List reference ranges."""
         loader = get_loader()
         ranges_data = loader.reference_ranges
         
         ranges = ranges_data.get("ranges", [])
         
-        # Apply filters
         if lab_profile:
             ranges = [r for r in ranges if r.get("lab_profile") == lab_profile]
         if marker_code:
@@ -277,37 +239,14 @@ def register_bloodwork_endpoints(app):
     # ---------------------------------------------------------
     @app.get("/api/v1/bloodwork/safety-gates", tags=["Bloodwork Engine"])
     def list_safety_gates(tier: Optional[str] = None):
-        """
-        List all defined safety gates.
-        
-        v2.0 includes 31 safety gates across 3 tiers:
-        
-        TIER 1 - Safety Gates (14):
-        - Critical blocks (iron, potassium, iodine)
-        - Organ function cautions (hepatic, renal)
-        - Deficiency flags (B12, folate, coagulation)
-        
-        TIER 2 - Optimization Gates (6):
-        - Nutrient optimization (omega-3, zinc:copper ratio)
-        - Metabolic support (insulin resistance, triglycerides)
-        
-        TIER 3 - Genetic/Hormonal Gates (11):
-        - Genetic routing (MTHFR methylfolate requirement)
-        - Hormonal balance (cortisol, thyroid conversion, testosterone)
-        - Cardiovascular markers (ApoB, Lp(a))
-        
-        Optional filter:
-        - tier: Filter by gate tier (1, 2, 3)
-        """
+        """List all defined safety gates."""
         loader = get_loader()
         all_gates = loader.get_safety_gates()
         
-        # Apply tier filter
         if tier:
             tier_num = tier.replace("tier", "").replace(" ", "").strip()
             all_gates = {k: v for k, v in all_gates.items() if str(v.get("tier", "1")) == tier_num}
         
-        # Group by tier
         tier1_gates = {k: v for k, v in all_gates.items() if v.get("tier") == 1}
         tier2_gates = {k: v for k, v in all_gates.items() if v.get("tier") == 2}
         tier3_gates = {k: v for k, v in all_gates.items() if v.get("tier") == 3}
@@ -333,15 +272,7 @@ def register_bloodwork_endpoints(app):
     # ---------------------------------------------------------
     @app.get("/api/v1/bloodwork/computed-markers", tags=["Bloodwork Engine"])
     def list_computed_markers():
-        """
-        List available computed/derived markers.
-        
-        Computed markers are calculated from other biomarkers:
-        - homa_ir: (fasting_glucose * fasting_insulin) / 405
-        - zinc_copper_ratio: zinc_serum / copper_serum
-        - rt3_ft3_ratio: (reverse_t3 / free_t3) * 100
-        - estradiol_progesterone_ratio: estradiol / progesterone (female only)
-        """
+        """List available computed/derived markers."""
         return {
             "computed_markers": [
                 {
@@ -349,32 +280,21 @@ def register_bloodwork_endpoints(app):
                     "name": "HOMA-IR (Insulin Resistance)",
                     "formula": "(fasting_glucose * fasting_insulin) / 405",
                     "required_markers": ["fasting_glucose", "fasting_insulin"],
-                    "interpretation": {
-                        "optimal": "<1.0",
-                        "normal": "<2.5",
-                        "elevated": "2.5-3.0",
-                        "high": ">3.0"
-                    }
+                    "interpretation": {"optimal": "<1.0", "normal": "<2.5", "elevated": "2.5-3.0", "high": ">3.0"}
                 },
                 {
                     "code": "zinc_copper_ratio",
                     "name": "Zinc:Copper Ratio",
                     "formula": "zinc_serum / copper_serum",
                     "required_markers": ["zinc_serum", "copper_serum"],
-                    "interpretation": {
-                        "optimal": "0.7-1.0",
-                        "elevated_zinc": ">1.5 (caution on zinc supplementation)"
-                    }
+                    "interpretation": {"optimal": "0.7-1.0", "elevated_zinc": ">1.5 (caution)"}
                 },
                 {
                     "code": "rt3_ft3_ratio",
                     "name": "Reverse T3 to Free T3 Ratio",
                     "formula": "(reverse_t3 / free_t3) * 100",
                     "required_markers": ["reverse_t3", "free_t3"],
-                    "interpretation": {
-                        "optimal": "<10",
-                        "elevated": ">10 (poor T4-T3 conversion)"
-                    }
+                    "interpretation": {"optimal": "<10", "elevated": ">10 (poor T4-T3 conversion)"}
                 },
                 {
                     "code": "estradiol_progesterone_ratio",
@@ -382,10 +302,7 @@ def register_bloodwork_endpoints(app):
                     "formula": "estradiol / progesterone",
                     "required_markers": ["estradiol", "progesterone"],
                     "sex_specific": "female",
-                    "interpretation": {
-                        "optimal_luteal": "10-20",
-                        "estrogen_dominance": ">20"
-                    }
+                    "interpretation": {"optimal_luteal": "10-20", "estrogen_dominance": ">20"}
                 }
             ]
         }
@@ -393,27 +310,11 @@ def register_bloodwork_endpoints(app):
     # ---------------------------------------------------------
     # POST /api/v1/bloodwork/process
     # ---------------------------------------------------------
-    @app.post("/api/v1/bloodwork/process", tags=["Bloodwork Engine"], response_model=ProcessMarkersResponse)
+    @app.post("/api/v1/bloodwork/process", tags=["Bloodwork Engine"])
     def process_markers(request: ProcessMarkersRequest):
-        """
-        Process biomarkers through the Bloodwork Engine v2.0.
-        
-        This endpoint:
-        1. Validates markers against the registry (40 markers, including genetic)
-        2. Converts units to canonical units (with logging)
-        3. Looks up reference ranges AND GenoMAX optimal ranges
-        4. Calculates computed markers (HOMA-IR, ratios)
-        5. Evaluates 31 safety gates across 3 tiers
-        6. Returns processed markers with flags and routing constraints
-        
-        Safety Gate Tiers:
-        - TIER 1 (Safety): BLOCK/CAUTION actions for critical markers
-        - TIER 2 (Optimization): FLAG actions for nutrient optimization
-        - TIER 3 (Genetic/Hormonal): Specialized routing for MTHFR, hormones
-        """
+        """Process biomarkers through the Bloodwork Engine v2.0."""
         engine = get_engine(lab_profile=request.lab_profile)
         
-        # Convert Pydantic models to dicts
         markers_input = [
             {"code": m.code, "value": m.value, "unit": m.unit}
             for m in request.markers
@@ -429,104 +330,96 @@ def register_bloodwork_endpoints(app):
         computed_markers_response = []
         if hasattr(result, 'computed_markers') and result.computed_markers:
             for cm in result.computed_markers:
-                computed_markers_response.append(ComputedMarkerResponse(
-                    code=cm.code,
-                    name=cm.name,
-                    value=cm.value,
-                    formula=cm.formula,
-                    interpretation=getattr(cm, 'interpretation', ''),
-                    source_markers=cm.source_markers
-                ))
+                computed_markers_response.append({
+                    "code": cm.code,
+                    "name": cm.name,
+                    "value": cm.value,
+                    "formula": cm.formula,
+                    "unit": cm.unit,
+                    "source_markers": cm.source_markers
+                })
         
-        # Convert gate summary
-        gate_summary = GateSummaryResponse(
-            tier1_safety=result.gate_summary.get("tier1", {"blocks": 0, "cautions": 0, "flags": 0}) if hasattr(result, 'gate_summary') else {"blocks": 0, "cautions": 0, "flags": 0},
-            tier2_optimization=result.gate_summary.get("tier2", {"blocks": 0, "cautions": 0, "flags": 0}) if hasattr(result, 'gate_summary') else {"blocks": 0, "cautions": 0, "flags": 0},
-            tier3_genetic_hormonal=result.gate_summary.get("tier3", {"blocks": 0, "cautions": 0, "flags": 0}) if hasattr(result, 'gate_summary') else {"blocks": 0, "cautions": 0, "flags": 0},
-            total_blocks=result.gate_summary.get("total_blocks", 0) if hasattr(result, 'gate_summary') else 0,
-            total_cautions=result.gate_summary.get("total_cautions", 0) if hasattr(result, 'gate_summary') else 0,
-            total_flags=result.gate_summary.get("total_flags", 0) if hasattr(result, 'gate_summary') else 0
-        )
+        # Convert safety gates
+        safety_gates_response = []
+        for g in result.safety_gates:
+            safety_gates_response.append({
+                "gate_id": g.gate_id,
+                "name": g.name,
+                "tier": g.tier.value if hasattr(g.tier, 'value') else str(g.tier),
+                "description": g.description,
+                "trigger_marker": g.trigger_marker,
+                "trigger_value": g.trigger_value,
+                "threshold": g.threshold,
+                "action": g.action.value if hasattr(g.action, 'value') else str(g.action),
+                "routing_constraint": g.routing_constraint,
+                "blocked_ingredients": getattr(g, 'blocked_ingredients', []),
+                "caution_ingredients": getattr(g, 'caution_ingredients', []),
+                "recommended_ingredients": getattr(g, 'recommended_ingredients', []),
+                "exception_active": g.exception_active,
+                "exception_reason": g.exception_reason
+            })
         
-        # Convert dataclass result to response
-        return ProcessMarkersResponse(
-            processed_at=result.processed_at,
-            lab_profile=result.lab_profile,
-            markers=[
-                ProcessedMarkerResponse(
-                    original_code=m.original_code,
-                    canonical_code=m.canonical_code,
-                    original_value=m.original_value,
-                    canonical_value=m.canonical_value,
-                    original_unit=m.original_unit,
-                    canonical_unit=m.canonical_unit,
-                    status=m.status.value if hasattr(m.status, 'value') else m.status,
-                    range_status=m.range_status.value if hasattr(m.range_status, 'value') else m.range_status,
-                    reference_range=m.reference_range,
-                    genomax_optimal=getattr(m, 'genomax_optimal', None),
-                    decision_limits=m.decision_limits,
-                    lab_profile_used=m.lab_profile_used,
-                    fallback_used=m.fallback_used,
-                    conversion_applied=m.conversion_applied,
-                    conversion_multiplier=m.conversion_multiplier,
-                    flags=m.flags,
-                    log_entries=m.log_entries,
-                    genetic_interpretation=getattr(m, 'genetic_interpretation', None)
-                )
-                for m in result.markers
-            ],
-            computed_markers=computed_markers_response,
-            routing_constraints=result.routing_constraints,
-            safety_gates=[
-                SafetyGateResponse(
-                    gate_id=g.gate_id,
-                    description=g.description,
-                    trigger_marker=g.trigger_marker,
-                    trigger_value=g.trigger_value,
-                    threshold=g.threshold,
-                    routing_constraint=g.routing_constraint,
-                    gate_tier=g.tier.value if hasattr(g.tier, 'value') else str(g.tier),
-                    gate_action=g.action.value if hasattr(g.action, 'value') else str(g.action),
-                    exception_active=g.exception_active,
-                    exception_reason=g.exception_reason,
-                    blocked_ingredients=getattr(g, 'blocked_ingredients', [])
-                )
-                for g in result.safety_gates
-            ],
-            gate_summary=gate_summary,
-            require_review=result.require_review,
-            summary=result.summary,
-            ruleset_version=result.ruleset_version,
-            input_hash=result.input_hash,
-            output_hash=result.output_hash
-        )
+        # Convert markers
+        markers_response = []
+        for m in result.markers:
+            markers_response.append({
+                "original_code": m.original_code,
+                "canonical_code": m.canonical_code,
+                "original_value": m.original_value,
+                "canonical_value": m.canonical_value,
+                "original_unit": m.original_unit,
+                "canonical_unit": m.canonical_unit,
+                "status": m.status.value if hasattr(m.status, 'value') else m.status,
+                "range_status": m.range_status.value if hasattr(m.range_status, 'value') else m.range_status,
+                "reference_range": m.reference_range,
+                "genomax_optimal": getattr(m, 'genomax_optimal', None),
+                "decision_limits": getattr(m, 'decision_limits', None),
+                "lab_profile_used": m.lab_profile_used,
+                "fallback_used": m.fallback_used,
+                "conversion_applied": m.conversion_applied,
+                "conversion_multiplier": m.conversion_multiplier,
+                "flags": m.flags,
+                "log_entries": m.log_entries,
+                "is_genetic": getattr(m, 'is_genetic', False),
+                "genetic_interpretation": getattr(m, 'genetic_interpretation', None)
+            })
+        
+        return {
+            "processed_at": result.processed_at,
+            "engine_version": result.engine_version,
+            "lab_profile": result.lab_profile,
+            "markers": markers_response,
+            "computed_markers": computed_markers_response,
+            "routing_constraints": result.routing_constraints,
+            "safety_gates": safety_gates_response,
+            "require_review": result.require_review,
+            "summary": result.summary,
+            "gate_summary": result.gate_summary,
+            "ruleset_version": result.ruleset_version,
+            "input_hash": result.input_hash,
+            "output_hash": result.output_hash
+        }
     
     # ---------------------------------------------------------
     # GET /api/v1/bloodwork/status
     # ---------------------------------------------------------
     @app.get("/api/v1/bloodwork/status", tags=["Bloodwork Engine"])
     def bloodwork_engine_status():
-        """
-        Get Bloodwork Engine status and configuration.
-        Includes diagnostic info for troubleshooting deployment issues.
-        """
+        """Get Bloodwork Engine status and configuration."""
         loader = get_loader()
         registry = loader.marker_registry
         ranges = loader.reference_ranges
         
-        # Diagnostic: check file paths
         engine_file = Path(__file__).resolve()
         data_dir = engine_file.parent / "data"
         registry_path = data_dir / "marker_registry_v2_0.json"
         ranges_path = data_dir / "reference_ranges_v2_0.json"
         
-        # Count gates by tier
         all_gates = loader.get_safety_gates()
         tier1_count = len([g for g in all_gates.values() if g.get("tier") == 1])
         tier2_count = len([g for g in all_gates.values() if g.get("tier") == 2])
         tier3_count = len([g for g in all_gates.values() if g.get("tier") == 3])
         
-        # Get range count safely
         range_count = len(ranges.get("ranges", []))
         
         return {
@@ -582,14 +475,8 @@ def register_bloodwork_endpoints(app):
     # ---------------------------------------------------------
     @app.post("/api/v1/bloodwork/reload", tags=["Bloodwork Engine"])
     def reload_bloodwork_data():
-        """
-        Force reload of bloodwork data files.
-        Use this if data files were updated but singleton cache is stale.
-        """
-        # Reset the singleton
+        """Force reload of bloodwork data files."""
         BloodworkDataLoader.reset()
-        
-        # Re-initialize
         loader = get_loader()
         all_gates = loader.get_safety_gates()
         range_count = len(loader.reference_ranges.get("ranges", []))
