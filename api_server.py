@@ -1,7 +1,15 @@
 """
 GenoMAX² API Server
 Gender-Optimized Biological Operating System
-Version 3.29.0 - Bloodwork Engine Integration
+Version 3.29.1 - Bloodwork Engine Integration (Bug Fix)
+
+v3.29.1:
+- BUGFIX: orchestrate/v2 bloodwork_input handler now correctly calls
+  orchestrate_with_bloodwork_input() (removed erroneous await)
+- BUGFIX: Correct parameters passed to orchestrate_with_bloodwork_input()
+- BUGFIX: Correct result extraction from BloodworkIntegrationResult
+- BUGFIX: Correct exception attribute (error_code not error_type)
+- BUGFIX: Correct error enum (BLOODWORK_INVALID_HANDOFF not INVALID_HANDOFF)
 
 v3.29.0:
 - orchestrate/v2 now supports bloodwork_input mode (raw markers)
@@ -99,7 +107,7 @@ from app.brain.bloodwork_handoff import (
     BloodworkHandoffError
 )
 
-API_VERSION = "3.29.0"
+API_VERSION = "3.29.1"
 
 app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version=API_VERSION)
 
@@ -907,7 +915,7 @@ def brain_resolve(request: ResolveRequest):
 
 
 @app.post("/api/v1/brain/orchestrate/v2", response_model=OrchestrateOutputV2)
-async def brain_orchestrate_v2(request: OrchestrateInputV2) -> OrchestrateOutputV2:
+def brain_orchestrate_v2(request: OrchestrateInputV2) -> OrchestrateOutputV2:
     """
     Orchestrate V2 endpoint with dual mode support:
     1. bloodwork_input (RECOMMENDED): Raw markers sent to Bloodwork Engine for processing
@@ -926,6 +934,10 @@ async def brain_orchestrate_v2(request: OrchestrateInputV2) -> OrchestrateOutput
     
     # MODE 1: bloodwork_input - send raw markers to Bloodwork Engine
     if request.bloodwork_input:
+        # Generate run_id upfront for consistency
+        run_id = str(uuid.uuid4())
+        db_conn = None
+        
         try:
             # Convert API models to internal BloodworkInputV2
             markers_internal = [
@@ -939,18 +951,50 @@ async def brain_orchestrate_v2(request: OrchestrateInputV2) -> OrchestrateOutput
                 age=request.bloodwork_input.age or request.assessment_context.get("age")
             )
             
-            # Call Bloodwork Engine integration
-            result = await orchestrate_with_bloodwork_input(
+            # Get DB connection for persistence (passed to orchestrate function)
+            db_conn = get_db()
+            
+            # Call Bloodwork Engine integration (SYNCHRONOUS - no await!)
+            # Correct function signature: bloodwork_input, brain_constraints, run_id, db_conn
+            result = orchestrate_with_bloodwork_input(
                 bloodwork_input=bloodwork_input_v2,
-                selected_goals=request.selected_goals,
-                assessment_context=request.assessment_context
+                brain_constraints=None,  # No existing brain constraints
+                run_id=run_id,
+                db_conn=db_conn
             )
             
-            # Build response from orchestrate_with_bloodwork_input result
-            run_id = result.run_id
-            routing_constraints = result.routing_constraints
-            signal_id = result.handoff_id or f"bloodwork_input_{run_id}"
-            signal_hash = result.handoff_hash or compute_hash({"bloodwork_input": bloodwork_input_v2.model_dump()})
+            # Check for success (BloodworkIntegrationResult has success attribute)
+            if not result.success:
+                error_msg = result.error_message or "Unknown bloodwork integration error"
+                error_code = result.error_code or "BLOODWORK_ERROR"
+                raise HTTPException(
+                    status_code=result.http_code or 500,
+                    detail={"error": error_code, "message": error_msg}
+                )
+            
+            # Extract data from BloodworkIntegrationResult
+            # result.merged_constraints is Dict[str, List[str]] with keys:
+            # blocked_ingredients, blocked_categories, caution_flags, requirements, reason_codes
+            merged = result.merged_constraints
+            
+            # Convert merged_constraints to routing_constraints format expected by response
+            routing_constraints = {
+                "blocked_targets": merged.get("blocked_ingredients", []) + merged.get("blocked_categories", []),
+                "caution_targets": merged.get("caution_flags", []),
+                "allowed_targets": [],
+                "blocked_ingredients": merged.get("blocked_ingredients", []),
+                "requirements": merged.get("requirements", []),
+                "reason_codes": merged.get("reason_codes", []),
+                "target_details": {},
+                "global_flags": [],
+                "has_critical_flags": False
+            }
+            
+            # Extract handoff data for signal_id and hashes
+            handoff_data = result.handoff.to_dict() if result.handoff else {}
+            signal_id = f"bloodwork_input_{run_id}"
+            signal_hash = handoff_data.get("audit", {}).get("output_hash", "") or compute_hash({"bloodwork_input": bloodwork_input_v2.model_dump()})
+            output_hash = result.persistence_data.get("output_hash", "") if result.persistence_data else compute_hash(routing_constraints)
             hash_verified = True  # Hash verification N/A for bloodwork_input mode
             
             chain_entry = {
@@ -959,14 +1003,15 @@ async def brain_orchestrate_v2(request: OrchestrateInputV2) -> OrchestrateOutput
                 "bloodwork_engine": "2.0.0",
                 "timestamp": created_at,
                 "input_mode": "bloodwork_input",
-                "output_hash": result.output_hash
+                "output_hash": output_hash
             }
             
-            # Persist to decision_outputs
-            conn = get_db()
-            if conn:
+            # Persist to brain_runs and decision_outputs
+            # Note: orchestrate_with_bloodwork_input already persists to decision_outputs
+            # We just need to add brain_runs entry
+            if db_conn:
                 try:
-                    cur = conn.cursor()
+                    cur = db_conn.cursor()
                     output_data = {
                         "run_id": run_id,
                         "signal_id": signal_id,
@@ -974,23 +1019,24 @@ async def brain_orchestrate_v2(request: OrchestrateInputV2) -> OrchestrateOutput
                         "routing_constraints": routing_constraints,
                         "selected_goals": request.selected_goals,
                         "assessment_context": request.assessment_context,
-                        "handoff": result.handoff_data
+                        "handoff": handoff_data
                     }
                     cur.execute(
                         "INSERT INTO brain_runs (id, user_id, status, input_hash, output_hash, created_at) VALUES (%s, %s, %s, %s, %s, NOW())",
-                        (run_id, request.assessment_context.get("user_id", "anonymous"), "completed", signal_hash, result.output_hash)
+                        (run_id, request.assessment_context.get("user_id", "anonymous"), "completed", signal_hash, output_hash)
                     )
                     cur.execute(
                         "INSERT INTO decision_outputs (run_id, phase, output_json, output_hash) VALUES (%s, %s, %s, %s)",
-                        (run_id, "orchestrate_v2", json.dumps(output_data, default=str), result.output_hash)
+                        (run_id, "orchestrate_v2", json.dumps(output_data, default=str), output_hash)
                     )
-                    conn.commit()
+                    db_conn.commit()
                     cur.close()
-                    conn.close()
                 except Exception as e:
                     print(f"[orchestrate_v2] DB persist error: {e}")
-                    try: conn.close()
+                finally:
+                    try: db_conn.close()
                     except: pass
+                    db_conn = None
             
             response = OrchestrateOutputV2(
                 run_id=run_id,
@@ -1019,13 +1065,35 @@ async def brain_orchestrate_v2(request: OrchestrateInputV2) -> OrchestrateOutput
             
         except BloodworkHandoffException as e:
             # STRICT MODE: Bloodwork Engine failures are hard aborts
+            # Close DB connection if open
+            if db_conn:
+                try: db_conn.close()
+                except: pass
+            
             error_response = build_bloodwork_error_response(e)
-            if e.error_type == BloodworkHandoffError.BLOODWORK_UNAVAILABLE:
+            # FIX: Use e.error_code (not e.error_type)
+            if e.error_code == BloodworkHandoffError.BLOODWORK_UNAVAILABLE:
                 raise HTTPException(status_code=503, detail=error_response)
-            elif e.error_type == BloodworkHandoffError.INVALID_HANDOFF:
+            # FIX: Use BLOODWORK_INVALID_HANDOFF (not INVALID_HANDOFF)
+            elif e.error_code == BloodworkHandoffError.BLOODWORK_INVALID_HANDOFF:
                 raise HTTPException(status_code=502, detail=error_response)
             else:
                 raise HTTPException(status_code=500, detail=error_response)
+        except HTTPException:
+            # Re-raise HTTP exceptions
+            if db_conn:
+                try: db_conn.close()
+                except: pass
+            raise
+        except Exception as e:
+            # Catch-all for unexpected errors
+            if db_conn:
+                try: db_conn.close()
+                except: pass
+            raise HTTPException(
+                status_code=500,
+                detail={"error": "BLOODWORK_INPUT_ERROR", "message": str(e)}
+            )
     
     # MODE 2: bloodwork_signal (legacy) - use pre-computed signal
     signal = request.bloodwork_signal
