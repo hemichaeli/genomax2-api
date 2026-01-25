@@ -72,7 +72,7 @@ except Exception as e:
 
 # ===== HEALTH CHECK ENDPOINTS (v3.28.0) =====
 try:
-    from app.health.router import router as health_router
+    from app.health import router as health_router
     app.include_router(health_router)
     print("Health Check endpoints registered successfully")
 except Exception as e:
