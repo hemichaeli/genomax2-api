@@ -160,10 +160,10 @@ def bloodwork_v2_health():
         loader = get_loader()
         engine = get_engine()
         
-        # Get gate counts by tier
+        # Get gate counts by tier - FIX: iterate over .items() not just dict
         gates = loader.get_safety_gates()
         tier_counts = {}
-        for gate in gates:
+        for gate_id, gate in gates.items():  # Use .items() to get key-value pairs
             tier = gate.get('tier', 1)
             tier_counts[f"tier_{tier}"] = tier_counts.get(f"tier_{tier}", 0) + 1
         
@@ -192,7 +192,9 @@ def bloodwork_v2_health():
             }
         }
     except Exception as e:
+        import traceback
         return {
             "status": "error",
-            "error": str(e)
+            "error": str(e),
+            "traceback": traceback.format_exc()
         }
