@@ -5,7 +5,7 @@ API endpoints for applying routing constraints and testing.
 
 Security: POST endpoints require valid input, health check is public.
 
-Version: routing_layer_v1
+Version: routing_layer_v1.1 (fixed metadata attribute name)
 """
 
 import os
@@ -126,7 +126,7 @@ async def routing_health():
     return {
         "status": "ok",
         "module": "routing_layer",
-        "version": "routing_layer_v1",
+        "version": "routing_layer_v1.1",
         "catalog_available": CATALOG_AVAILABLE,
         "timestamp": datetime.utcnow().isoformat(),
     }
@@ -162,17 +162,18 @@ async def apply_routing(request: ApplyRoutingRequest):
             results, coverage = validate_catalog_snapshot(mapper)
             
             # Convert valid results to SkuInput
+            # NOTE: SkuValidationResult has 'metadata' field, not 'meta'
             valid_skus = []
             for result in results:
                 if result.status.value == "VALID":
                     valid_skus.append(SkuInput(
                         sku_id=result.sku_id,
                         product_name=result.product_name,
-                        ingredient_tags=result.meta.ingredient_tags if result.meta else [],
-                        category_tags=result.meta.category_tags if result.meta else [],
-                        risk_tags=result.meta.risk_tags if result.meta else [],
-                        gender_line=result.meta.gender_line.value if result.meta and result.meta.gender_line else None,
-                        evidence_tier=result.meta.evidence_tier if result.meta else None,
+                        ingredient_tags=result.metadata.ingredient_tags if result.metadata else [],
+                        category_tags=result.metadata.category_tags if result.metadata else [],
+                        risk_tags=result.metadata.risk_tags if result.metadata else [],
+                        gender_line=result.metadata.gender_line.value if result.metadata and result.metadata.gender_line else None,
+                        evidence_tier=result.metadata.evidence_tier if result.metadata else None,
                     ))
         else:
             if not request.valid_skus:
@@ -279,15 +280,16 @@ async def test_blocking(
         results, coverage = validate_catalog_snapshot(mapper)
         
         # Convert valid results to SkuInput
+        # NOTE: SkuValidationResult has 'metadata' field, not 'meta'
         valid_skus = []
         for result in results:
             if result.status.value == "VALID":
                 valid_skus.append(SkuInput(
                     sku_id=result.sku_id,
                     product_name=result.product_name,
-                    ingredient_tags=result.meta.ingredient_tags if result.meta else [],
-                    category_tags=result.meta.category_tags if result.meta else [],
-                    risk_tags=result.meta.risk_tags if result.meta else [],
+                    ingredient_tags=result.metadata.ingredient_tags if result.metadata else [],
+                    category_tags=result.metadata.category_tags if result.metadata else [],
+                    risk_tags=result.metadata.risk_tags if result.metadata else [],
                 ))
         
         # Apply routing
