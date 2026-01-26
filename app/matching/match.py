@@ -5,19 +5,21 @@ Intent → SKU Matching (Protocol Assembly)
 
 This module implements the core matching function that:
 1. Filters SKUs by gender target (MAXimo² / MAXima²)
-2. Matches intents to SKUs via ingredient overlap
-3. Fulfills requirements from bloodwork deficiencies
-4. Propagates caution warnings
-5. Produces deterministic, auditable output
+2. Filters SKUs through catalog wiring (Issue #15) - ONLY purchasable SKUs
+3. Matches intents to SKUs via ingredient overlap
+4. Fulfills requirements from bloodwork deficiencies
+5. Propagates caution warnings
+6. Produces deterministic, auditable output
 
 PRINCIPLE: Blood does not negotiate. But once safe, we optimize for outcomes.
 
-Version: matching_layer_v1
+Version: matching_layer_v2 (catalog-aware)
 """
 
 from typing import List, Dict, Set, Tuple, Optional
 from datetime import datetime
 from dataclasses import dataclass, field
+import logging
 
 from .models import (
     MatchingInput,
@@ -30,6 +32,16 @@ from .models import (
     UserContext,
 )
 
+# Import catalog wiring (Issue #15)
+try:
+    from app.catalog.wiring import get_catalog, CatalogWiringError
+    CATALOG_WIRING_AVAILABLE = True
+except ImportError:
+    CATALOG_WIRING_AVAILABLE = False
+    CatalogWiringError = Exception  # Fallback
+
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class MatchCandidate:
@@ -39,6 +51,87 @@ class MatchCandidate:
     matched_ingredients: Set[str] = field(default_factory=set)
     is_requirement: bool = False
     requirement_ingredients: Set[str] = field(default_factory=set)
+
+
+def filter_by_catalog(
+    skus: List[AllowedSKUInput],
+    require_catalog: bool = True
+) -> Tuple[List[AllowedSKUInput], Dict]:
+    """
+    Filter SKUs through catalog wiring to ensure purchasability.
+    
+    CRITICAL (Issue #15): Only recommend products that can actually be sold.
+    
+    Args:
+        skus: SKUs to filter
+        require_catalog: If True, raise error if catalog unavailable
+        
+    Returns:
+        Tuple of (filtered_skus, audit_info)
+        
+    Raises:
+        CatalogWiringError: If require_catalog=True and catalog unavailable
+    """
+    audit_info = {
+        "catalog_wiring_available": CATALOG_WIRING_AVAILABLE,
+        "catalog_loaded": False,
+        "input_count": len(skus),
+        "catalog_filtered_count": 0,
+        "removed_by_catalog": [],
+    }
+    
+    if not CATALOG_WIRING_AVAILABLE:
+        logger.warning("Catalog wiring not available - SKUs not verified as purchasable")
+        audit_info["catalog_filtered_count"] = len(skus)
+        return skus, audit_info
+    
+    try:
+        catalog = get_catalog()
+        
+        if not catalog.is_loaded:
+            # Try to load the catalog
+            catalog.load()
+        
+        audit_info["catalog_loaded"] = catalog.is_loaded
+        
+        if not catalog.is_loaded:
+            if require_catalog:
+                raise CatalogWiringError(
+                    "CATALOG_NOT_LOADED: Cannot verify SKU purchasability"
+                )
+            logger.warning("Catalog not loaded - SKUs not verified as purchasable")
+            audit_info["catalog_filtered_count"] = len(skus)
+            return skus, audit_info
+        
+        # Filter SKUs through catalog
+        filtered = []
+        removed = []
+        
+        for sku in skus:
+            if catalog.is_purchasable(sku.sku_id):
+                filtered.append(sku)
+            else:
+                removed.append(sku.sku_id)
+        
+        audit_info["catalog_filtered_count"] = len(filtered)
+        audit_info["removed_by_catalog"] = removed
+        
+        if removed:
+            logger.info(
+                f"Catalog wiring removed {len(removed)} non-purchasable SKUs: {removed}"
+            )
+        
+        return filtered, audit_info
+        
+    except CatalogWiringError:
+        raise
+    except Exception as e:
+        logger.error(f"Catalog wiring error: {e}")
+        if require_catalog:
+            raise CatalogWiringError(f"CATALOG_ERROR: {str(e)}")
+        audit_info["catalog_filtered_count"] = len(skus)
+        audit_info["catalog_error"] = str(e)
+        return skus, audit_info
 
 
 def filter_by_gender(
@@ -280,7 +373,10 @@ def build_protocol(
     return protocol
 
 
-def resolve_matching(input_data: MatchingInput) -> MatchingResult:
+def resolve_matching(
+    input_data: MatchingInput,
+    require_catalog: bool = False
+) -> MatchingResult:
     """
     Main matching function - resolves intents to SKUs.
     
@@ -289,16 +385,19 @@ def resolve_matching(input_data: MatchingInput) -> MatchingResult:
     - TRANSPARENT: full audit trail
     - ASSUMES SAFETY: trusts routing layer already applied blocks
     - GENDER-AWARE: MAXimo² vs MAXima² product lines
+    - CATALOG-AWARE (Issue #15): only purchasable SKUs when enabled
     
     Pipeline:
     1. Filter by gender target
-    2. Match intents to SKUs via ingredient overlap
-    3. Mark requirement fulfillment
-    4. Build protocol with scores and warnings
-    5. Generate audit trail
+    2. Filter by catalog availability (Issue #15) - if enabled
+    3. Match intents to SKUs via ingredient overlap
+    4. Mark requirement fulfillment
+    5. Build protocol with scores and warnings
+    6. Generate audit trail
     
     Args:
         input_data: MatchingInput with allowed_skus, intents, context
+        require_catalog: If True, fail if catalog wiring unavailable
         
     Returns:
         MatchingResult with protocol, unmatched intents, audit
@@ -311,22 +410,28 @@ def resolve_matching(input_data: MatchingInput) -> MatchingResult:
         input_data.user_context
     )
     
-    # Step 2: Match intents to SKUs
-    candidates, unmatched_intents = match_intents_to_skus(
+    # Step 2: Filter by catalog availability (Issue #15)
+    catalog_filtered, catalog_audit = filter_by_catalog(
         gender_filtered,
+        require_catalog=require_catalog
+    )
+    
+    # Step 3: Match intents to SKUs
+    candidates, unmatched_intents = match_intents_to_skus(
+        catalog_filtered,
         input_data.prioritized_intents
     )
     
-    # Step 3: Fulfill requirements
+    # Step 4: Fulfill requirements
     fulfilled_reqs, unfulfilled_reqs = fulfill_requirements(
         candidates,
         input_data.requirements
     )
     
-    # Step 4: Build protocol
+    # Step 5: Build protocol
     protocol = build_protocol(candidates)
     
-    # Step 5: Build unmatched intent objects
+    # Step 6: Build unmatched intent objects
     unmatched_objects = [
         UnmatchedIntent(
             code=intent.code,
@@ -344,6 +449,8 @@ def resolve_matching(input_data: MatchingInput) -> MatchingResult:
     audit = MatchingAudit(
         total_allowed_skus=len(input_data.allowed_skus),
         gender_filtered_count=len(gender_filtered),
+        catalog_filtered_count=catalog_audit.get("catalog_filtered_count", len(gender_filtered)),
+        catalog_removed_skus=catalog_audit.get("removed_by_catalog", []),
         intents_processed=len(input_data.prioritized_intents),
         intents_matched=len(input_data.prioritized_intents) - len(unmatched_intents),
         intents_unmatched=len(unmatched_intents),
@@ -359,6 +466,7 @@ def resolve_matching(input_data: MatchingInput) -> MatchingResult:
             "cycle_phase": input_data.user_context.cycle_phase,
         },
         processed_at=processed_at,
+        catalog_wiring=catalog_audit,
     )
     
     # Compute hash
@@ -370,3 +478,9 @@ def resolve_matching(input_data: MatchingInput) -> MatchingResult:
         match_hash=match_hash,
         audit=audit,
     )
+
+
+# Backward-compatible alias
+def resolve_matching_legacy(input_data: MatchingInput) -> MatchingResult:
+    """Legacy function without catalog requirement."""
+    return resolve_matching(input_data, require_catalog=False)
