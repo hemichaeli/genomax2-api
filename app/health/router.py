@@ -2,6 +2,8 @@
 Deployment Health Check Endpoint
 ================================
 Returns comprehensive status of the deployed GenoMAX² API.
+
+v3.33.0: Added catalog wiring health check (Issue #15)
 """
 
 from fastapi import APIRouter
@@ -21,7 +23,7 @@ def deployment_health():
     
     status = {
         "timestamp": datetime.utcnow().isoformat() + "Z",
-        "api_version": "3.28.0",
+        "api_version": "3.33.0",
         "environment": os.environ.get("RAILWAY_ENVIRONMENT", "unknown"),
         "components": {}
     }
@@ -67,6 +69,17 @@ def deployment_health():
             status["components"]["database"] = {"status": "error", "error": "Connection failed"}
     except Exception as e:
         status["components"]["database"] = {"status": "error", "error": str(e)}
+    
+    # Check Catalog Wiring (Issue #15)
+    try:
+        from app.catalog.wiring import get_catalog_health
+        catalog_health = get_catalog_health()
+        status["components"]["catalog_wiring"] = catalog_health
+    except Exception as e:
+        status["components"]["catalog_wiring"] = {
+            "status": "unavailable",
+            "error": str(e)
+        }
     
     # Check Migration Status
     try:
@@ -156,6 +169,42 @@ def deployment_health():
 def quick_health():
     """Quick health check for load balancers."""
     return {"status": "ok", "timestamp": datetime.utcnow().isoformat() + "Z"}
+
+
+@router.get("/catalog")
+def catalog_health():
+    """
+    Catalog wiring health check (Issue #15).
+    
+    Returns status of the catalog SKU universe.
+    """
+    try:
+        from app.catalog.wiring import get_catalog_health, get_catalog
+        
+        health = get_catalog_health()
+        catalog = get_catalog()
+        
+        # Add additional stats if loaded
+        if catalog.is_loaded:
+            health["tier_breakdown"] = {
+                "tier1": len(catalog.filter_by_evidence_tier("TIER_1")),
+                "tier2": len(catalog.filter_by_evidence_tier("TIER_2")),
+            }
+            health["product_line_breakdown"] = {
+                "maximo": len(catalog.filter_by_product_line("MAXimo²")),
+                "maxima": len(catalog.filter_by_product_line("MAXima²")),
+                "universal": len(catalog.filter_by_product_line("universal")),
+            }
+        
+        return health
+        
+    except Exception as e:
+        import traceback
+        return {
+            "status": "error",
+            "error": str(e),
+            "traceback": traceback.format_exc()
+        }
 
 
 @router.get("/bloodwork-v2")
