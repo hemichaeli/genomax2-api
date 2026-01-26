@@ -9,6 +9,7 @@ Routes:
 - GET /api/v1/catalog/wiring/stats - Catalog statistics
 - GET /api/v1/catalog/wiring/check/{sku} - Check if SKU is purchasable
 - POST /api/v1/catalog/wiring/filter - Filter SKU list
+- GET /api/v1/catalog/wiring/all-skus - List all purchasable SKUs
 
 Version: catalog_wiring_v1
 """
@@ -93,7 +94,7 @@ def catalog_stats() -> Dict[str, Any]:
     Get catalog statistics.
     
     Returns:
-        Product counts by category and product line
+        Product counts by category, product line, and evidence tier
         
     Raises:
         503: If catalog not loaded
@@ -121,9 +122,16 @@ def catalog_stats() -> Dict[str, Any]:
     return {
         "status": "loaded",
         "total_products": catalog.product_count,
-        "maximo_products": len(catalog.filter_by_product_line("MAXimo²")),
-        "maxima_products": len(catalog.filter_by_product_line("MAXima²")),
-        "categories": categories,
+        "by_product_line": {
+            "maximo": len(catalog.filter_by_product_line("MAXimo²")),
+            "maxima": len(catalog.filter_by_product_line("MAXima²")),
+            "universal": len(catalog.filter_by_product_line("universal")),
+        },
+        "by_evidence_tier": {
+            "tier1": len(catalog.filter_by_evidence_tier("TIER_1")),
+            "tier2": len(catalog.filter_by_evidence_tier("TIER_2")),
+        },
+        "by_category": categories,
         "loaded_at": catalog._loaded_at.isoformat() if catalog._loaded_at else None,
         "version": CATALOG_WIRING_VERSION,
     }
@@ -168,9 +176,11 @@ def check_sku(sku: str) -> Dict[str, Any]:
             "name": product.name,
             "product_line": product.product_line,
             "category": product.category,
+            "evidence_tier": product.evidence_tier,
             "price_usd": product.price_usd,
-            "active": product.active,
+            "sex_target": product.sex_target,
             "governance_status": product.governance_status,
+            "ingredient_tags": product.ingredient_tags,
         }
     else:
         result["reason"] = "SKU not found in catalog"
@@ -219,7 +229,7 @@ def list_all_skus() -> Dict[str, Any]:
     List all purchasable SKUs.
     
     Returns:
-        List of all available SKUs
+        List of all available SKUs grouped by product line and tier
         
     Raises:
         503: If catalog not loaded
@@ -239,16 +249,83 @@ def list_all_skus() -> Dict[str, Any]:
     # Group by product line
     maximo_skus = sorted(catalog.filter_by_product_line("MAXimo²"))
     maxima_skus = sorted(catalog.filter_by_product_line("MAXima²"))
+    universal_skus = sorted(catalog.filter_by_product_line("universal"))
+    
+    # Group by tier
+    tier1_skus = sorted(catalog.filter_by_evidence_tier("TIER_1"))
+    tier2_skus = sorted(catalog.filter_by_evidence_tier("TIER_2"))
     
     return {
         "total": catalog.product_count,
-        "maximo": {
-            "count": len(maximo_skus),
-            "skus": maximo_skus,
+        "by_product_line": {
+            "maximo": {
+                "count": len(maximo_skus),
+                "skus": maximo_skus,
+            },
+            "maxima": {
+                "count": len(maxima_skus),
+                "skus": maxima_skus,
+            },
+            "universal": {
+                "count": len(universal_skus),
+                "skus": universal_skus,
+            },
         },
-        "maxima": {
-            "count": len(maxima_skus),
-            "skus": maxima_skus,
+        "by_evidence_tier": {
+            "tier1": {
+                "count": len(tier1_skus),
+                "skus": tier1_skus,
+            },
+            "tier2": {
+                "count": len(tier2_skus),
+                "skus": tier2_skus,
+            },
         },
+        "version": CATALOG_WIRING_VERSION,
+    }
+
+
+@router.get("/products")
+def list_all_products() -> Dict[str, Any]:
+    """
+    List all purchasable products with full details.
+    
+    Returns:
+        List of all available products with details
+        
+    Raises:
+        503: If catalog not loaded
+    """
+    catalog = get_catalog()
+    
+    if not catalog.is_loaded:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "CATALOG_NOT_LOADED",
+                "message": "Catalog must be loaded first",
+                "action": "Call /api/v1/catalog/wiring/load",
+            }
+        )
+    
+    products = []
+    for product in catalog.get_all_products():
+        products.append({
+            "sku": product.sku,
+            "name": product.name,
+            "product_line": product.product_line,
+            "category": product.category,
+            "evidence_tier": product.evidence_tier,
+            "price_usd": product.price_usd,
+            "sex_target": product.sex_target,
+            "ingredient_tags": product.ingredient_tags,
+        })
+    
+    # Sort by tier then name
+    products.sort(key=lambda p: (p["evidence_tier"], p["name"]))
+    
+    return {
+        "total": len(products),
+        "products": products,
         "version": CATALOG_WIRING_VERSION,
     }
