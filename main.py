@@ -1,6 +1,14 @@
 """
-GenoMAX2 API Server Entry Point v3.30.1
-Bloodwork Engine v2.0.1 with Supliful Catalog Integration
+GenoMAX2 API Server Entry Point v3.31.0
+Lab Integration Webhook Infrastructure + TIER 1/2 Evidence-Based Catalog
+
+v3.31.0:
+- New app/webhooks module with Junction (Vital) and Lab Testing API integration
+- HMAC-SHA256 signature verification for Junction webhooks
+- API key verification for Lab Testing API webhooks
+- Biomarker code normalization (36 mappings)
+- Unit conversion (nmol/L, pmol/L, umol/L, mmol/L)
+- Automatic orchestrate/v2 triggering on lab results
 
 v3.30.1:
 - Fix safety gate counting in API endpoints (31 gates: 14/6/11 by tier)
@@ -88,13 +96,23 @@ except Exception as e:
     import traceback
     traceback.print_exc()
 
-# ===== WEBHOOK ENDPOINTS (v3.29.0) =====
+# ===== WEBHOOK ENDPOINTS (v3.29.0 - Legacy) =====
 try:
     from bloodwork_engine.api_webhook_endpoints import register_webhook_endpoints
     register_webhook_endpoints(app)
-    print("Webhook endpoints registered successfully")
+    print("Webhook endpoints (legacy) registered successfully")
 except Exception as e:
-    print(f"ERROR loading Webhook endpoints: {type(e).__name__}: {e}")
+    print(f"ERROR loading Webhook endpoints (legacy): {type(e).__name__}: {e}")
+    import traceback
+    traceback.print_exc()
+
+# ===== WEBHOOK INFRASTRUCTURE (v3.31.0 - New) =====
+try:
+    from app.webhooks import webhook_router
+    app.include_router(webhook_router)
+    print("Webhook Infrastructure (v3.31.0) registered: Junction + Lab Testing API")
+except Exception as e:
+    print(f"ERROR loading Webhook Infrastructure: {type(e).__name__}: {e}")
     import traceback
     traceback.print_exc()
 
