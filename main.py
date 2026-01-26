@@ -1,6 +1,13 @@
 """
-GenoMAX2 API Server Entry Point v3.32.0
-Constraint Translator for Bloodwork → Routing Enforcement
+GenoMAX2 API Server Entry Point v3.33.0
+Catalog Brain Wiring (Issue #15)
+
+v3.33.0:
+- NEW: Catalog Wiring module (app/catalog/wiring.py)
+- CatalogWiring singleton loads canonical SKU universe from DB
+- Hard abort (503) if catalog unavailable - no mocks, no fallbacks
+- Blocked SKUs (governance_status=BLOCKED) never enter pipeline
+- /api/v1/catalog/wiring/* endpoints for health, load, filter
 
 v3.32.0:
 - NEW: Constraint Translator module (app/brain/constraint_translator.py)
@@ -184,6 +191,17 @@ except Exception as e:
     import traceback
     traceback.print_exc()
 
+# ===== CATALOG WIRING (v3.33.0 - Issue #15) =====
+try:
+    from app.catalog.wiring_endpoints import router as catalog_wiring_router
+    app.include_router(catalog_wiring_router)
+    from app.catalog.wiring import CATALOG_WIRING_VERSION
+    print(f"Catalog Wiring {CATALOG_WIRING_VERSION} endpoints registered successfully")
+except Exception as e:
+    print(f"ERROR loading Catalog Wiring: {type(e).__name__}: {e}")
+    import traceback
+    traceback.print_exc()
+
 # ===== SUPPLIER CATALOG ADMIN =====
 try:
     from app.routers.supplier_catalog_admin import router as supplier_catalog_router
@@ -269,11 +287,15 @@ def debug_routes():
     # Filter for constraint routes
     constraint_routes = [r for r in routes if 'constraint' in r['path'].lower()]
     
+    # Filter for wiring routes
+    wiring_routes = [r for r in routes if 'wiring' in r['path'].lower()]
+    
     return {
         "total_routes": len(routes),
         "bloodwork_routes": bloodwork_routes,
         "webhook_routes": webhook_routes,
         "catalog_routes": catalog_routes,
+        "wiring_routes": wiring_routes,
         "constraint_routes": constraint_routes,
         "health_routes": health_routes,
         "shopify_routes": shopify_routes,
