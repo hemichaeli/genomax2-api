@@ -5,11 +5,11 @@ Pydantic models for intent-to-SKU matching inputs, outputs, and audit trails.
 
 This layer takes ALLOWED SKUs (from routing) and matches them to user INTENTS.
 
-Version: matching_layer_v1
+Version: matching_layer_v2 (catalog-aware)
 """
 
 from datetime import datetime
-from typing import List, Optional, Dict, Literal
+from typing import List, Optional, Dict, Literal, Any
 from pydantic import BaseModel, Field
 import hashlib
 import json
@@ -191,10 +191,21 @@ class UnmatchedIntent(BaseModel):
 class MatchingAudit(BaseModel):
     """
     Audit trail for matching decisions.
+    
+    Includes catalog wiring info (Issue #15) for purchasability verification.
     """
     total_allowed_skus: int
     gender_filtered_count: int = Field(
         description="SKUs remaining after gender filter"
+    )
+    # Catalog wiring fields (Issue #15)
+    catalog_filtered_count: int = Field(
+        default=0,
+        description="SKUs remaining after catalog purchasability filter"
+    )
+    catalog_removed_skus: List[str] = Field(
+        default_factory=list,
+        description="SKU IDs removed by catalog filter (not purchasable)"
     )
     intents_processed: int
     intents_matched: int
@@ -214,9 +225,14 @@ class MatchingAudit(BaseModel):
     processed_at: str = Field(
         default_factory=lambda: datetime.utcnow().isoformat()
     )
+    # Catalog wiring audit (Issue #15)
+    catalog_wiring: Dict[str, Any] = Field(
+        default_factory=dict,
+        description="Catalog wiring audit info"
+    )
     
     class Config:
-        extra = "forbid"
+        extra = "allow"  # Allow extra fields for forward compatibility
 
 
 class MatchingResult(BaseModel):
@@ -233,7 +249,7 @@ class MatchingResult(BaseModel):
         description="Deterministic hash of the matching result"
     )
     audit: MatchingAudit
-    version: str = "matching_layer_v1"
+    version: str = "matching_layer_v2"
     
     class Config:
         extra = "forbid"
@@ -266,5 +282,5 @@ class MatchingHealthResponse(BaseModel):
     """Health check response for matching module."""
     status: str = "ok"
     module: str = "matching_layer"
-    version: str = "matching_layer_v1"
+    version: str = "matching_layer_v2"
     timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat())
