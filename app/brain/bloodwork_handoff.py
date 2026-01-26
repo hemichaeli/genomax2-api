@@ -7,14 +7,8 @@ STRICT MODE: Blood does not negotiate.
 - Bloodwork unavailable = 503 BLOODWORK_UNAVAILABLE (hard abort)
 - Invalid schema = 502 BLOODWORK_INVALID_HANDOFF (hard abort)
 - Incomplete panel = proceed with BLOODWORK_INCOMPLETE_PANEL flag
-
-v1.1.0 - Hash Format Fix:
-- Added _is_valid_sha256_hash() helper function
-- _build_handoff_from_response() now validates and regenerates hashes
-- Ensures audit.input_hash and audit.output_hash match schema pattern
 """
 
-import re
 import json
 import httpx
 from pathlib import Path
@@ -46,9 +40,6 @@ ENGINE_VERSION = "1.0.0"
 
 # Minimum markers to NOT flag as incomplete
 MINIMUM_PANEL_SIZE = 3
-
-# Hash format validation pattern (matches schema requirement)
-SHA256_HASH_PATTERN = re.compile(r'^sha256:[a-f0-9]{64}$')
 
 
 # ============================================
@@ -112,23 +103,6 @@ class BloodworkHandoffV1:
             "output": self.output,
             "audit": self.audit
         }
-
-
-# ============================================
-# HASH VALIDATION HELPER
-# ============================================
-
-def _is_valid_sha256_hash(hash_value: Any) -> bool:
-    """
-    Check if hash matches the schema-required format: sha256:<64-hex-chars>
-    
-    Returns:
-        True if hash matches pattern ^sha256:[a-f0-9]{64}$
-        False otherwise
-    """
-    if not isinstance(hash_value, str):
-        return False
-    return bool(SHA256_HASH_PATTERN.match(hash_value))
 
 
 # ============================================
@@ -201,18 +175,18 @@ def _basic_validate(handoff: Dict[str, Any]) -> Tuple[bool, Optional[str]]:
         "caution_flags", "requirements", "reason_codes"
     ]
     
-    for fld in required_constraint_fields:
-        if fld not in constraints:
-            return False, f"Missing routing_constraints.{fld}"
-        if not isinstance(constraints[fld], list):
-            return False, f"routing_constraints.{fld} must be an array"
+    for field in required_constraint_fields:
+        if field not in constraints:
+            return False, f"Missing routing_constraints.{field}"
+        if not isinstance(constraints[field], list):
+            return False, f"routing_constraints.{field} must be an array"
     
     audit = handoff.get("audit", {})
     required_audit_fields = ["input_hash", "output_hash", "ruleset_version", "processed_at"]
     
-    for fld in required_audit_fields:
-        if fld not in audit:
-            return False, f"Missing audit.{fld}"
+    for field in required_audit_fields:
+        if field not in audit:
+            return False, f"Missing audit.{field}"
     
     return True, None
 
@@ -341,8 +315,6 @@ def _build_handoff_from_response(
     Build canonical BloodworkHandoffV1 object from API response.
     
     Maps Bloodwork Engine response format to handoff schema.
-    
-    v1.1.0: Now validates hash format and regenerates if invalid.
     """
     # Extract routing constraints from API response
     routing_constraints_raw = api_response.get("routing_constraints", [])
@@ -425,50 +397,38 @@ def _build_handoff_from_response(
     # Build summary
     summary = api_response.get("summary", {})
     
-    # Build input object for hashing
-    input_obj = {
-        "lab_profile": request_payload.get("lab_profile", "GLOBAL_CONSERVATIVE"),
-        "sex": request_payload.get("sex"),
-        "age": request_payload.get("age"),
-        "markers": request_payload.get("markers", [])
+    # Build the output section first (needed for output_hash)
+    output_section = {
+        "routing_constraints": {
+            "blocked_ingredients": sorted(set(blocked_ingredients)),
+            "blocked_categories": sorted(set(blocked_categories)),
+            "caution_flags": sorted(set(caution_flags)),
+            "requirements": sorted(set(requirements)),
+            "reason_codes": sorted(set(reason_codes))
+        },
+        "signal_flags": signal_flags,
+        "unknown_biomarkers": unknown_biomarkers,
+        "processed_markers": processed_markers,
+        "safety_gates": [
+            {
+                "gate_id": g.get("gate_id"),
+                "description": g.get("description"),
+                "trigger_marker": g.get("trigger_marker"),
+                "trigger_value": g.get("trigger_value"),
+                "threshold": g.get("threshold"),
+                "routing_constraint": g.get("routing_constraint"),
+                "exception_active": g.get("exception_active", False),
+                "exception_reason": g.get("exception_reason")
+            }
+            for g in safety_gates
+        ],
+        "summary": summary,
+        "require_review": api_response.get("require_review", False)
     }
-    
-    # Build output routing constraints object for hashing
-    output_constraints = {
-        "blocked_ingredients": sorted(set(blocked_ingredients)),
-        "blocked_categories": sorted(set(blocked_categories)),
-        "caution_flags": sorted(set(caution_flags)),
-        "requirements": sorted(set(requirements)),
-        "reason_codes": sorted(set(reason_codes))
-    }
-    
-    # ============================================
-    # HASH VALIDATION AND REGENERATION (v1.1.0)
-    # ============================================
-    # Validate API-returned hashes; if invalid, regenerate proper hashes
-    api_input_hash = api_response.get("input_hash", "")
-    api_output_hash = api_response.get("output_hash", "")
-    
-    # Use API hash if valid, otherwise regenerate
-    if _is_valid_sha256_hash(api_input_hash):
-        input_hash = api_input_hash
-    else:
-        input_hash = canonicalize_and_hash(input_obj)
-    
-    if _is_valid_sha256_hash(api_output_hash):
-        output_hash = api_output_hash
-    else:
-        # Hash the full output object (constraints + other output fields)
-        output_for_hash = {
-            "routing_constraints": output_constraints,
-            "signal_flags": signal_flags,
-            "unknown_biomarkers": unknown_biomarkers,
-            "processed_markers": processed_markers,
-            "require_review": api_response.get("require_review", False)
-        }
-        output_hash = canonicalize_and_hash(output_for_hash)
     
     # Build the canonical handoff
+    # NOTE: Always compute hashes using canonicalize_and_hash() for schema compliance
+    # Bloodwork Engine returns short hashes, but schema requires 'sha256:[a-f0-9]{64}'
     handoff_dict = {
         "handoff_version": "bloodwork_handoff.v1",
         "source": {
@@ -477,31 +437,16 @@ def _build_handoff_from_response(
             "endpoint": BLOODWORK_ENDPOINT,
             "engine_version": ENGINE_VERSION
         },
-        "input": input_obj,
-        "output": {
-            "routing_constraints": output_constraints,
-            "signal_flags": signal_flags,
-            "unknown_biomarkers": unknown_biomarkers,
-            "processed_markers": processed_markers,
-            "safety_gates": [
-                {
-                    "gate_id": g.get("gate_id"),
-                    "description": g.get("description"),
-                    "trigger_marker": g.get("trigger_marker"),
-                    "trigger_value": g.get("trigger_value"),
-                    "threshold": g.get("threshold"),
-                    "routing_constraint": g.get("routing_constraint"),
-                    "exception_active": g.get("exception_active", False),
-                    "exception_reason": g.get("exception_reason")
-                }
-                for g in safety_gates
-            ],
-            "summary": summary,
-            "require_review": api_response.get("require_review", False)
+        "input": {
+            "lab_profile": request_payload.get("lab_profile", "GLOBAL_CONSERVATIVE"),
+            "sex": request_payload.get("sex"),
+            "age": request_payload.get("age"),
+            "markers": request_payload.get("markers", [])
         },
+        "output": output_section,
         "audit": {
-            "input_hash": input_hash,
-            "output_hash": output_hash,
+            "input_hash": canonicalize_and_hash(request_payload),
+            "output_hash": canonicalize_and_hash(output_section),
             "ruleset_version": api_response.get("ruleset_version", "unknown"),
             "marker_registry_version": "registry_v1.0",
             "reference_ranges_version": "ranges_v1.0",
@@ -548,12 +493,12 @@ def merge_routing_constraints(
     """
     merged = {}
     
-    for fld in ["blocked_ingredients", "blocked_categories", "caution_flags", "requirements", "reason_codes"]:
-        blood_items = set(blood_constraints.get(fld, []))
-        brain_items = set(brain_constraints.get(fld, []))
+    for field in ["blocked_ingredients", "blocked_categories", "caution_flags", "requirements", "reason_codes"]:
+        blood_items = set(blood_constraints.get(field, []))
+        brain_items = set(brain_constraints.get(field, []))
         
         # Union, dedupe, sort
-        merged[fld] = sorted(blood_items | brain_items)
+        merged[field] = sorted(blood_items | brain_items)
     
     return merged
 
