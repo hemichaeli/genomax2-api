@@ -1,6 +1,10 @@
 """
-GenoMAX2 API Server Entry Point v3.31.1
+GenoMAX2 API Server Entry Point v3.31.2
 Lab Integration Webhook Infrastructure + TIER 1/2 Evidence-Based Catalog
+
+v3.31.2:
+- Fix migrations_router typo in app.include_router()
+- Ensure catalog_products migration endpoint loads properly
 
 v3.31.1:
 - Add catalog_products migration endpoint for TIER 1/2 catalog import
@@ -142,7 +146,7 @@ except Exception as e:
 # ===== MIGRATION RUNNER =====
 try:
     from app.migrations.runner import router as migrations_router
-    app.include_router(migrations_runner)
+    app.include_router(migrations_router)
     print("Migration Runner endpoints registered successfully")
 except Exception as e:
     print(f"ERROR loading Migration Runner: {type(e).__name__}: {e}")
