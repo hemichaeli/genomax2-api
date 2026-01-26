@@ -3,12 +3,11 @@ GenoMAX2 API Server Entry Point v3.32.0
 Constraint Translator for Bloodwork → Routing Enforcement
 
 v3.32.0:
-- New ConstraintTranslator module for bloodwork constraint → routing enforcement
-- GET /api/v1/constraints/health - Module health check
-- GET /api/v1/constraints/mappings - List all constraint mappings
-- POST /api/v1/constraints/translate - Translate constraint codes
-- GET /api/v1/constraints/qa-matrix - Full QA scenario validation
-- 23 constraint mappings covering BLOCK/CAUTION/FLAG scenarios
+- Add Constraint Translator module (app/brain/constraint_translator.py)
+- Add Constraint Admin endpoints (app/brain/constraint_admin.py)
+- Translate bloodwork constraints (BLOCK_IRON, CAUTION_RENAL) into routing enforcement
+- 24 constraint mappings with deterministic translation
+- QA Matrix endpoint for validation
 
 v3.31.2:
 - Fix migrations_router typo in app.include_router()
