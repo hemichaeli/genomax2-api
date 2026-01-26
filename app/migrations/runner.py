@@ -4,6 +4,7 @@
 # =============================================================================
 
 import os
+import json
 from typing import Dict, Any, List
 from fastapi import APIRouter, HTTPException, Body
 import psycopg2
@@ -45,7 +46,7 @@ def run_migration_014() -> Dict[str, Any]:
     - No Supplement Facts or regulatory data exists
     - Decision: FINAL and LOCKED
     
-    Sets supplier_status to INACTIVE per governance policy.
+    Sets supplier_status to UNAVAILABLE per governance policy.
     Safe to run multiple times (idempotent).
     """
     conn = get_db()
@@ -68,6 +69,7 @@ def run_migration_014() -> Dict[str, Any]:
         results.append(f"Found {len(before_status)} modules before update")
         
         if len(before_status) == 0:
+            conn.close()
             return {
                 "status": "skipped",
                 "migration": "014-suspend-dig-natura",
@@ -75,9 +77,8 @@ def run_migration_014() -> Dict[str, Any]:
                 "target_modules": target_modules
             }
         
-        # Step 2: Update to INACTIVE status
-        # Note: We use 'UNAVAILABLE' since the CHECK constraint only allows:
-        # ('ACTIVE', 'DISCONTINUED', 'UNAVAILABLE')
+        # Step 2: Update to UNAVAILABLE status
+        # Note: CHECK constraint allows: ('ACTIVE', 'DISCONTINUED', 'UNAVAILABLE')
         cur.execute("""
             UPDATE os_modules_v3_1
             SET 
@@ -90,29 +91,35 @@ def run_migration_014() -> Dict[str, Any]:
         updated = [dict(r) for r in cur.fetchall()]
         results.append(f"Updated {len(updated)} modules to UNAVAILABLE")
         
-        # Step 3: Log to audit_log if table exists
+        # Step 3: Log to module_suspension_audit (create if needed)
         cur.execute("""
-            SELECT 1 FROM information_schema.tables
-            WHERE table_name = 'audit_log'
+            CREATE TABLE IF NOT EXISTS module_suspension_audit (
+                id SERIAL PRIMARY KEY,
+                module_code TEXT NOT NULL,
+                action TEXT NOT NULL,
+                old_status TEXT,
+                new_status TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                migration_id TEXT,
+                created_at TIMESTAMPTZ DEFAULT NOW()
+            )
         """)
-        if cur.fetchone():
-            for module in updated:
-                cur.execute("""
-                    INSERT INTO audit_log (entity_type, entity_id, action, metadata, created_at)
-                    VALUES (
-                        'os_module',
-                        %s,
-                        'supplier_status_update',
-                        %s::jsonb,
-                        NOW()
-                    )
-                """, (
-                    module['module_code'],
-                    '{"module_code": "' + module['module_code'] + '", "new_status": "UNAVAILABLE", "reason": "NO_ACTIVE_SUPLIFUL_PRODUCT", "migration": "014-suspend-dig-natura"}'
-                ))
-            results.append(f"Logged {len(updated)} audit entries")
-        else:
-            results.append("audit_log table not found, skipping audit trail")
+        
+        for module in updated:
+            old_status = next((m['supplier_status'] for m in before_status if m['module_code'] == module['module_code']), None)
+            cur.execute("""
+                INSERT INTO module_suspension_audit 
+                (module_code, action, old_status, new_status, reason, migration_id)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (
+                module['module_code'],
+                'SUSPEND',
+                old_status,
+                'UNAVAILABLE',
+                'NO_ACTIVE_SUPLIFUL_PRODUCT: Historical Supliful product removed from catalog (404). No Supplement Facts or regulatory data exists.',
+                '014-suspend-dig-natura'
+            ))
+        results.append(f"Logged {len(updated)} suspension audit entries")
         
         # Step 4: Verify update
         cur.execute("""
