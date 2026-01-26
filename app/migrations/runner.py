@@ -32,6 +32,165 @@ def get_db():
 
 
 # =============================================================================
+# MIGRATION 014: Suspend DIG-NATURA modules
+# =============================================================================
+
+@router.post("/run/014-suspend-dig-natura")
+def run_migration_014() -> Dict[str, Any]:
+    """
+    Run migration 014: Suspend DIG-NATURA-M-087 and DIG-NATURA-F-087 modules.
+    
+    Reason: NO_ACTIVE_SUPLIFUL_PRODUCT
+    - Historical Supliful product removed from catalog (404)
+    - No Supplement Facts or regulatory data exists
+    - Decision: FINAL and LOCKED
+    
+    Sets supplier_status to INACTIVE per governance policy.
+    Safe to run multiple times (idempotent).
+    """
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    results = []
+    target_modules = ['DIG-NATURA-M-087', 'DIG-NATURA-F-087']
+    
+    try:
+        cur = conn.cursor()
+        
+        # Step 1: Check current status
+        cur.execute("""
+            SELECT module_code, product_name, os_environment, supplier_status
+            FROM os_modules_v3_1
+            WHERE module_code = ANY(%s)
+        """, (target_modules,))
+        before_status = [dict(r) for r in cur.fetchall()]
+        results.append(f"Found {len(before_status)} modules before update")
+        
+        if len(before_status) == 0:
+            return {
+                "status": "skipped",
+                "migration": "014-suspend-dig-natura",
+                "reason": "Target modules not found in database",
+                "target_modules": target_modules
+            }
+        
+        # Step 2: Update to INACTIVE status
+        # Note: We use 'UNAVAILABLE' since the CHECK constraint only allows:
+        # ('ACTIVE', 'DISCONTINUED', 'UNAVAILABLE')
+        cur.execute("""
+            UPDATE os_modules_v3_1
+            SET 
+                supplier_status = 'UNAVAILABLE',
+                supplier_status_details = 'NO_ACTIVE_SUPLIFUL_PRODUCT: Historical Supliful product removed from catalog (404). No Supplement Facts or regulatory data exists. Decision final and locked. [Migration 014]',
+                supplier_checked_at = NOW()
+            WHERE module_code = ANY(%s)
+            RETURNING module_code, product_name, os_environment, supplier_status
+        """, (target_modules,))
+        updated = [dict(r) for r in cur.fetchall()]
+        results.append(f"Updated {len(updated)} modules to UNAVAILABLE")
+        
+        # Step 3: Log to audit_log if table exists
+        cur.execute("""
+            SELECT 1 FROM information_schema.tables
+            WHERE table_name = 'audit_log'
+        """)
+        if cur.fetchone():
+            for module in updated:
+                cur.execute("""
+                    INSERT INTO audit_log (entity_type, entity_id, action, metadata, created_at)
+                    VALUES (
+                        'os_module',
+                        %s,
+                        'supplier_status_update',
+                        %s::jsonb,
+                        NOW()
+                    )
+                """, (
+                    module['module_code'],
+                    '{"module_code": "' + module['module_code'] + '", "new_status": "UNAVAILABLE", "reason": "NO_ACTIVE_SUPLIFUL_PRODUCT", "migration": "014-suspend-dig-natura"}'
+                ))
+            results.append(f"Logged {len(updated)} audit entries")
+        else:
+            results.append("audit_log table not found, skipping audit trail")
+        
+        # Step 4: Verify update
+        cur.execute("""
+            SELECT module_code, product_name, os_environment, supplier_status, supplier_status_details
+            FROM os_modules_v3_1
+            WHERE module_code = ANY(%s)
+        """, (target_modules,))
+        after_status = [dict(r) for r in cur.fetchall()]
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        return {
+            "status": "success",
+            "migration": "014-suspend-dig-natura",
+            "target_modules": target_modules,
+            "before": before_status,
+            "after": after_status,
+            "modules_updated": len(updated),
+            "steps": results
+        }
+        
+    except Exception as e:
+        try:
+            conn.rollback()
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Migration error: {str(e)}")
+
+
+@router.get("/status/014-suspend-dig-natura")
+def check_migration_014() -> Dict[str, Any]:
+    """Check if migration 014 has been applied."""
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    target_modules = ['DIG-NATURA-M-087', 'DIG-NATURA-F-087']
+    
+    try:
+        cur = conn.cursor()
+        
+        cur.execute("""
+            SELECT module_code, product_name, os_environment, supplier_status, 
+                   supplier_status_details, supplier_checked_at
+            FROM os_modules_v3_1
+            WHERE module_code = ANY(%s)
+        """, (target_modules,))
+        modules = [dict(r) for r in cur.fetchall()]
+        
+        cur.close()
+        conn.close()
+        
+        # Check if all target modules are UNAVAILABLE
+        all_unavailable = all(
+            m.get('supplier_status') == 'UNAVAILABLE' 
+            for m in modules
+        ) if modules else False
+        
+        return {
+            "migration": "014-suspend-dig-natura",
+            "applied": all_unavailable,
+            "target_modules": target_modules,
+            "current_status": modules,
+            "note": "Applied when both modules have supplier_status = 'UNAVAILABLE'"
+        }
+        
+    except Exception as e:
+        try:
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Check error: {str(e)}")
+
+
+# =============================================================================
 # MIGRATION 008: Create allowlist mapping tables
 # =============================================================================
 
