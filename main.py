@@ -3,8 +3,7 @@ GenoMAX2 API Server Entry Point v3.32.0
 Constraint Translator for Bloodwork → Routing Enforcement
 
 v3.32.0:
-- Add Constraint Translator module (app/brain/constraint_translator.py)
-- Add Constraint Admin endpoints (app/brain/constraint_admin.py)
+- Add Constraint Translator module (app/brain/constraint_translator/)
 - Translate bloodwork constraints (BLOCK_IRON, CAUTION_RENAL) into routing enforcement
 - 24 constraint mappings with deterministic translation
 - QA Matrix endpoint for validation
@@ -222,9 +221,9 @@ except Exception as e:
 
 # ===== CONSTRAINT TRANSLATOR (v3.32.0) =====
 try:
-    from app.brain.constraint_admin import router as constraint_router
+    from app.brain.constraint_translator.router import router as constraint_router
     app.include_router(constraint_router)
-    print("Constraint Translator endpoints registered successfully")
+    print("Constraint Translator endpoints registered successfully (Issue #16)")
 except Exception as e:
     print(f"ERROR loading Constraint Translator: {type(e).__name__}: {e}")
     import traceback
