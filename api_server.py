@@ -1,13 +1,17 @@
 """
 GenoMAX² API Server
 Gender-Optimized Biological Operating System
-Version 3.32.0 - Constraint Translator Integration
+Version 3.32.0 - Constraint Translator Admin Endpoints (#16)
 
 v3.32.0:
-- FEATURE: Constraint Translator module integration (#16)
-- New endpoints: /api/v1/constraints/* for constraint inspection and translation
-- Converts Bloodwork Engine outputs to routing/matching layer constraints
-- 33+ constraint mappings including BLOCK_IRON, CAUTION_HEPATOTOXIC, FLAG_METHYLATION
+- NEW: Constraint Translator admin endpoints for testing and inspection
+- GET  /api/v1/constraints/health - Module health check
+- GET  /api/v1/constraints/mappings - List all constraint mappings
+- GET  /api/v1/constraints/mappings/{code} - Get specific mapping
+- POST /api/v1/constraints/translate - Translate constraint codes
+- POST /api/v1/constraints/test - Test with sample bloodwork
+- GET  /api/v1/constraints/test-scenario/{scenario} - Test predefined QA scenarios
+- GET  /api/v1/constraints/qa-matrix - Run full QA validation matrix
 
 v3.29.5:
 - BUGFIX: ANONYMOUS_USER_UUID now stored as string for psycopg2 compatibility
@@ -115,7 +119,7 @@ from app.qa import qa_router
 # Excel Override imports (v3.21.0)
 from app.catalog.override import router as override_router
 
-# Constraint Translator imports (v3.32.0 - Issue #16)
+# Constraint Translator Admin imports (v3.32.0 - Issue #16)
 from app.brain.constraint_admin import router as constraint_router
 
 # Telemetry Emitter imports (v3.17.0 - Issue #9 Stage 2)
@@ -178,8 +182,9 @@ app.include_router(qa_router)
 # Register Excel Override router (v3.21.0)
 app.include_router(override_router)
 
-# Register Constraint Translator router (v3.32.0 - Issue #16)
+# Register Constraint Translator Admin router (v3.32.0 - Issue #16)
 app.include_router(constraint_router)
+print("Constraint Translator endpoints registered successfully (Issue #16)")
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -734,19 +739,12 @@ def health():
 
 @app.get("/version")
 def version():
-    # Get constraint translator version if available
-    try:
-        from app.brain.constraint_translator import __version__ as ct_version
-        constraint_translator_version = ct_version
-    except ImportError:
-        constraint_translator_version = "not_loaded"
-    
     return {
         "api_version": API_VERSION,
         "brain_version": "1.5.0",
         "resolver_version": "1.0.0",
         "bloodwork_engine_version": "2.0.0",
-        "constraint_translator_version": constraint_translator_version,
+        "constraint_translator_version": "1.0.0",
         "catalog_version": "catalog_governance_v1",
         "routing_version": "routing_layer_v1",
         "matching_version": "matching_layer_v1",
