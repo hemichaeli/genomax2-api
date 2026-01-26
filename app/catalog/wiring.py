@@ -40,21 +40,29 @@ class CatalogStatus(str, Enum):
 
 @dataclass
 class CatalogProduct:
-    """A purchasable product from Supliful catalog."""
-    sku: str
-    supliful_id: str
-    name: str
-    product_line: str  # MAXimo² or MAXima²
+    """A purchasable product from the evidence-based catalog."""
+    sku: str  # gx_catalog_id
+    name: str  # product_name
     category: str
-    active: bool
-    price_usd: float
-    wholesale_price_usd: float
+    evidence_tier: str  # TIER_1 or TIER_2
+    price_usd: float  # base_price
+    sex_target: str  # male, female, unisex
     ingredient_tags: List[str] = field(default_factory=list)
-    governance_status: Optional[str] = None  # ACTIVE, BLOCKED, PENDING
+    governance_status: str = "ACTIVE"  # ACTIVE, BLOCKED, PENDING, SUSPENDED
+    product_url: Optional[str] = None
     
     def is_available(self) -> bool:
         """Check if product is available for recommendation."""
-        return self.active and self.governance_status != "BLOCKED"
+        return self.governance_status == "ACTIVE"
+    
+    @property
+    def product_line(self) -> str:
+        """Derive product line from sex_target."""
+        if self.sex_target == "male":
+            return "MAXimo²"
+        elif self.sex_target == "female":
+            return "MAXima²"
+        return "Universal"
 
 
 class CatalogWiringError(Exception):
@@ -89,6 +97,9 @@ class CatalogWiring:
         self._sku_set: Set[str] = set()
         self._maximo_skus: Set[str] = set()
         self._maxima_skus: Set[str] = set()
+        self._universal_skus: Set[str] = set()
+        self._tier1_skus: Set[str] = set()
+        self._tier2_skus: Set[str] = set()
         self._status = CatalogStatus.NOT_LOADED
         self._loaded_at: Optional[datetime] = None
         self._error: Optional[str] = None
@@ -137,22 +148,22 @@ class CatalogWiring:
             conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
             cur = conn.cursor()
             
-            # Query catalog_products table
+            # Query catalog_products table (matches actual schema)
             cur.execute("""
                 SELECT 
-                    sku,
-                    supliful_id,
-                    name,
-                    product_line,
+                    gx_catalog_id,
+                    product_name,
+                    product_url,
                     category,
-                    active,
-                    price_usd,
-                    wholesale_price_usd,
+                    short_description,
+                    base_price,
+                    evidence_tier,
+                    governance_status,
                     ingredient_tags,
-                    governance_status
+                    sex_target
                 FROM catalog_products
-                WHERE active = true
-                ORDER BY product_line, sku
+                WHERE governance_status = 'ACTIVE'
+                ORDER BY evidence_tier, product_name
             """)
             
             rows = cur.fetchall()
@@ -172,30 +183,40 @@ class CatalogWiring:
             self._sku_set.clear()
             self._maximo_skus.clear()
             self._maxima_skus.clear()
+            self._universal_skus.clear()
+            self._tier1_skus.clear()
+            self._tier2_skus.clear()
             
             for row in rows:
                 product = CatalogProduct(
-                    sku=row['sku'],
-                    supliful_id=row['supliful_id'] or '',
-                    name=row['name'],
-                    product_line=row['product_line'] or 'MAXimo²',
+                    sku=row['gx_catalog_id'],
+                    name=row['product_name'],
                     category=row['category'] or 'supplement',
-                    active=row['active'],
-                    price_usd=float(row['price_usd'] or 0),
-                    wholesale_price_usd=float(row['wholesale_price_usd'] or 0),
+                    evidence_tier=row['evidence_tier'] or 'TIER_2',
+                    price_usd=float(row['base_price'] or 0),
+                    sex_target=row['sex_target'] or 'unisex',
                     ingredient_tags=row['ingredient_tags'] or [],
-                    governance_status=row.get('governance_status', 'ACTIVE'),
+                    governance_status=row['governance_status'] or 'ACTIVE',
+                    product_url=row['product_url'],
                 )
                 
                 if product.is_available():
                     self._products[product.sku] = product
                     self._sku_set.add(product.sku)
                     
-                    # Index by product line
-                    if 'maximo' in product.product_line.lower():
+                    # Index by sex target / product line
+                    if product.sex_target == 'male':
                         self._maximo_skus.add(product.sku)
-                    elif 'maxima' in product.product_line.lower():
+                    elif product.sex_target == 'female':
                         self._maxima_skus.add(product.sku)
+                    else:
+                        self._universal_skus.add(product.sku)
+                    
+                    # Index by evidence tier
+                    if product.evidence_tier == 'TIER_1':
+                        self._tier1_skus.add(product.sku)
+                    elif product.evidence_tier == 'TIER_2':
+                        self._tier2_skus.add(product.sku)
             
             cur.close()
             conn.close()
@@ -229,6 +250,9 @@ class CatalogWiring:
             "total_products": len(self._products),
             "maximo_products": len(self._maximo_skus),
             "maxima_products": len(self._maxima_skus),
+            "universal_products": len(self._universal_skus),
+            "tier1_products": len(self._tier1_skus),
+            "tier2_products": len(self._tier2_skus),
             "loaded_at": self._loaded_at.isoformat() if self._loaded_at else None,
             "version": CATALOG_WIRING_VERSION,
         }
@@ -289,16 +313,39 @@ class CatalogWiring:
         Get all SKUs for a specific product line.
         
         Args:
-            product_line: 'MAXimo²' or 'MAXima²'
+            product_line: 'MAXimo²', 'MAXima²', 'male', 'female', or 'unisex'
             
         Returns:
             Set of SKUs for that product line
         """
-        if 'maximo' in product_line.lower():
+        key = product_line.lower()
+        if 'maximo' in key or key == 'male':
             return self._maximo_skus.copy()
-        elif 'maxima' in product_line.lower():
+        elif 'maxima' in key or key == 'female':
             return self._maxima_skus.copy()
+        elif key == 'unisex' or key == 'universal':
+            return self._universal_skus.copy()
         return self._sku_set.copy()
+    
+    def filter_by_evidence_tier(self, tier: str) -> Set[str]:
+        """
+        Get all SKUs for a specific evidence tier.
+        
+        Args:
+            tier: 'TIER_1' or 'TIER_2'
+            
+        Returns:
+            Set of SKUs for that tier
+        """
+        if tier == 'TIER_1':
+            return self._tier1_skus.copy()
+        elif tier == 'TIER_2':
+            return self._tier2_skus.copy()
+        return self._sku_set.copy()
+    
+    def get_all_products(self) -> List[CatalogProduct]:
+        """Get all available products."""
+        return list(self._products.values())
     
     def get_health(self) -> Dict[str, Any]:
         """Get health check info."""
