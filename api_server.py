@@ -1,7 +1,13 @@
 """
 GenoMAX² API Server
 Gender-Optimized Biological Operating System
-Version 3.29.3 - Database Persistence Bug Fix
+Version 3.29.4 - Protocol Runs Anonymous User Fix
+
+v3.29.4:
+- BUGFIX: compose endpoint now uses ANONYMOUS_USER_UUID (00000000-...) for protocol_runs
+- protocol_runs.user_id has NOT NULL constraint - cannot pass None
+- brain_runs.user_id is nullable, but protocol_runs requires valid UUID
+- Stable anonymous UUID enables tracking while satisfying constraint
 
 v3.29.3:
 - BUGFIX: orchestrate/v2 brain_runs INSERT now uses None (NULL) for missing user_id
@@ -113,7 +119,11 @@ from app.brain.bloodwork_handoff import (
     BloodworkHandoffError
 )
 
-API_VERSION = "3.29.3"
+API_VERSION = "3.29.4"
+
+# Stable UUID for anonymous users - used when user_id is not provided
+# This allows protocol_runs to comply with NOT NULL constraint while tracking anonymous sessions
+ANONYMOUS_USER_UUID = uuid.UUID("00000000-0000-0000-0000-000000000000")
 
 app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version=API_VERSION)
 
@@ -1240,8 +1250,9 @@ def brain_compose(request: ComposeRequest):
         compose_output = {"protocol_id": protocol_id, "run_id": request.run_id, "selected_goals": request.selected_goals, "protocol_intents": protocol_intents, "routing_constraints": routing_constraints, "assessment_context": assessment_context, "constraints_applied": 0, "intents_generated": {k: len(v) for k, v in protocol_intents.items()}}
         output_hash = compute_hash(compose_output)
         cur.execute("INSERT INTO decision_outputs (run_id, phase, output_json, output_hash) VALUES (%s, %s, %s, %s)", (request.run_id, "compose", json.dumps(compose_output), output_hash))
-        # Use None for user_id in protocol_runs if anonymous
-        user_id_for_db = run_row["user_id"]  # Already UUID or None
+        # FIX v3.29.4: Use ANONYMOUS_USER_UUID for protocol_runs when user_id is NULL
+        # protocol_runs.user_id has NOT NULL constraint, cannot use None
+        user_id_for_db = run_row["user_id"] if run_row["user_id"] else ANONYMOUS_USER_UUID
         cur.execute("INSERT INTO protocol_runs (id, user_id, run_id, phase, request_json, output_json, output_hash, status) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)", (protocol_id, user_id_for_db, request.run_id, "compose", json.dumps({"run_id": request.run_id, "selected_goals": request.selected_goals}), json.dumps(compose_output), output_hash, "completed"))
         conn.commit()
         cur.close()
