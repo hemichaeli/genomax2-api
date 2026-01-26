@@ -1,0 +1,29 @@
+name: Close Completed Issues
+
+on:
+  workflow_dispatch:
+
+jobs:
+  close-issues:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Close completed issues
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const issuesToClose = [1, 2, 3, 8, 9, 10, 11, 12, 13, 14, 15, 17, 19, 20, 21, 22, 23, 24, 25];
+            
+            for (const issueNumber of issuesToClose) {
+              try {
+                await github.rest.issues.update({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  issue_number: issueNumber,
+                  state: 'closed',
+                  state_reason: 'completed'
+                });
+                console.log(`Closed issue #${issueNumber}`);
+              } catch (error) {
+                console.log(`Failed to close issue #${issueNumber}: ${error.message}`);
+              }
+            }
