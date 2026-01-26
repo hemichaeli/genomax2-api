@@ -1,7 +1,13 @@
 """
 GenoMAX² API Server
 Gender-Optimized Biological Operating System
-Version 3.29.1 - Bloodwork Engine Integration (Bug Fix)
+Version 3.29.3 - Database Persistence Bug Fix
+
+v3.29.3:
+- BUGFIX: orchestrate/v2 brain_runs INSERT now uses None (NULL) for missing user_id
+- brain_runs.user_id is UUID type - cannot accept "anonymous" string
+- This was causing silent INSERT failure, breaking orchestrate→compose flow
+- decision_outputs INSERT was also skipped (same try block)
 
 v3.29.1:
 - BUGFIX: orchestrate/v2 bloodwork_input handler now correctly calls
@@ -107,7 +113,7 @@ from app.brain.bloodwork_handoff import (
     BloodworkHandoffError
 )
 
-API_VERSION = "3.29.1"
+API_VERSION = "3.29.3"
 
 app = FastAPI(title="GenoMAX² API", description="Gender-Optimized Biological Operating System", version=API_VERSION)
 
@@ -436,7 +442,8 @@ GOAL_INTENT_MAP = {
     "heart": {"lifestyle": [{"intent_id": "cardiovascular_health", "base_priority": 0.85, "depends_on": []}], "nutrition": [{"intent_id": "heart_healthy_diet", "base_priority": 0.80, "depends_on": []}], "supplements": [{"intent_id": "omega3_cardiovascular", "base_priority": 0.85, "depends_on": ["omega3"]}, {"intent_id": "coq10_heart_support", "base_priority": 0.75, "depends_on": ["coq10"]}, {"intent_id": "magnesium_heart", "base_priority": 0.70, "depends_on": ["magnesium"]}]},
     "gut": {"lifestyle": [{"intent_id": "gut_health_optimization", "base_priority": 0.80, "depends_on": []}], "nutrition": [{"intent_id": "fiber_diversity", "base_priority": 0.75, "depends_on": []}, {"intent_id": "fermented_foods", "base_priority": 0.70, "depends_on": []}], "supplements": [{"intent_id": "probiotic_support", "base_priority": 0.80, "depends_on": ["probiotic"]}, {"intent_id": "digestive_enzyme_support", "base_priority": 0.65, "depends_on": ["digestive_enzyme"]}]},
     "inflammation": {"lifestyle": [{"intent_id": "reduce_systemic_inflammation", "base_priority": 0.85, "depends_on": []}], "nutrition": [{"intent_id": "anti_inflammatory_diet", "base_priority": 0.80, "depends_on": []}], "supplements": [{"intent_id": "omega3_antiinflammatory", "base_priority": 0.85, "depends_on": ["omega3"]}, {"intent_id": "curcumin_inflammation", "base_priority": 0.75, "depends_on": ["curcumin"]}]},
-    "liver": {"lifestyle": [{"intent_id": "liver_health_support", "base_priority": 0.85, "depends_on": []}], "nutrition": [{"intent_id": "liver_supportive_diet", "base_priority": 0.80, "depends_on": []}], "supplements": [{"intent_id": "milk_thistle_liver", "base_priority": 0.75, "depends_on": ["milk_thistle", "hepatotoxic"]}, {"intent_id": "nac_liver_support", "base_priority": 0.70, "depends_on": ["nac"]}]}
+    "liver": {"lifestyle": [{"intent_id": "liver_health_support", "base_priority": 0.85, "depends_on": []}], "nutrition": [{"intent_id": "liver_supportive_diet", "base_priority": 0.80, "depends_on": []}], "supplements": [{"intent_id": "milk_thistle_liver", "base_priority": 0.75, "depends_on": ["milk_thistle", "hepatotoxic"]}, {"intent_id": "nac_liver_support", "base_priority": 0.70, "depends_on": ["nac"]}]},
+    "cognitive": {"lifestyle": [{"intent_id": "cognitive_optimization", "base_priority": 0.85, "depends_on": []}], "nutrition": [{"intent_id": "brain_nutrition", "base_priority": 0.75, "depends_on": []}], "supplements": [{"intent_id": "omega3_brain_support", "base_priority": 0.85, "depends_on": ["omega3"]}, {"intent_id": "lions_mane_cognition", "base_priority": 0.70, "depends_on": ["lions_mane"]}]}
 }
 
 ROUTING_RULES = {
@@ -1021,9 +1028,13 @@ def brain_orchestrate_v2(request: OrchestrateInputV2) -> OrchestrateOutputV2:
                         "assessment_context": request.assessment_context,
                         "handoff": handoff_data
                     }
+                    # FIX v3.29.3: Use None for missing user_id instead of "anonymous" string
+                    # brain_runs.user_id is UUID type - cannot accept string values
+                    user_id_raw = request.assessment_context.get("user_id")
+                    user_id_for_db = user_id_raw if user_id_raw else None
                     cur.execute(
                         "INSERT INTO brain_runs (id, user_id, status, input_hash, output_hash, created_at) VALUES (%s, %s, %s, %s, %s, NOW())",
-                        (run_id, request.assessment_context.get("user_id", "anonymous"), "completed", signal_hash, output_hash)
+                        (run_id, user_id_for_db, "completed", signal_hash, output_hash)
                     )
                     cur.execute(
                         "INSERT INTO decision_outputs (run_id, phase, output_json, output_hash) VALUES (%s, %s, %s, %s)",
@@ -1221,14 +1232,17 @@ def brain_compose(request: ComposeRequest):
             cur.close()
             conn.close()
             raise HTTPException(status_code=404, detail=f"No brain run for run_id: {request.run_id}")
-        user_id = str(run_row["user_id"])
+        # Handle NULL user_id gracefully (v3.29.3 stores NULL for anonymous users)
+        user_id = str(run_row["user_id"]) if run_row["user_id"] else "anonymous"
         routing_constraints = orchestrate_output.get("routing_constraints", {})
         assessment_context = orchestrate_output.get("assessment_context", {})
         protocol_intents = compose_intents(request.selected_goals, routing_constraints, assessment_context)
         compose_output = {"protocol_id": protocol_id, "run_id": request.run_id, "selected_goals": request.selected_goals, "protocol_intents": protocol_intents, "routing_constraints": routing_constraints, "assessment_context": assessment_context, "constraints_applied": 0, "intents_generated": {k: len(v) for k, v in protocol_intents.items()}}
         output_hash = compute_hash(compose_output)
         cur.execute("INSERT INTO decision_outputs (run_id, phase, output_json, output_hash) VALUES (%s, %s, %s, %s)", (request.run_id, "compose", json.dumps(compose_output), output_hash))
-        cur.execute("INSERT INTO protocol_runs (id, user_id, run_id, phase, request_json, output_json, output_hash, status) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)", (protocol_id, user_id, request.run_id, "compose", json.dumps({"run_id": request.run_id, "selected_goals": request.selected_goals}), json.dumps(compose_output), output_hash, "completed"))
+        # Use None for user_id in protocol_runs if anonymous
+        user_id_for_db = run_row["user_id"]  # Already UUID or None
+        cur.execute("INSERT INTO protocol_runs (id, user_id, run_id, phase, request_json, output_json, output_hash, status) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)", (protocol_id, user_id_for_db, request.run_id, "compose", json.dumps({"run_id": request.run_id, "selected_goals": request.selected_goals}), json.dumps(compose_output), output_hash, "completed"))
         conn.commit()
         cur.close()
         conn.close()
