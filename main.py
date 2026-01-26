@@ -1,20 +1,21 @@
 """
 GenoMAX2 API Server Entry Point v3.32.0
-Constraint Translator for Bloodwork Enforcement
+Constraint Translator for Bloodwork → Routing Enforcement
 
 v3.32.0:
-- NEW: Constraint Translator module (app/brain/constraint_translator/)
-- Pure, deterministic translation from Bloodwork Engine constraint codes
-- 30+ constraint mappings (BLOCK_IRON, CAUTION_HEPATOTOXIC, FLAG_METHYLATION, etc.)
-- Integration points for Routing, Matching, Explainability layers
+- New ConstraintTranslator module for bloodwork constraint → routing enforcement
 - GET /api/v1/constraints/health - Module health check
-- GET /api/v1/constraints/codes - List all constraint codes
+- GET /api/v1/constraints/mappings - List all constraint mappings
 - POST /api/v1/constraints/translate - Translate constraint codes
-- GET /api/v1/constraints/qa-matrix - Run QA validation matrix
+- GET /api/v1/constraints/qa-matrix - Full QA scenario validation
+- 23 constraint mappings covering BLOCK/CAUTION/FLAG scenarios
 
 v3.31.2:
 - Fix migrations_router typo in app.include_router()
 - Ensure catalog_products migration endpoint loads properly
+
+v3.31.1:
+- Add catalog_products migration endpoint for TIER 1/2 catalog import
 
 v3.31.0:
 - New app/webhooks module with Junction (Vital) and Lab Testing API integration
@@ -24,14 +25,39 @@ v3.31.0:
 - Unit conversion (nmol/L, pmol/L, umol/L, mmol/L)
 - Automatic orchestrate/v2 triggering on lab results
 
+v3.30.1:
+- Fix safety gate counting in API endpoints (31 gates: 14/6/11 by tier)
+- Bloodwork Engine v2.0.1 with correct get_safety_gate_summary()
+
 v3.30.0:
 - Supliful catalog integration with 185+ products
 - MAXimo² (male) and MAXima² (female) product lines
 - Append-only governance for catalog entries
+- Biomarker-to-product recommendation engine
+- Safety gate validation for product selection
 
 v3.29.0:
-- Webhook endpoints for lab result notifications
-- Bloodwork Engine v2.0 (40 markers, 31 safety gates)
+- Add webhook endpoints for lab result notifications
+- POST /api/v1/webhooks/vital - Junction (Vital) webhook receiver
+- POST /api/v1/webhooks/labtestingapi - Lab Testing API webhook receiver
+- GET /api/v1/webhooks/status - Webhook configuration status
+- POST /api/v1/webhooks/test - Test webhook processing
+
+v3.28.0:
+- Bloodwork Engine upgraded to v2.0 (40 markers, 31 safety gates)
+- Auto-migration runner on startup
+- OCR parser service for blood test uploads
+- Lab adapter interface for API integrations
+- Safety routing service for ingredient filtering
+- Health check endpoints for deployment verification
+
+v3.27.0:
+- Add Launch v1 enforcement router
+- GET /api/v1/qa/launch-v1/pairing - Environment pairing validation
+- GET /api/v1/launch-v1/export/design - Excel export with LAUNCH_V1_SUMMARY
+- GET /api/v1/launch-v1/products - List Launch v1 products
+- Shopify endpoints now enforce is_launch_v1 = TRUE
+- All external pipelines use HARD GUARDRAIL filter
 
 Use this file for Railway deployment:
   uvicorn main:app --host 0.0.0.0 --port $PORT
@@ -197,10 +223,9 @@ except Exception as e:
 
 # ===== CONSTRAINT TRANSLATOR (v3.32.0) =====
 try:
-    from app.brain.constraint_translator.router import router as constraint_router
+    from app.brain.constraint_admin import router as constraint_router
     app.include_router(constraint_router)
-    from app.brain.constraint_translator import __version__ as ct_version
-    print(f"Constraint Translator v{ct_version} endpoints registered successfully")
+    print("Constraint Translator endpoints registered successfully")
 except Exception as e:
     print(f"ERROR loading Constraint Translator: {type(e).__name__}: {e}")
     import traceback
