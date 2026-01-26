@@ -13,6 +13,7 @@ Principle: "Blood does not negotiate."
 Bloodwork constraints cannot be removed or overridden by downstream layers.
 """
 
+from typing import List, Optional, Dict, Any
 from .translator import (
     ConstraintTranslator,
     TranslatedConstraints,
@@ -25,8 +26,27 @@ from .mappings import CONSTRAINT_MAPPINGS, get_mapping_version
 
 __version__ = "1.0.0"
 
-# Alias for backward compatibility with constraint_admin.py
-translate_constraints = translate
+
+def translate_constraints(
+    constraint_codes: List[str],
+    sex: Optional[str] = None,
+    additional_context: Optional[Dict[str, Any]] = None
+) -> TranslatedConstraints:
+    """
+    Convenience function to translate constraints using default translator.
+    
+    This is the primary API for constraint translation.
+    
+    Args:
+        constraint_codes: List of constraint codes from Bloodwork Engine
+        sex: Optional sex for gender-specific rules
+        additional_context: Optional context for custom logic
+        
+    Returns:
+        TranslatedConstraints with all enforcement fields populated
+    """
+    # Map additional_context to context parameter expected by translate()
+    return translate(constraint_codes, sex, context=additional_context)
 
 
 def merge_constraints(
