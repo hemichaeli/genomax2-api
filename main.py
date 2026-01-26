@@ -3,10 +3,14 @@ GenoMAX2 API Server Entry Point v3.32.0
 Constraint Translator for Bloodwork → Routing Enforcement
 
 v3.32.0:
-- Add Constraint Translator module (app/brain/constraint_translator/)
-- Translate bloodwork constraints (BLOCK_IRON, CAUTION_RENAL) into routing enforcement
-- 24 constraint mappings with deterministic translation
-- QA Matrix endpoint for validation
+- NEW: Constraint Translator module (app/brain/constraint_translator.py)
+- NEW: /api/v1/constraints/* admin endpoints for testing/inspection
+- Translates bloodwork constraint codes (BLOCK_IRON, CAUTION_RENAL) into
+  canonical enforcement semantics for routing/matching layers
+- Pure + deterministic translation with SHA-256 audit hashes
+- 24 constraint mappings covering iron, potassium, iodine, hepatic, renal,
+  methylation, thyroid, cardiovascular, and more
+- QA matrix endpoint for full scenario validation
 
 v3.31.2:
 - Fix migrations_router typo in app.include_router()
@@ -129,6 +133,17 @@ except Exception as e:
     import traceback
     traceback.print_exc()
 
+# ===== CONSTRAINT TRANSLATOR (v3.32.0) =====
+try:
+    from app.brain.constraint_admin import router as constraint_router
+    app.include_router(constraint_router)
+    from app.brain.constraint_translator import __version__ as ct_version
+    print(f"Constraint Translator v{ct_version} endpoints registered successfully")
+except Exception as e:
+    print(f"ERROR loading Constraint Translator: {type(e).__name__}: {e}")
+    import traceback
+    traceback.print_exc()
+
 # ===== CATALOG ENDPOINTS (v3.30.0) =====
 try:
     from bloodwork_engine.api_catalog_endpoints import register_catalog_endpoints
@@ -216,16 +231,6 @@ try:
     print("Launch v1 Enforcement endpoints registered successfully")
 except Exception as e:
     print(f"ERROR loading Launch v1 Enforcement: {type(e).__name__}: {e}")
-    import traceback
-    traceback.print_exc()
-
-# ===== CONSTRAINT TRANSLATOR (v3.32.0) =====
-try:
-    from app.brain.constraint_translator.router import router as constraint_router
-    app.include_router(constraint_router)
-    print("Constraint Translator endpoints registered successfully (Issue #16)")
-except Exception as e:
-    print(f"ERROR loading Constraint Translator: {type(e).__name__}: {e}")
     import traceback
     traceback.print_exc()
 
