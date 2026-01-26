@@ -1,7 +1,13 @@
 """
 GenoMAX² API Server
 Gender-Optimized Biological Operating System
-Version 3.29.5 - Protocol Runs UUID String Fix
+Version 3.32.0 - Constraint Translator Integration
+
+v3.32.0:
+- FEATURE: Constraint Translator module integration (#16)
+- New endpoints: /api/v1/constraints/* for constraint inspection and translation
+- Converts Bloodwork Engine outputs to routing/matching layer constraints
+- 33+ constraint mappings including BLOCK_IRON, CAUTION_HEPATOTOXIC, FLAG_METHYLATION
 
 v3.29.5:
 - BUGFIX: ANONYMOUS_USER_UUID now stored as string for psycopg2 compatibility
@@ -109,6 +115,9 @@ from app.qa import qa_router
 # Excel Override imports (v3.21.0)
 from app.catalog.override import router as override_router
 
+# Constraint Translator imports (v3.32.0 - Issue #16)
+from app.brain.constraint_admin import router as constraint_router
+
 # Telemetry Emitter imports (v3.17.0 - Issue #9 Stage 2)
 from app.telemetry import get_emitter, derive_run_summary, derive_events
 
@@ -124,7 +133,7 @@ from app.brain.bloodwork_handoff import (
     BloodworkHandoffError
 )
 
-API_VERSION = "3.29.5"
+API_VERSION = "3.32.0"
 
 # Stable UUID for anonymous users - used when user_id is not provided
 # This allows protocol_runs to comply with NOT NULL constraint while tracking anonymous sessions
@@ -168,6 +177,9 @@ app.include_router(qa_router)
 
 # Register Excel Override router (v3.21.0)
 app.include_router(override_router)
+
+# Register Constraint Translator router (v3.32.0 - Issue #16)
+app.include_router(constraint_router)
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -722,11 +734,19 @@ def health():
 
 @app.get("/version")
 def version():
+    # Get constraint translator version if available
+    try:
+        from app.brain.constraint_translator import __version__ as ct_version
+        constraint_translator_version = ct_version
+    except ImportError:
+        constraint_translator_version = "not_loaded"
+    
     return {
         "api_version": API_VERSION,
         "brain_version": "1.5.0",
         "resolver_version": "1.0.0",
         "bloodwork_engine_version": "2.0.0",
+        "constraint_translator_version": constraint_translator_version,
         "catalog_version": "catalog_governance_v1",
         "routing_version": "routing_layer_v1",
         "matching_version": "matching_layer_v1",
@@ -738,7 +758,7 @@ def version():
         "override_version": "excel_override_v1",
         "launch_v1_version": "launch_enforcement_v1",
         "contract_version": CONTRACT_VERSION,
-        "features": ["orchestrate", "orchestrate_v2", "orchestrate_v2_bloodwork_input", "compose", "route", "resolve", "supplier-gating", "catalog-governance", "routing-layer", "matching-layer", "explainability", "painpoints", "lifestyle-schema", "telemetry", "telemetry-instrumented", "intake-system", "safety-gate", "qa-audit", "excel-override", "launch-v1-enforcement", "bloodwork-engine-v2"]
+        "features": ["orchestrate", "orchestrate_v2", "orchestrate_v2_bloodwork_input", "compose", "route", "resolve", "supplier-gating", "catalog-governance", "routing-layer", "matching-layer", "explainability", "painpoints", "lifestyle-schema", "telemetry", "telemetry-instrumented", "intake-system", "safety-gate", "qa-audit", "excel-override", "launch-v1-enforcement", "bloodwork-engine-v2", "constraint-translator"]
     }
 
 
