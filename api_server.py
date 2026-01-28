@@ -1,7 +1,25 @@
 """
 GenoMAX² API Server
 Gender-Optimized Biological Operating System
-Version 3.32.0 - Constraint Translator Admin Endpoints (#16)
+Version 3.34.0 - Brain Pipeline Integration (#16)
+
+v3.34.0:
+- NEW: Brain Orchestrator module (bloodwork_engine/brain_orchestrator.py)
+- NEW: Brain Routes (/api/v1/brain/*) for full pipeline execution
+- POST /api/v1/brain/run - Execute complete Brain pipeline
+- GET /api/v1/brain/run/{run_id} - Get run status/results
+- POST /api/v1/brain/evaluate - Quick deficiency evaluation
+- POST /api/v1/brain/canonical-handoff - Complete bloodwork-to-brain integration
+- GET /api/v1/brain/health - Brain health check
+- GET /api/v1/brain/config - Configuration info
+- GET /api/v1/brain/deficiency-thresholds - Priority biomarker thresholds
+- GET /api/v1/brain/lifecycle-recommendations - Lifecycle phase recommendations
+- 13 priority biomarkers with gender-specific thresholds
+- Module scoring: evidence + biomarker match + goal alignment + lifecycle
+- Safety enforcement: "Blood does not negotiate" principle
+- Gender optimization: MAXimo²/MAXima² filtering
+- Lifecycle awareness: pregnancy, breastfeeding, perimenopause, athletic
+- Full audit trail in brain_runs table
 
 v3.32.0:
 - NEW: Constraint Translator admin endpoints for testing and inspection
@@ -137,7 +155,7 @@ from app.brain.bloodwork_handoff import (
     BloodworkHandoffError
 )
 
-API_VERSION = "3.32.0"
+API_VERSION = "3.34.0"
 
 # Stable UUID for anonymous users - used when user_id is not provided
 # This allows protocol_runs to comply with NOT NULL constraint while tracking anonymous sessions
@@ -742,6 +760,7 @@ def version():
     return {
         "api_version": API_VERSION,
         "brain_version": "1.5.0",
+        "brain_orchestrator_version": "1.0.0",
         "resolver_version": "1.0.0",
         "bloodwork_engine_version": "2.0.0",
         "constraint_translator_version": "1.0.0",
@@ -756,7 +775,7 @@ def version():
         "override_version": "excel_override_v1",
         "launch_v1_version": "launch_enforcement_v1",
         "contract_version": CONTRACT_VERSION,
-        "features": ["orchestrate", "orchestrate_v2", "orchestrate_v2_bloodwork_input", "compose", "route", "resolve", "supplier-gating", "catalog-governance", "routing-layer", "matching-layer", "explainability", "painpoints", "lifestyle-schema", "telemetry", "telemetry-instrumented", "intake-system", "safety-gate", "qa-audit", "excel-override", "launch-v1-enforcement", "bloodwork-engine-v2", "constraint-translator"]
+        "features": ["orchestrate", "orchestrate_v2", "orchestrate_v2_bloodwork_input", "compose", "route", "resolve", "supplier-gating", "catalog-governance", "routing-layer", "matching-layer", "explainability", "painpoints", "lifestyle-schema", "telemetry", "telemetry-instrumented", "intake-system", "safety-gate", "qa-audit", "excel-override", "launch-v1-enforcement", "bloodwork-engine-v2", "constraint-translator", "brain-pipeline"]
     }
 
 
