@@ -1,6 +1,6 @@
 """
 Brain Pipeline API Routes
-Version 1.1.0
+Version 1.1.1
 
 Exposes Brain orchestrator functionality through FastAPI endpoints.
 Handles the Route → Compose → Confirm → Finalize phases.
@@ -478,22 +478,22 @@ async def health_check():
                 "status": "degraded",
                 "brain_pipeline": "operational",
                 "database": "no_connection_string",
-                "version": "1.1.0",
+                "version": "1.1.1",
                 "timestamp": datetime.utcnow().isoformat()
             }
         
         conn = await asyncpg.connect(database_url)
         try:
-            # Query os_modules_v3_1 (production schema)
+            # Query os_modules_v3_1 - simple count without governance_status filter
             result = await conn.fetchval(
-                "SELECT COUNT(*) FROM os_modules_v3_1 WHERE governance_status = 'active' OR governance_status IS NULL"
+                "SELECT COUNT(*) FROM os_modules_v3_1"
             )
             return {
                 "status": "healthy",
                 "brain_pipeline": "operational",
                 "database": "connected",
                 "modules_available": result,
-                "version": "1.1.0",
+                "version": "1.1.1",
                 "timestamp": datetime.utcnow().isoformat()
             }
         finally:
@@ -506,7 +506,7 @@ async def health_check():
             "brain_pipeline": "error",
             "database": "error",
             "error": str(e),
-            "version": "1.1.0",
+            "version": "1.1.1",
             "timestamp": datetime.utcnow().isoformat()
         }
 
