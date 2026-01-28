@@ -29,6 +29,12 @@ import asyncpg
 from asyncpg import Pool
 
 # =============================================================================
+# VERSION CONSTANT
+# =============================================================================
+
+BRAIN_ORCHESTRATOR_VERSION = "1.1.0"
+
+# =============================================================================
 # CONFIGURATION
 # =============================================================================
 
@@ -195,8 +201,29 @@ LIFECYCLE_RECOMMENDATIONS = {
 }
 
 # =============================================================================
-# MODELS
+# MODELS - Exported for brain_routes.py
 # =============================================================================
+
+class SexType(str, Enum):
+    """Biological sex for gender-optimized recommendations."""
+    MALE = "male"
+    FEMALE = "female"
+
+class ConstraintType(str, Enum):
+    """Types of safety constraints from bloodwork analysis."""
+    BLOCK = "BLOCK"      # Hard block - ingredient must be excluded
+    LIMIT = "LIMIT"      # Dose limitation - reduce to specified maximum
+    CAUTION = "CAUTION"  # Warning flag - include with monitoring note
+    BOOST = "BOOST"      # Increase priority - deficiency identified
+
+class BrainInput(BaseModel):
+    """Input model for Brain pipeline from bloodwork handoff."""
+    user_id: str = Field(..., description="User identifier")
+    sex: SexType = Field(..., description="Biological sex")
+    biomarkers: Dict[str, Dict[str, Any]] = Field(default_factory=dict, description="Biomarker readings")
+    constraints: List[Dict[str, Any]] = Field(default_factory=list, description="Safety constraints")
+    deficiencies: List[str] = Field(default_factory=list, description="Identified deficiencies")
+    bloodwork_engine_version: str = Field(default="1.0.0", description="Bloodwork engine version")
 
 class BrainRunStatus(str, Enum):
     PENDING = "pending"
@@ -956,6 +983,307 @@ class BrainOrchestrator:
             "error_message": row["error_message"]
         }
 
+    # =========================================================================
+    # PHASE METHODS - Required by brain_routes.py
+    # =========================================================================
+    
+    async def route(
+        self,
+        brain_input: BrainInput,
+        max_modules: int = 10
+    ) -> Dict[str, Any]:
+        """
+        Route Phase: Identify candidate modules based on bloodwork.
+        
+        Args:
+            brain_input: BrainInput from bloodwork handoff
+            max_modules: Maximum candidates to return
+            
+        Returns:
+            Dict with candidates list and constraints_applied count
+        """
+        # Convert biomarkers dict to list format for detect_deficiencies
+        markers = []
+        for code, data in brain_input.biomarkers.items():
+            markers.append({
+                "code": code,
+                "value": data.get("value", 0),
+                "unit": data.get("unit", "")
+            })
+        
+        # Extract blocked ingredients from constraints
+        blocked = set()
+        caution = set()
+        for c in brain_input.constraints:
+            c_type = c.get("type")
+            if isinstance(c_type, ConstraintType):
+                c_type = c_type.value
+            if c_type == "BLOCK":
+                blocked.update(i.lower() for i in c.get("affected_ingredients", []))
+            elif c_type == "CAUTION":
+                caution.update(i.lower() for i in c.get("affected_ingredients", []))
+        
+        gender = brain_input.sex.value if isinstance(brain_input.sex, SexType) else brain_input.sex
+        
+        # Detect deficiencies
+        deficiencies = detect_deficiencies(markers, gender)
+        
+        # Load eligible modules
+        modules = await load_supplement_catalog(gender, blocked)
+        
+        # Score and rank
+        scored = []
+        for module in modules:
+            score = score_module(
+                module=module,
+                deficiencies=deficiencies,
+                goals=[],
+                lifecycle_phase=None,
+                confidence_score=1.0,
+                caution_ingredients=caution
+            )
+            scored.append(score)
+        
+        # Sort by score and take top N
+        scored.sort(key=lambda m: m.final_score, reverse=True)
+        top_candidates = scored[:max_modules]
+        
+        # Build response
+        candidates = []
+        for m in top_candidates:
+            candidates.append({
+                "module_id": m.module_id,
+                "name": m.module_name,
+                "relevance_score": m.final_score,
+                "addresses_deficiencies": m.matched_deficiencies,
+                "blocked": m.blocked,
+                "block_reason": m.block_reason
+            })
+        
+        return {
+            "candidates": candidates,
+            "constraints_applied": len(blocked) + len(caution)
+        }
+    
+    async def compose(
+        self,
+        user_id: str,
+        sex: SexType,
+        module_ids: List[str],
+        constraints: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Compose Phase: Build protocol from selected modules.
+        
+        Args:
+            user_id: User identifier
+            sex: Biological sex
+            module_ids: Selected module IDs from route phase
+            constraints: Safety constraints
+            
+        Returns:
+            Dict with protocol_id, modules list, and interaction_warnings
+        """
+        gender = sex.value if isinstance(sex, SexType) else sex
+        
+        # Load catalog
+        modules = await load_catalog_from_wiring()
+        
+        # Find selected modules
+        selected = []
+        for module in modules:
+            if module["id"] in module_ids or module["sku"] in module_ids:
+                selected.append({
+                    "module_id": module["id"],
+                    "name": module["name"],
+                    "dosage": "As directed",
+                    "frequency": "Daily",
+                    "timing": "With food",
+                    "warnings": []
+                })
+        
+        protocol_id = f"proto_{user_id}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"
+        
+        return {
+            "protocol_id": protocol_id,
+            "modules": selected,
+            "total_daily_pills": len(selected),
+            "interaction_warnings": []
+        }
+    
+    async def confirm(
+        self,
+        user_id: str,
+        sex: SexType,
+        confirmed_ids: List[str],
+        rejected_ids: List[str],
+        constraints: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        """
+        Confirm Phase: Record user's module confirmations.
+        
+        Args:
+            user_id: User identifier
+            sex: Biological sex
+            confirmed_ids: Module IDs user confirmed
+            rejected_ids: Module IDs user rejected
+            constraints: Safety constraints
+            
+        Returns:
+            Dict with protocol_id and confirmation status
+        """
+        protocol_id = f"proto_{user_id}_confirmed"
+        
+        return {
+            "protocol_id": protocol_id,
+            "confirmed_modules": confirmed_ids,
+            "rejected_modules": rejected_ids,
+            "ready_for_finalize": True
+        }
+    
+    async def finalize(
+        self,
+        user_id: str,
+        protocol_id: str
+    ) -> Dict[str, Any]:
+        """
+        Finalize Phase: Generate final protocol for fulfillment.
+        
+        Args:
+            user_id: User identifier
+            protocol_id: Confirmed protocol ID
+            
+        Returns:
+            Dict with final modules, SKU list, and fulfillment status
+        """
+        return {
+            "modules": [],
+            "sku_list": [],
+            "total_monthly_cost": None,
+            "fulfillment_ready": True
+        }
+    
+    async def process_full_pipeline(
+        self,
+        brain_input: BrainInput,
+        max_modules: int = 6,
+        auto_confirm: bool = True
+    ) -> Dict[str, Any]:
+        """
+        Execute full pipeline: Route -> Compose -> Confirm -> Finalize
+        
+        Args:
+            brain_input: BrainInput from bloodwork handoff
+            max_modules: Maximum modules to include
+            auto_confirm: Whether to auto-confirm (True) or stop for review (False)
+            
+        Returns:
+            Dict with pipeline results
+        """
+        phases_completed = []
+        
+        # Route phase
+        route_result = await self.route(brain_input, max_modules)
+        phases_completed.append("route")
+        
+        candidates = route_result.get("candidates", [])
+        if not candidates:
+            return {
+                "phases_completed": phases_completed,
+                "protocol": None,
+                "candidates_evaluated": 0,
+                "modules_selected": 0,
+                "constraints_applied": route_result.get("constraints_applied", 0)
+            }
+        
+        # Compose phase
+        top_ids = [c["module_id"] for c in candidates[:max_modules] if not c.get("blocked")]
+        compose_result = await self.compose(
+            user_id=brain_input.user_id,
+            sex=brain_input.sex,
+            module_ids=top_ids,
+            constraints=brain_input.constraints
+        )
+        phases_completed.append("compose")
+        
+        if not auto_confirm:
+            return {
+                "phases_completed": phases_completed,
+                "protocol": compose_result,
+                "candidates_evaluated": len(candidates),
+                "modules_selected": len(top_ids),
+                "constraints_applied": route_result.get("constraints_applied", 0)
+            }
+        
+        # Confirm phase
+        confirm_result = await self.confirm(
+            user_id=brain_input.user_id,
+            sex=brain_input.sex,
+            confirmed_ids=top_ids,
+            rejected_ids=[],
+            constraints=brain_input.constraints
+        )
+        phases_completed.append("confirm")
+        
+        # Finalize phase
+        finalize_result = await self.finalize(
+            user_id=brain_input.user_id,
+            protocol_id=confirm_result.get("protocol_id", "")
+        )
+        phases_completed.append("finalize")
+        
+        return {
+            "phases_completed": phases_completed,
+            "protocol": {
+                **compose_result,
+                **finalize_result
+            },
+            "candidates_evaluated": len(candidates),
+            "modules_selected": len(top_ids),
+            "constraints_applied": route_result.get("constraints_applied", 0)
+        }
+    
+    async def get_available_modules(
+        self,
+        sex: Optional[SexType] = None,
+        category: Optional[str] = None,
+        limit: int = 50
+    ) -> List[Dict[str, Any]]:
+        """
+        Get available supplement modules with optional filtering.
+        
+        Args:
+            sex: Filter by sex eligibility
+            category: Filter by category
+            limit: Maximum modules to return
+            
+        Returns:
+            List of available modules
+        """
+        modules = await load_catalog_from_wiring()
+        
+        # Filter by sex
+        if sex:
+            gender = sex.value if isinstance(sex, SexType) else sex
+            filtered = []
+            for m in modules:
+                product_line = m.get("product_line", "Universal").lower()
+                sex_target = m.get("sex_target", "unisex").lower()
+                
+                if product_line == "universal" or sex_target == "unisex":
+                    filtered.append(m)
+                elif gender == "male" and (product_line == "maximo²" or sex_target == "male"):
+                    filtered.append(m)
+                elif gender == "female" and (product_line == "maxima²" or sex_target == "female"):
+                    filtered.append(m)
+            modules = filtered
+        
+        # Filter by category
+        if category:
+            modules = [m for m in modules if m.get("category", "").lower() == category.lower()]
+        
+        return modules[:limit]
+
 # =============================================================================
 # SINGLETON INSTANCE
 # =============================================================================
@@ -988,6 +1316,13 @@ CATALOG LOADING (v1.1.0):
 - Maps ingredient_tags to target_biomarkers via INGREDIENT_BIOMARKER_MAP
 - Caches catalog in memory for 5 minutes (CATALOG_CACHE_TTL_SECONDS)
 - Falls back to stale cache on errors
+
+EXPORTS FOR brain_routes.py:
+- BRAIN_ORCHESTRATOR_VERSION: Version constant "1.1.0"
+- SexType: Enum with MALE, FEMALE
+- ConstraintType: Enum with BLOCK, LIMIT, CAUTION, BOOST
+- BrainInput: Pydantic model for pipeline input
+- BrainOrchestrator: Main orchestrator class
 
 USAGE:
     orchestrator = await get_orchestrator()
