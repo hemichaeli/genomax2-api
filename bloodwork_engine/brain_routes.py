@@ -1,553 +1,577 @@
 """
-GenoMAX² Brain Pipeline FastAPI Routes
-======================================
-API endpoints for Brain orchestrator operations.
+Brain Pipeline API Routes
+Version 1.1.0
 
-Endpoints:
-- POST /brain/run - Execute Brain pipeline with bloodwork data
-- GET /brain/run/{run_id} - Get Brain run status/results
-- POST /brain/evaluate - Quick deficiency evaluation (no module scoring)
-- GET /brain/config - Get Brain configuration (thresholds, goals)
-- GET /brain/health - Health check
-
-Version: 1.1.0
+Exposes Brain orchestrator functionality through FastAPI endpoints.
+Handles the Route → Compose → Confirm → Finalize phases.
 """
 
-import os
+import logging
+import json
 from datetime import datetime
 from typing import Optional, List, Dict, Any
-from fastapi import APIRouter, HTTPException, BackgroundTasks, Query
+from fastapi import APIRouter, HTTPException, Query, Body
 from pydantic import BaseModel, Field
+import asyncpg
+import os
 
-from .brain_orchestrator import (
-    get_orchestrator,
-    detect_deficiencies,
-    BIOMARKER_DEFICIENCY_THRESHOLDS,
-    LIFECYCLE_RECOMMENDATIONS,
-    BrainRunStatus,
-    DeficiencyLevel
-)
-from .bloodwork_brain import (
-    NormalizedMarker,
-    BloodworkCanonical,
-    evaluate_safety_gates,
-    create_canonical_handoff
+# Import the brain orchestrator
+from bloodwork_engine.brain_orchestrator import (
+    BrainOrchestrator,
+    BrainInput,
+    SexType,
+    ConstraintType
 )
 
-router = APIRouter(prefix="/api/v1/brain", tags=["brain"])
+logger = logging.getLogger(__name__)
+
+router = APIRouter(prefix="/api/v1/brain", tags=["Brain Pipeline"])
 
 # =============================================================================
-# REQUEST/RESPONSE MODELS
+# Pydantic Models for API
 # =============================================================================
 
-class BrainRunRequest(BaseModel):
-    """Request to execute Brain pipeline."""
-    submission_id: str = Field(..., description="Bloodwork submission ID")
-    user_id: str = Field(..., description="User ID")
-    
-    # Markers from bloodwork
-    markers: List[Dict[str, Any]] = Field(
-        ..., 
-        description="Normalized markers from Bloodwork Engine"
-    )
-    
-    # Safety constraints from Bloodwork Engine
-    blocked_ingredients: List[str] = Field(
-        default_factory=list,
-        description="Ingredients blocked by safety gates"
-    )
-    caution_ingredients: List[str] = Field(
-        default_factory=list,
-        description="Ingredients requiring caution"
-    )
-    
-    # User context
-    gender: str = Field(..., description="male or female")
-    age: Optional[int] = Field(None, description="User age in years")
-    lifecycle_phase: Optional[str] = Field(
-        None,
-        description="Lifecycle phase: pregnant, breastfeeding, perimenopause, postmenopausal, athletic"
-    )
-    goals: List[str] = Field(
-        default_factory=list,
-        description="Health goals: energy, sleep, stress, immunity, heart_health, brain_health, etc."
-    )
-    excluded_ingredients: List[str] = Field(
-        default_factory=list,
-        description="User-requested ingredient exclusions (allergies, preferences)"
-    )
-    
-    # Quality metrics
-    confidence_score: float = Field(
-        default=1.0,
-        ge=0.0, le=1.0,
-        description="Bloodwork data confidence score"
-    )
+class BiomarkerReading(BaseModel):
+    """Single biomarker reading from bloodwork"""
+    biomarker_code: str = Field(..., description="Biomarker code (e.g., 'VITD', 'FERRITIN')")
+    value: float = Field(..., description="Measured value")
+    unit: str = Field(..., description="Unit of measurement")
+    reference_low: Optional[float] = Field(None, description="Reference range low")
+    reference_high: Optional[float] = Field(None, description="Reference range high")
 
-class DeficiencyInfo(BaseModel):
-    """Detected biomarker deficiency."""
-    marker_code: str
-    value: float
-    unit: str
-    level: str
-    distance_from_optimal: float
-    target_ingredients: List[str]
-    priority_weight: float
+class Constraint(BaseModel):
+    """Safety constraint from bloodwork engine"""
+    constraint_type: str = Field(..., description="Type: BLOCK, LIMIT, CAUTION, BOOST")
+    constraint_code: str = Field(..., description="Constraint identifier")
+    reason: str = Field(..., description="Human-readable reason")
+    affected_ingredients: List[str] = Field(default_factory=list)
+    max_dose_mg: Optional[float] = Field(None, description="Maximum dose if LIMIT type")
 
-class ModuleRecommendation(BaseModel):
-    """Recommended supplement module."""
-    module_id: int
-    module_name: str
-    category: str
-    final_score: float
-    matched_deficiencies: List[str]
-    reasons: List[str]
-    caution: bool = False
-    caution_reasons: List[str] = []
+class BloodworkHandoff(BaseModel):
+    """
+    Canonical handoff object from Bloodwork Engine to Brain.
+    This is the contract between the two systems.
+    """
+    user_id: str = Field(..., description="User identifier")
+    sex: str = Field(..., description="Biological sex: 'male' or 'female'")
+    biomarkers: List[BiomarkerReading] = Field(..., description="All biomarker readings")
+    constraints: List[Constraint] = Field(default_factory=list, description="Safety constraints")
+    deficiencies: List[str] = Field(default_factory=list, description="Identified deficiencies")
+    timestamp: datetime = Field(default_factory=datetime.utcnow)
+    bloodwork_engine_version: str = Field(default="1.0.0")
+    
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "user_id": "user_123",
+                "sex": "male",
+                "biomarkers": [
+                    {"biomarker_code": "VITD", "value": 18.0, "unit": "ng/mL", "reference_low": 30, "reference_high": 100},
+                    {"biomarker_code": "FERRITIN", "value": 250.0, "unit": "ng/mL", "reference_low": 30, "reference_high": 400}
+                ],
+                "constraints": [
+                    {"constraint_type": "BLOCK", "constraint_code": "IRON_BLOCK", "reason": "Ferritin adequate", "affected_ingredients": ["iron"]}
+                ],
+                "deficiencies": ["vitamin_d"],
+                "timestamp": "2025-01-28T12:00:00Z",
+                "bloodwork_engine_version": "1.0.0"
+            }
+        }
 
-class BlockedModule(BaseModel):
-    """Module blocked by safety gates."""
-    module_id: int
-    module_name: str
-    category: str
-    block_reason: str
+class RouteRequest(BaseModel):
+    """Request for Route phase - identifies candidate modules"""
+    handoff: BloodworkHandoff
+    max_modules: int = Field(default=10, ge=1, le=20)
 
-class BrainRunResponse(BaseModel):
-    """Response from Brain pipeline execution."""
-    run_id: str
-    submission_id: str
+class ComposeRequest(BaseModel):
+    """Request for Compose phase - builds protocol from selected modules"""
     user_id: str
-    status: str
-    
-    # Results
-    markers_processed: int
-    priority_markers_found: int
-    deficiencies: List[DeficiencyInfo]
-    recommended_modules: List[ModuleRecommendation]
-    blocked_modules: List[BlockedModule]
-    
-    # Safety summary
-    blocked_ingredients: List[str]
-    caution_ingredients: List[str]
-    safety_gates_triggered: int
-    
-    # Context
-    gender: str
-    lifecycle_phase: Optional[str]
-    goals: List[str]
-    
-    # Metadata
-    processing_time_ms: int
+    sex: str
+    selected_module_ids: List[str]
+    constraints: List[Constraint] = Field(default_factory=list)
+
+class UserSelections(BaseModel):
+    """User's module selections for Confirm phase"""
+    confirmed_module_ids: List[str]
+    rejected_module_ids: List[str] = Field(default_factory=list)
+    notes: Optional[str] = None
+
+class ConfirmRequest(BaseModel):
+    """Request for Confirm phase - user confirms selections"""
+    user_id: str
+    sex: str
+    selections: UserSelections
+    constraints: List[Constraint] = Field(default_factory=list)
+
+class FinalizeRequest(BaseModel):
+    """Request for Finalize phase - generates final protocol"""
+    user_id: str
+    confirmed_protocol_id: str
+
+# Response Models
+class CandidateModule(BaseModel):
+    """A candidate module from Route phase"""
+    module_id: str
+    name: str
+    relevance_score: float
+    addresses_deficiencies: List[str]
+    blocked: bool = False
+    block_reason: Optional[str] = None
+
+class RouteResponse(BaseModel):
+    """Response from Route phase"""
+    user_id: str
+    candidates: List[CandidateModule]
+    total_candidates: int
+    constraints_applied: int
+    phase: str = "route"
+    timestamp: datetime
+
+class ProtocolModule(BaseModel):
+    """A module in a composed protocol"""
+    module_id: str
+    name: str
+    dosage: str
+    frequency: str
+    timing: Optional[str] = None
+    warnings: List[str] = Field(default_factory=list)
+
+class ComposeResponse(BaseModel):
+    """Response from Compose phase"""
+    user_id: str
+    protocol_id: str
+    modules: List[ProtocolModule]
+    total_daily_pills: int
+    interaction_warnings: List[str]
+    phase: str = "compose"
+    timestamp: datetime
+
+class ConfirmResponse(BaseModel):
+    """Response from Confirm phase"""
+    user_id: str
+    protocol_id: str
+    confirmed_modules: List[str]
+    ready_for_finalize: bool
+    phase: str = "confirm"
+    timestamp: datetime
+
+class FinalProtocol(BaseModel):
+    """Final protocol ready for fulfillment"""
+    protocol_id: str
+    user_id: str
+    modules: List[ProtocolModule]
+    sku_list: List[str]
+    total_monthly_cost: Optional[float] = None
+    fulfillment_ready: bool
     created_at: datetime
-    completed_at: Optional[datetime]
-    error_message: Optional[str] = None
 
-class QuickEvaluateRequest(BaseModel):
-    """Request for quick deficiency evaluation."""
-    markers: List[Dict[str, Any]]
-    gender: str
-
-class QuickEvaluateResponse(BaseModel):
-    """Response from quick deficiency evaluation."""
-    deficiencies: List[DeficiencyInfo]
-    deficiency_count: int
-    severe_count: int
-    priority_markers_analyzed: int
-
-class BrainConfigResponse(BaseModel):
-    """Brain configuration information."""
-    biomarker_thresholds: Dict[str, Any]
-    lifecycle_phases: List[str]
-    supported_goals: List[str]
-    version: str
-
-class BrainHealthResponse(BaseModel):
-    """Brain health check response."""
-    status: str
-    database_connected: bool
-    modules_available: int
-    version: str
+class FinalizeResponse(BaseModel):
+    """Response from Finalize phase"""
+    user_id: str
+    protocol: FinalProtocol
+    phase: str = "finalize"
     timestamp: datetime
 
 # =============================================================================
-# ENDPOINTS
+# Helper Functions
 # =============================================================================
 
-@router.post("/run", response_model=BrainRunResponse)
-async def execute_brain_run(request: BrainRunRequest):
+def convert_handoff_to_brain_input(handoff: BloodworkHandoff) -> BrainInput:
+    """Convert API handoff model to internal BrainInput"""
+    
+    # Convert sex string to enum
+    sex = SexType.MALE if handoff.sex.lower() == "male" else SexType.FEMALE
+    
+    # Convert biomarkers to dict format
+    biomarkers = {}
+    for b in handoff.biomarkers:
+        biomarkers[b.biomarker_code] = {
+            "value": b.value,
+            "unit": b.unit,
+            "reference_low": b.reference_low,
+            "reference_high": b.reference_high
+        }
+    
+    # Convert constraints to internal format
+    constraints = []
+    for c in handoff.constraints:
+        constraint_type = ConstraintType[c.constraint_type] if c.constraint_type in ConstraintType.__members__ else ConstraintType.CAUTION
+        constraints.append({
+            "type": constraint_type,
+            "code": c.constraint_code,
+            "reason": c.reason,
+            "affected_ingredients": c.affected_ingredients,
+            "max_dose_mg": c.max_dose_mg
+        })
+    
+    return BrainInput(
+        user_id=handoff.user_id,
+        sex=sex,
+        biomarkers=biomarkers,
+        constraints=constraints,
+        deficiencies=handoff.deficiencies,
+        bloodwork_engine_version=handoff.bloodwork_engine_version
+    )
+
+# =============================================================================
+# API Endpoints
+# =============================================================================
+
+@router.post("/route", response_model=RouteResponse, summary="Route Phase - Identify Candidates")
+async def route_phase(request: RouteRequest):
     """
-    Execute Brain pipeline with bloodwork data.
+    **Route Phase**: First phase of Brain pipeline.
     
-    This is the main entry point for bloodwork-to-supplement recommendations.
+    Takes bloodwork handoff and identifies candidate supplement modules
+    based on deficiencies, biomarker status, and sex-specific needs.
     
-    Flow:
-    1. Receive BloodworkCanonical data
-    2. Detect biomarker deficiencies
-    3. Score supplement modules
-    4. Apply safety constraints
-    5. Return ranked recommendations
-    
-    "Blood does not negotiate" - blocked ingredients are never recommended.
+    Applies safety constraints to filter/flag inappropriate modules.
     """
     try:
-        orchestrator = await get_orchestrator()
+        logger.info(f"Route phase started for user {request.handoff.user_id}")
         
-        result = await orchestrator.run(
-            submission_id=request.submission_id,
+        # Convert to internal format
+        brain_input = convert_handoff_to_brain_input(request.handoff)
+        
+        # Initialize orchestrator and run route phase
+        orchestrator = BrainOrchestrator()
+        result = await orchestrator.route(brain_input, max_modules=request.max_modules)
+        
+        # Convert to response format
+        candidates = []
+        for module in result.get("candidates", []):
+            candidates.append(CandidateModule(
+                module_id=module["module_id"],
+                name=module["name"],
+                relevance_score=module.get("relevance_score", 0.0),
+                addresses_deficiencies=module.get("addresses_deficiencies", []),
+                blocked=module.get("blocked", False),
+                block_reason=module.get("block_reason")
+            ))
+        
+        return RouteResponse(
+            user_id=request.handoff.user_id,
+            candidates=candidates,
+            total_candidates=len(candidates),
+            constraints_applied=result.get("constraints_applied", 0),
+            timestamp=datetime.utcnow()
+        )
+        
+    except Exception as e:
+        logger.error(f"Route phase error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@router.post("/compose", response_model=ComposeResponse, summary="Compose Phase - Build Protocol")
+async def compose_phase(request: ComposeRequest):
+    """
+    **Compose Phase**: Second phase of Brain pipeline.
+    
+    Takes selected module IDs and composes them into a coherent protocol,
+    checking for interactions and optimizing dosages.
+    """
+    try:
+        logger.info(f"Compose phase started for user {request.user_id}")
+        
+        # Convert constraints
+        constraints = []
+        for c in request.constraints:
+            constraint_type = ConstraintType[c.constraint_type] if c.constraint_type in ConstraintType.__members__ else ConstraintType.CAUTION
+            constraints.append({
+                "type": constraint_type,
+                "code": c.constraint_code,
+                "reason": c.reason,
+                "affected_ingredients": c.affected_ingredients,
+                "max_dose_mg": c.max_dose_mg
+            })
+        
+        sex = SexType.MALE if request.sex.lower() == "male" else SexType.FEMALE
+        
+        orchestrator = BrainOrchestrator()
+        result = await orchestrator.compose(
             user_id=request.user_id,
-            markers=request.markers,
-            blocked_ingredients=request.blocked_ingredients,
-            caution_ingredients=request.caution_ingredients,
-            gender=request.gender,
-            age=request.age,
-            lifecycle_phase=request.lifecycle_phase,
-            goals=request.goals,
-            excluded_ingredients=request.excluded_ingredients,
-            confidence_score=request.confidence_score
+            sex=sex,
+            module_ids=request.selected_module_ids,
+            constraints=constraints
         )
         
-        # Convert result to response format
-        deficiencies = [
-            DeficiencyInfo(
-                marker_code=d.marker_code,
-                value=d.value,
-                unit=d.unit,
-                level=d.level.value,
-                distance_from_optimal=d.distance_from_optimal,
-                target_ingredients=d.target_ingredients,
-                priority_weight=d.priority_weight
-            )
-            for d in result.deficiencies_detected
-        ]
+        # Convert to response format
+        modules = []
+        for m in result.get("modules", []):
+            modules.append(ProtocolModule(
+                module_id=m["module_id"],
+                name=m["name"],
+                dosage=m.get("dosage", "As directed"),
+                frequency=m.get("frequency", "Daily"),
+                timing=m.get("timing"),
+                warnings=m.get("warnings", [])
+            ))
         
-        recommended = [
-            ModuleRecommendation(
-                module_id=m.module_id,
-                module_name=m.module_name,
-                category=m.category,
-                final_score=m.final_score,
-                matched_deficiencies=m.matched_deficiencies,
-                reasons=m.reasons,
-                caution=m.caution,
-                caution_reasons=m.caution_reasons
-            )
-            for m in result.recommended_modules
-        ]
-        
-        blocked = [
-            BlockedModule(
-                module_id=m.module_id,
-                module_name=m.module_name,
-                category=m.category,
-                block_reason=m.block_reason or "Blocked by safety gate"
-            )
-            for m in result.blocked_modules
-        ]
-        
-        return BrainRunResponse(
-            run_id=result.run_id,
-            submission_id=result.submission_id,
-            user_id=result.user_id,
-            status=result.status.value,
-            markers_processed=result.markers_processed,
-            priority_markers_found=result.priority_markers_found,
-            deficiencies=deficiencies,
-            recommended_modules=recommended,
-            blocked_modules=blocked,
-            blocked_ingredients=result.blocked_ingredients,
-            caution_ingredients=result.caution_ingredients,
-            safety_gates_triggered=result.safety_gates_triggered,
-            gender=result.gender,
-            lifecycle_phase=result.lifecycle_phase,
-            goals=result.goals,
-            processing_time_ms=result.processing_time_ms,
-            created_at=result.created_at,
-            completed_at=result.completed_at,
-            error_message=result.error_message
+        return ComposeResponse(
+            user_id=request.user_id,
+            protocol_id=result.get("protocol_id", f"proto_{request.user_id}_{datetime.utcnow().strftime('%Y%m%d%H%M%S')}"),
+            modules=modules,
+            total_daily_pills=result.get("total_daily_pills", len(modules)),
+            interaction_warnings=result.get("interaction_warnings", []),
+            timestamp=datetime.utcnow()
         )
         
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Brain pipeline execution failed: {str(e)}"
-        )
+        logger.error(f"Compose phase error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/run/{run_id}")
-async def get_brain_run_status(run_id: str):
+@router.post("/confirm", response_model=ConfirmResponse, summary="Confirm Phase - User Confirmation")
+async def confirm_phase(request: ConfirmRequest):
     """
-    Get status and results of a Brain run.
+    **Confirm Phase**: Third phase of Brain pipeline.
     
-    Returns full run details including:
-    - Detected deficiencies
-    - Recommended modules with scores
-    - Blocked modules with reasons
-    - Safety summary
+    Records user's confirmation of selected modules.
+    Validates selections against safety constraints.
     """
     try:
-        orchestrator = await get_orchestrator()
-        result = await orchestrator.get_run_status(run_id)
+        logger.info(f"Confirm phase started for user {request.user_id}")
         
-        if not result:
-            raise HTTPException(
-                status_code=404,
-                detail=f"Brain run not found: {run_id}"
-            )
+        # Convert constraints
+        constraints = []
+        for c in request.constraints:
+            constraint_type = ConstraintType[c.constraint_type] if c.constraint_type in ConstraintType.__members__ else ConstraintType.CAUTION
+            constraints.append({
+                "type": constraint_type,
+                "code": c.constraint_code,
+                "reason": c.reason,
+                "affected_ingredients": c.affected_ingredients,
+                "max_dose_mg": c.max_dose_mg
+            })
         
-        return result
+        sex = SexType.MALE if request.sex.lower() == "male" else SexType.FEMALE
         
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Error retrieving Brain run: {str(e)}"
+        orchestrator = BrainOrchestrator()
+        result = await orchestrator.confirm(
+            user_id=request.user_id,
+            sex=sex,
+            confirmed_ids=request.selections.confirmed_module_ids,
+            rejected_ids=request.selections.rejected_module_ids,
+            constraints=constraints
         )
+        
+        return ConfirmResponse(
+            user_id=request.user_id,
+            protocol_id=result.get("protocol_id", f"proto_{request.user_id}_confirmed"),
+            confirmed_modules=result.get("confirmed_modules", request.selections.confirmed_module_ids),
+            ready_for_finalize=result.get("ready_for_finalize", True),
+            timestamp=datetime.utcnow()
+        )
+        
+    except Exception as e:
+        logger.error(f"Confirm phase error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/evaluate", response_model=QuickEvaluateResponse)
-async def quick_deficiency_evaluation(request: QuickEvaluateRequest):
+@router.post("/finalize", response_model=FinalizeResponse, summary="Finalize Phase - Generate Final Protocol")
+async def finalize_phase(request: FinalizeRequest):
     """
-    Quick deficiency evaluation without full module scoring.
+    **Finalize Phase**: Final phase of Brain pipeline.
     
-    Useful for:
-    - Immediate feedback after bloodwork upload
-    - Preview of deficiencies before full Brain run
-    - Testing/debugging marker normalization
+    Generates the final protocol ready for fulfillment,
+    including SKU mapping and cost calculation.
     """
     try:
-        deficiencies = detect_deficiencies(request.markers, request.gender)
+        logger.info(f"Finalize phase started for user {request.user_id}")
         
-        deficiency_infos = [
-            DeficiencyInfo(
-                marker_code=d.marker_code,
-                value=d.value,
-                unit=d.unit,
-                level=d.level.value,
-                distance_from_optimal=d.distance_from_optimal,
-                target_ingredients=d.target_ingredients,
-                priority_weight=d.priority_weight
-            )
-            for d in deficiencies
-        ]
-        
-        severe_count = sum(
-            1 for d in deficiencies 
-            if d.level in [DeficiencyLevel.DEFICIENT, DeficiencyLevel.ELEVATED]
+        orchestrator = BrainOrchestrator()
+        result = await orchestrator.finalize(
+            user_id=request.user_id,
+            protocol_id=request.confirmed_protocol_id
         )
         
-        priority_analyzed = sum(
-            1 for m in request.markers
-            if m.get("code") in BIOMARKER_DEFICIENCY_THRESHOLDS
+        # Build final protocol
+        modules = []
+        for m in result.get("modules", []):
+            modules.append(ProtocolModule(
+                module_id=m["module_id"],
+                name=m["name"],
+                dosage=m.get("dosage", "As directed"),
+                frequency=m.get("frequency", "Daily"),
+                timing=m.get("timing"),
+                warnings=m.get("warnings", [])
+            ))
+        
+        protocol = FinalProtocol(
+            protocol_id=request.confirmed_protocol_id,
+            user_id=request.user_id,
+            modules=modules,
+            sku_list=result.get("sku_list", []),
+            total_monthly_cost=result.get("total_monthly_cost"),
+            fulfillment_ready=result.get("fulfillment_ready", True),
+            created_at=datetime.utcnow()
         )
         
-        return QuickEvaluateResponse(
-            deficiencies=deficiency_infos,
-            deficiency_count=len(deficiencies),
-            severe_count=severe_count,
-            priority_markers_analyzed=priority_analyzed
+        return FinalizeResponse(
+            user_id=request.user_id,
+            protocol=protocol,
+            timestamp=datetime.utcnow()
         )
         
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Deficiency evaluation failed: {str(e)}"
-        )
+        logger.error(f"Finalize phase error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-@router.post("/canonical-handoff")
-async def create_and_run_brain(
-    submission_id: str,
-    user_id: str,
-    markers: List[NormalizedMarker],
-    gender: str,
-    age: Optional[int] = None,
-    lifecycle_phase: Optional[str] = None,
-    goals: List[str] = None,
-    excluded_ingredients: List[str] = None,
-    source: str = "api"
+# =============================================================================
+# Full Pipeline Endpoint
+# =============================================================================
+
+@router.post("/process", summary="Full Pipeline - All Phases")
+async def full_pipeline(
+    handoff: BloodworkHandoff,
+    auto_confirm: bool = Query(default=True, description="Auto-confirm top candidates"),
+    max_modules: int = Query(default=6, ge=1, le=15, description="Maximum modules to include")
 ):
     """
-    Complete pipeline: Create canonical handoff and execute Brain run.
+    **Full Pipeline**: Runs all Brain phases in sequence.
     
-    This is the full integration endpoint that:
-    1. Creates BloodworkCanonical from markers
-    2. Evaluates safety gates
-    3. Executes Brain pipeline
-    4. Returns recommendations
+    Convenience endpoint that executes Route → Compose → Confirm → Finalize
+    in a single request. Use for automated processing.
     
-    Use this when you have raw normalized markers and want
-    complete end-to-end processing.
+    Set auto_confirm=False to stop after Compose phase for manual review.
     """
     try:
-        # Step 1: Create canonical handoff
-        canonical = await create_canonical_handoff(
-            submission_id=submission_id,
-            user_id=user_id,
-            source=source,
-            markers=markers
-        )
+        logger.info(f"Full pipeline started for user {handoff.user_id}")
         
-        # Step 2: Execute Brain pipeline
-        orchestrator = await get_orchestrator()
+        # Convert to internal format
+        brain_input = convert_handoff_to_brain_input(handoff)
         
-        result = await orchestrator.run(
-            submission_id=submission_id,
-            user_id=user_id,
-            markers=[m.dict() for m in markers],
-            blocked_ingredients=canonical.blocked_ingredients,
-            caution_ingredients=canonical.caution_ingredients,
-            gender=gender,
-            age=age,
-            lifecycle_phase=lifecycle_phase,
-            goals=goals or [],
-            excluded_ingredients=excluded_ingredients or [],
-            confidence_score=canonical.confidence_score
+        # Initialize orchestrator
+        orchestrator = BrainOrchestrator()
+        
+        # Run full pipeline
+        result = await orchestrator.process_full_pipeline(
+            brain_input=brain_input,
+            max_modules=max_modules,
+            auto_confirm=auto_confirm
         )
         
         return {
-            "canonical": canonical.dict(),
-            "brain_result": {
-                "run_id": result.run_id,
-                "status": result.status.value,
-                "deficiencies_detected": len(result.deficiencies_detected),
-                "recommended_modules": len(result.recommended_modules),
-                "blocked_modules": len(result.blocked_modules),
-                "processing_time_ms": result.processing_time_ms
+            "user_id": handoff.user_id,
+            "status": "complete" if auto_confirm else "pending_confirmation",
+            "phases_completed": result.get("phases_completed", []),
+            "protocol": result.get("protocol"),
+            "candidates_evaluated": result.get("candidates_evaluated", 0),
+            "modules_selected": result.get("modules_selected", 0),
+            "constraints_applied": result.get("constraints_applied", 0),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+    except Exception as e:
+        logger.error(f"Full pipeline error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+# =============================================================================
+# Utility Endpoints
+# =============================================================================
+
+@router.get("/health", summary="Brain Pipeline Health Check")
+async def health_check():
+    """Check Brain pipeline health and database connectivity"""
+    try:
+        # Check database connection
+        database_url = os.getenv("DATABASE_URL")
+        if not database_url:
+            return {
+                "status": "degraded",
+                "brain_pipeline": "operational",
+                "database": "no_connection_string",
+                "version": "1.1.0",
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        
+        conn = await asyncpg.connect(database_url)
+        try:
+            # Query os_modules_v3_1 (production schema)
+            result = await conn.fetchval(
+                "SELECT COUNT(*) FROM os_modules_v3_1 WHERE governance_status = 'active' OR governance_status IS NULL"
+            )
+            return {
+                "status": "healthy",
+                "brain_pipeline": "operational",
+                "database": "connected",
+                "modules_available": result,
+                "version": "1.1.0",
+                "timestamp": datetime.utcnow().isoformat()
+            }
+        finally:
+            await conn.close()
+            
+    except Exception as e:
+        logger.error(f"Health check error: {e}")
+        return {
+            "status": "unhealthy",
+            "brain_pipeline": "error",
+            "database": "error",
+            "error": str(e),
+            "version": "1.1.0",
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+@router.get("/modules", summary="List Available Modules")
+async def list_modules(
+    sex: Optional[str] = Query(None, description="Filter by sex: male, female, or unisex"),
+    category: Optional[str] = Query(None, description="Filter by category"),
+    limit: int = Query(50, ge=1, le=200)
+):
+    """List available supplement modules in the Brain catalog"""
+    try:
+        orchestrator = BrainOrchestrator()
+        
+        sex_filter = None
+        if sex:
+            sex_filter = SexType.MALE if sex.lower() == "male" else SexType.FEMALE if sex.lower() == "female" else None
+        
+        modules = await orchestrator.get_available_modules(
+            sex=sex_filter,
+            category=category,
+            limit=limit
+        )
+        
+        return {
+            "modules": modules,
+            "total": len(modules),
+            "filters_applied": {
+                "sex": sex,
+                "category": category
             }
         }
         
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Canonical handoff failed: {str(e)}"
-        )
+        logger.error(f"List modules error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
-@router.get("/config", response_model=BrainConfigResponse)
-async def get_brain_configuration():
-    """
-    Get Brain configuration including biomarker thresholds and supported options.
-    
-    Useful for:
-    - Frontend UI configuration
-    - Understanding scoring parameters
-    - Documentation
-    """
-    return BrainConfigResponse(
-        biomarker_thresholds={
-            code: {
-                "target_ingredients": config["target_ingredients"],
-                "priority_weight": config["priority_weight"],
-                "inverse": config.get("inverse", False)
+@router.get("/constraints/types", summary="List Constraint Types")
+async def list_constraint_types():
+    """List all supported constraint types and their meanings"""
+    return {
+        "constraint_types": [
+            {
+                "type": "BLOCK",
+                "description": "Hard block - ingredient/module must be excluded",
+                "example": "Iron blocked due to elevated ferritin"
+            },
+            {
+                "type": "LIMIT",
+                "description": "Dose limitation - reduce to specified maximum",
+                "example": "Vitamin A limited to 2500 IU due to liver markers"
+            },
+            {
+                "type": "CAUTION",
+                "description": "Warning flag - include with monitoring note",
+                "example": "B12 supplementation - monitor for interactions"
+            },
+            {
+                "type": "BOOST",
+                "description": "Increase priority - deficiency identified",
+                "example": "Vitamin D boosted due to severe deficiency"
             }
-            for code, config in BIOMARKER_DEFICIENCY_THRESHOLDS.items()
-        },
-        lifecycle_phases=list(LIFECYCLE_RECOMMENDATIONS.keys()),
-        supported_goals=[
-            "energy", "sleep", "stress", "immunity", 
-            "heart_health", "brain_health", "bone_health",
-            "skin_health", "gut_health", "muscle_recovery"
-        ],
-        version="1.1.0"
-    )
-
-@router.get("/health", response_model=BrainHealthResponse)
-async def brain_health_check():
-    """
-    Brain pipeline health check.
-    
-    Verifies:
-    - Database connectivity
-    - Module availability
-    - Configuration validity
-    """
-    try:
-        orchestrator = await get_orchestrator()
-        
-        # Check database connection
-        db_connected = False
-        modules_count = 0
-        
-        if orchestrator.pool:
-            try:
-                async with orchestrator.pool.acquire() as conn:
-                    # Query os_modules_v3_1 (production schema)
-                    result = await conn.fetchval(
-                        "SELECT COUNT(*) FROM os_modules_v3_1 WHERE governance_status = 'active' OR governance_status IS NULL"
-                    )
-                    modules_count = result or 0
-                    db_connected = True
-            except:
-                pass
-        
-        return BrainHealthResponse(
-            status="healthy" if db_connected else "degraded",
-            database_connected=db_connected,
-            modules_available=modules_count,
-            version="1.1.0",
-            timestamp=datetime.utcnow()
-        )
-        
-    except Exception as e:
-        return BrainHealthResponse(
-            status="unhealthy",
-            database_connected=False,
-            modules_available=0,
-            version="1.1.0",
-            timestamp=datetime.utcnow()
-        )
-
-@router.get("/deficiency-thresholds")
-async def list_deficiency_thresholds():
-    """
-    List all biomarker deficiency thresholds.
-    
-    Shows the exact values used for deficiency detection
-    including gender-specific thresholds.
-    """
-    return {
-        "thresholds": BIOMARKER_DEFICIENCY_THRESHOLDS,
-        "count": len(BIOMARKER_DEFICIENCY_THRESHOLDS),
-        "priority_markers": list(BIOMARKER_DEFICIENCY_THRESHOLDS.keys())
+        ]
     }
 
-@router.get("/lifecycle-recommendations")
-async def list_lifecycle_recommendations():
-    """
-    List lifecycle-specific supplement recommendations.
-    
-    Shows required, recommended, and blocked ingredients
-    for each lifecycle phase.
-    """
-    return {
-        "phases": LIFECYCLE_RECOMMENDATIONS,
-        "supported_phases": list(LIFECYCLE_RECOMMENDATIONS.keys())
-    }
-
-# =============================================================================
-# INTEGRATION NOTES
-# =============================================================================
-"""
-ROUTER INTEGRATION:
-    from bloodwork_engine.brain_routes import router as brain_router
-    app.include_router(brain_router)
-
-TYPICAL FLOW:
-1. Bloodwork submission (OCR or Junction) → normalized markers
-2. POST /api/v1/brain/run with markers + user context
-3. Brain detects deficiencies, scores modules, applies constraints
-4. Response includes ranked recommendations
-
-QUICK EVALUATION:
-- POST /api/v1/brain/evaluate for deficiency preview
-- No database writes, no module scoring
-- Fast feedback for UI
-
-FULL PIPELINE:
-- POST /api/v1/brain/canonical-handoff for complete processing
-- Creates canonical object + runs Brain
-- Single endpoint for end-to-end
-
-SAFETY ENFORCEMENT:
-- Blocked ingredients from bloodwork_brain.py safety gates
-- User exclusions (allergies/preferences)
-- Lifecycle blocks (e.g., no vitamin A retinol during pregnancy)
-- All blocks are absolute - "Blood does not negotiate"
-"""
+@router.get("/schema/handoff", summary="Get Handoff Schema")
+async def get_handoff_schema():
+    """Get the JSON schema for BloodworkHandoff object"""
+    return BloodworkHandoff.model_json_schema()
