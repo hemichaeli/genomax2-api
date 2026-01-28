@@ -5,7 +5,7 @@ Core business logic connecting bloodwork to supplement recommendations.
 
 Pipeline Flow:
 1. Receive BloodworkCanonical from Bloodwork Engine
-2. Load supplement catalog with eligibility rules
+2. Load supplement catalog from catalog wiring
 3. Score modules against biomarker deficiencies
 4. Apply safety constraints (blocked ingredients)
 5. Filter by gender/lifecycle requirements
@@ -14,12 +14,12 @@ Pipeline Flow:
 
 "Blood does not negotiate" - safety constraints are absolute.
 
-Version: 1.1.0 - catalog_products integration
+Version: 1.1.0 - Uses catalog wiring instead of supplement_modules table
 """
 
 import os
 import json
-import hashlib
+import httpx
 from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple, Set
 from enum import Enum
@@ -33,6 +33,7 @@ from asyncpg import Pool
 # =============================================================================
 
 DATABASE_URL = os.getenv("DATABASE_URL", "")
+API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
 
 # 13 Priority Biomarkers with deficiency thresholds
 BIOMARKER_DEFICIENCY_THRESHOLDS = {
@@ -47,28 +48,28 @@ BIOMARKER_DEFICIENCY_THRESHOLDS = {
         "deficient": {"male": 20, "female": 20},
         "suboptimal": {"male": 30, "female": 30},
         "optimal_range": {"male": (40, 60), "female": (40, 60)},
-        "target_ingredients": ["vitamin_d3", "cholecalciferol", "vitamin_d"],
+        "target_ingredients": ["vitamin_d3", "cholecalciferol"],
         "priority_weight": 1.3
     },
     "vitamin_b12": {
         "deficient": {"male": 200, "female": 200},
         "suboptimal": {"male": 400, "female": 400},
         "optimal_range": {"male": (500, 900), "female": (500, 900)},
-        "target_ingredients": ["methylcobalamin", "vitamin_b12", "cyanocobalamin", "b12"],
+        "target_ingredients": ["methylcobalamin", "vitamin_b12", "cyanocobalamin"],
         "priority_weight": 1.2
     },
     "folate": {
         "deficient": {"male": 3, "female": 3},
         "suboptimal": {"male": 5, "female": 5},
         "optimal_range": {"male": (10, 25), "female": (10, 25)},
-        "target_ingredients": ["methylfolate", "folate", "folic_acid", "5-mthf"],
+        "target_ingredients": ["methylfolate", "folate", "folic_acid"],
         "priority_weight": 1.1
     },
     "hba1c": {
         "elevated": {"male": 5.7, "female": 5.7},
         "diabetic": {"male": 6.5, "female": 6.5},
         "optimal_range": {"male": (4.5, 5.6), "female": (4.5, 5.6)},
-        "target_ingredients": ["berberine", "chromium", "alpha_lipoic_acid", "ala"],
+        "target_ingredients": ["berberine", "chromium", "alpha_lipoic_acid"],
         "priority_weight": 1.4,
         "inverse": True  # Lower is better
     },
@@ -76,7 +77,7 @@ BIOMARKER_DEFICIENCY_THRESHOLDS = {
         "elevated": {"male": 1.0, "female": 1.0},
         "high": {"male": 3.0, "female": 3.0},
         "optimal_range": {"male": (0, 1.0), "female": (0, 1.0)},
-        "target_ingredients": ["omega3", "fish_oil", "curcumin", "turmeric", "omega-3", "epa", "dha"],
+        "target_ingredients": ["omega_3", "fish_oil", "curcumin", "turmeric"],
         "priority_weight": 1.3,
         "inverse": True
     },
@@ -84,7 +85,7 @@ BIOMARKER_DEFICIENCY_THRESHOLDS = {
         "elevated": {"male": 10, "female": 10},
         "high": {"male": 15, "female": 15},
         "optimal_range": {"male": (5, 10), "female": (5, 10)},
-        "target_ingredients": ["methylfolate", "methylcobalamin", "b6_p5p", "p5p", "pyridoxal"],
+        "target_ingredients": ["methylfolate", "methylcobalamin", "b6_p5p"],
         "priority_weight": 1.2,
         "inverse": True
     },
@@ -92,14 +93,14 @@ BIOMARKER_DEFICIENCY_THRESHOLDS = {
         "deficient": {"male": 4, "female": 4},
         "suboptimal": {"male": 6, "female": 6},
         "optimal_range": {"male": (8, 12), "female": (8, 12)},
-        "target_ingredients": ["omega3", "fish_oil", "epa", "dha", "omega-3"],
+        "target_ingredients": ["omega_3", "fish_oil", "epa", "dha"],
         "priority_weight": 1.2
     },
     "magnesium_rbc": {
         "deficient": {"male": 4.2, "female": 4.2},
         "suboptimal": {"male": 5.0, "female": 5.0},
         "optimal_range": {"male": (5.5, 6.5), "female": (5.5, 6.5)},
-        "target_ingredients": ["magnesium_glycinate", "magnesium", "mag"],
+        "target_ingredients": ["magnesium_glycinate", "magnesium"],
         "priority_weight": 1.1
     },
     "zinc": {
@@ -132,22 +133,53 @@ BIOMARKER_DEFICIENCY_THRESHOLDS = {
     }
 }
 
+# Ingredient to biomarker mapping for target_biomarkers derivation
+INGREDIENT_BIOMARKER_MAP = {
+    "iron": ["ferritin", "serum_iron", "transferrin_sat", "tibc"],
+    "iron_bisglycinate": ["ferritin", "serum_iron", "transferrin_sat", "tibc"],
+    "vitamin_d3": ["vitamin_d_25oh"],
+    "cholecalciferol": ["vitamin_d_25oh"],
+    "vitamin_k2": ["vitamin_d_25oh"],  # Synergistic
+    "methylcobalamin": ["vitamin_b12", "homocysteine"],
+    "vitamin_b12": ["vitamin_b12", "homocysteine"],
+    "cyanocobalamin": ["vitamin_b12"],
+    "methylfolate": ["folate", "homocysteine"],
+    "folate": ["folate", "homocysteine"],
+    "folic_acid": ["folate"],
+    "berberine": ["hba1c"],
+    "chromium": ["hba1c"],
+    "alpha_lipoic_acid": ["hba1c"],
+    "omega_3": ["omega3_index", "hscrp"],
+    "fish_oil": ["omega3_index", "hscrp"],
+    "epa": ["omega3_index", "hscrp"],
+    "dha": ["omega3_index", "hscrp"],
+    "curcumin": ["hscrp"],
+    "turmeric": ["hscrp"],
+    "magnesium": ["magnesium_rbc"],
+    "magnesium_glycinate": ["magnesium_rbc"],
+    "zinc": ["zinc"],
+    "zinc_picolinate": ["zinc"],
+    "b6_p5p": ["homocysteine"],
+    "coq10": ["hscrp"],
+    "ubiquinol": ["hscrp"],
+}
+
 # Lifecycle-specific recommendations
 LIFECYCLE_RECOMMENDATIONS = {
     "pregnant": {
-        "required": ["folate", "iron", "vitamin_d3", "omega3", "choline"],
+        "required": ["folate", "iron", "vitamin_d3", "omega_3", "choline"],
         "blocked": ["vitamin_a_retinol", "high_dose_vitamin_a"],
         "increased_dosage": ["folate", "iron", "vitamin_d3"],
         "priority_boost": 1.5
     },
     "breastfeeding": {
-        "required": ["vitamin_d3", "omega3", "choline", "iodine"],
+        "required": ["vitamin_d3", "omega_3", "choline", "iodine"],
         "blocked": [],
-        "increased_dosage": ["vitamin_d3", "omega3"],
+        "increased_dosage": ["vitamin_d3", "omega_3"],
         "priority_boost": 1.3
     },
     "perimenopause": {
-        "recommended": ["magnesium", "vitamin_d3", "omega3", "b_complex"],
+        "recommended": ["magnesium", "vitamin_d3", "omega_3", "b_complex"],
         "priority_boost": 1.2
     },
     "postmenopausal": {
@@ -156,48 +188,11 @@ LIFECYCLE_RECOMMENDATIONS = {
         "priority_boost": 1.2
     },
     "athletic": {
-        "recommended": ["magnesium", "zinc", "vitamin_d3", "omega3", "coq10"],
+        "recommended": ["magnesium", "zinc", "vitamin_d3", "omega_3", "coq10"],
         "increased_dosage": ["magnesium", "zinc"],
         "priority_boost": 1.1
     }
 }
-
-# =============================================================================
-# INGREDIENT TO BIOMARKER MAPPING
-# =============================================================================
-
-def build_ingredient_to_biomarker_map() -> Dict[str, List[str]]:
-    """
-    Build reverse mapping from ingredients to biomarkers they address.
-    Used to derive target_biomarkers from ingredient_tags.
-    """
-    mapping = {}
-    for biomarker, config in BIOMARKER_DEFICIENCY_THRESHOLDS.items():
-        for ingredient in config["target_ingredients"]:
-            ingredient_lower = ingredient.lower()
-            if ingredient_lower not in mapping:
-                mapping[ingredient_lower] = []
-            if biomarker not in mapping[ingredient_lower]:
-                mapping[ingredient_lower].append(biomarker)
-    return mapping
-
-INGREDIENT_TO_BIOMARKER_MAP = build_ingredient_to_biomarker_map()
-
-def derive_target_biomarkers(ingredient_tags: List[str]) -> List[str]:
-    """
-    Derive which biomarkers a product targets based on its ingredients.
-    """
-    biomarkers = set()
-    for tag in ingredient_tags:
-        tag_lower = tag.lower().replace("-", "_").replace(" ", "_")
-        # Direct match
-        if tag_lower in INGREDIENT_TO_BIOMARKER_MAP:
-            biomarkers.update(INGREDIENT_TO_BIOMARKER_MAP[tag_lower])
-        # Partial match for compound ingredients
-        for ingredient, markers in INGREDIENT_TO_BIOMARKER_MAP.items():
-            if ingredient in tag_lower or tag_lower in ingredient:
-                biomarkers.update(markers)
-    return list(biomarkers)
 
 # =============================================================================
 # MODELS
@@ -233,10 +228,10 @@ class BiomarkerDeficiency:
 @dataclass
 class ModuleScore:
     """Score for a supplement module against user's bloodwork."""
-    module_id: int
+    module_id: str  # Changed to str for SKU
     module_name: str
-    module_sku: str  # Added SKU for routing phase
     category: str
+    sku: str = ""
     base_score: float = 0.0
     biomarker_match_score: float = 0.0
     goal_match_score: float = 0.0
@@ -301,6 +296,152 @@ async def close_pool():
     if _pool:
         await _pool.close()
         _pool = None
+
+# =============================================================================
+# CATALOG LOADING - Uses catalog wiring endpoint
+# =============================================================================
+
+# In-memory catalog cache
+_catalog_cache: Optional[List[Dict[str, Any]]] = None
+_catalog_loaded_at: Optional[datetime] = None
+CATALOG_CACHE_TTL_SECONDS = 300  # 5 minutes
+
+async def load_catalog_from_wiring() -> List[Dict[str, Any]]:
+    """
+    Load supplement catalog from catalog wiring endpoint.
+    
+    Maps catalog wiring format to Brain orchestrator expected format.
+    """
+    global _catalog_cache, _catalog_loaded_at
+    
+    # Check cache
+    if _catalog_cache and _catalog_loaded_at:
+        age = (datetime.utcnow() - _catalog_loaded_at).total_seconds()
+        if age < CATALOG_CACHE_TTL_SECONDS:
+            return _catalog_cache
+    
+    # Fetch from catalog wiring endpoint
+    try:
+        async with httpx.AsyncClient() as client:
+            # Try internal endpoint first
+            response = await client.get(
+                f"{API_BASE_URL}/api/v1/catalog/wiring/products",
+                timeout=10.0
+            )
+            if response.status_code != 200:
+                # Fallback to self-reference
+                response = await client.get(
+                    "http://localhost:8000/api/v1/catalog/wiring/products",
+                    timeout=10.0
+                )
+            
+            data = response.json()
+            products = data.get("products", [])
+            
+    except Exception as e:
+        print(f"Error loading catalog from wiring: {e}")
+        # Return cached data if available, even if stale
+        if _catalog_cache:
+            return _catalog_cache
+        return []
+    
+    # Transform to Brain orchestrator format
+    modules = []
+    for idx, product in enumerate(products):
+        # Extract ingredient tags
+        ingredient_tags = product.get("ingredient_tags", [])
+        
+        # Derive target_biomarkers from ingredients
+        target_biomarkers = set()
+        for ingredient in ingredient_tags:
+            ingredient_lower = ingredient.lower()
+            if ingredient_lower in INGREDIENT_BIOMARKER_MAP:
+                target_biomarkers.update(INGREDIENT_BIOMARKER_MAP[ingredient_lower])
+        
+        # Map product_line to gender eligibility
+        product_line = product.get("product_line", "Universal")
+        sex_target = product.get("sex_target", "unisex")
+        
+        modules.append({
+            "id": product.get("sku", f"module_{idx}"),
+            "sku": product.get("sku", ""),
+            "name": product.get("name", "Unknown"),
+            "category": product.get("category", "General"),
+            "subcategory": "",  # Not available in wiring
+            "description": "",  # Not available in wiring
+            "target_biomarkers": list(target_biomarkers),
+            "primary_ingredients": ingredient_tags,
+            "all_ingredients": ingredient_tags,
+            "evidence_tier": product.get("evidence_tier", "TIER_2"),
+            "product_line": product_line,
+            "sex_target": sex_target,
+            "lifecycle_phases": [],  # Derive from category if needed
+            "contraindications": [],  # Not available in wiring
+            "price_usd": product.get("price_usd", 0)
+        })
+    
+    # Update cache
+    _catalog_cache = modules
+    _catalog_loaded_at = datetime.utcnow()
+    
+    return modules
+
+async def load_supplement_catalog(
+    gender: str,
+    blocked_ingredients: Set[str]
+) -> List[Dict[str, Any]]:
+    """
+    Load supplement modules filtered by gender eligibility.
+    
+    Returns modules with:
+    - Ingredient lists
+    - Category/subcategory
+    - Target biomarkers (derived from ingredients)
+    - Eligibility criteria
+    """
+    # Load from catalog wiring
+    all_modules = await load_catalog_from_wiring()
+    
+    # Filter by gender eligibility
+    gender_lower = gender.lower()
+    eligible_modules = []
+    
+    for module in all_modules:
+        # Check product line eligibility
+        product_line = module.get("product_line", "Universal").lower()
+        sex_target = module.get("sex_target", "unisex").lower()
+        
+        # Universal products are always eligible
+        if product_line == "universal" or sex_target == "unisex":
+            is_eligible = True
+        # Gender-specific products
+        elif gender_lower == "male" and (product_line == "maximo²" or sex_target == "male"):
+            is_eligible = True
+        elif gender_lower == "female" and (product_line == "maxima²" or sex_target == "female"):
+            is_eligible = True
+        else:
+            is_eligible = False
+        
+        if not is_eligible:
+            continue
+        
+        # Filter by evidence tier
+        evidence_tier = module.get("evidence_tier", "TIER_2")
+        if evidence_tier not in ["TIER_1", "TIER_2"]:
+            continue
+        
+        # Check if any ingredient is blocked
+        all_ingredients = module.get("all_ingredients", [])
+        ingredient_set = set(i.lower() for i in all_ingredients)
+        blocked_match = ingredient_set.intersection(blocked_ingredients)
+        
+        eligible_modules.append({
+            **module,
+            "is_blocked": len(blocked_match) > 0,
+            "blocked_ingredients": list(blocked_match)
+        })
+    
+    return eligible_modules
 
 # =============================================================================
 # DEFICIENCY DETECTION
@@ -400,106 +541,6 @@ def detect_deficiencies(
 # MODULE SCORING
 # =============================================================================
 
-async def load_supplement_catalog(
-    gender: str,
-    blocked_ingredients: Set[str]
-) -> List[Dict[str, Any]]:
-    """
-    Load supplement modules from catalog_products table filtered by gender eligibility.
-    
-    UPDATED: Now queries catalog_products instead of supplement_modules.
-    Derives target_biomarkers from ingredient_tags using BIOMARKER_DEFICIENCY_THRESHOLDS.
-    
-    Returns modules with:
-    - Ingredient lists (from ingredient_tags)
-    - Category
-    - Target biomarkers (derived from ingredients)
-    - Eligibility criteria
-    
-    Schema mapping:
-    - catalog_products.gx_catalog_id -> module SKU
-    - catalog_products.product_name -> name
-    - catalog_products.category -> category
-    - catalog_products.ingredient_tags -> primary_ingredients, all_ingredients
-    - catalog_products.sex_target -> gender filter
-    - catalog_products.evidence_tier -> evidence_tier
-    """
-    pool = await get_pool()
-    
-    # Determine sex_target filter based on gender
-    # Male users get: male-targeted + unisex products
-    # Female users get: female-targeted + unisex products
-    sex_target = "male" if gender.lower() == "male" else "female"
-    
-    query = """
-    SELECT 
-        gx_catalog_id,
-        product_name,
-        product_url,
-        category,
-        short_description,
-        base_price,
-        evidence_tier,
-        governance_status,
-        ingredient_tags,
-        sex_target
-    FROM catalog_products
-    WHERE governance_status = 'ACTIVE'
-      AND (sex_target = $1 OR sex_target = 'unisex')
-      AND evidence_tier IN ('TIER_1', 'TIER_2')
-    ORDER BY evidence_tier, category, product_name
-    """
-    
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(query, sex_target)
-    
-    modules = []
-    for row in rows:
-        sku = row["gx_catalog_id"]
-        
-        # Generate stable numeric ID from SKU
-        module_id = int(hashlib.md5(sku.encode()).hexdigest()[:8], 16)
-        
-        # Get ingredient tags (already an array from PostgreSQL)
-        ingredient_tags = row["ingredient_tags"] or []
-        
-        # Derive target biomarkers from ingredients
-        target_biomarkers = derive_target_biomarkers(ingredient_tags)
-        
-        # Check if any ingredient is blocked
-        ingredient_set = set(tag.lower() for tag in ingredient_tags)
-        blocked_match = ingredient_set.intersection(blocked_ingredients)
-        
-        # Determine product line from sex_target
-        if row["sex_target"] == "male":
-            product_line = "MAXimo²"
-        elif row["sex_target"] == "female":
-            product_line = "MAXima²"
-        else:
-            product_line = "universal"
-        
-        modules.append({
-            "id": module_id,
-            "sku": sku,
-            "name": row["product_name"],
-            "category": row["category"] or "supplement",
-            "subcategory": None,  # Not in catalog_products
-            "description": row["short_description"],
-            "target_biomarkers": target_biomarkers,
-            "primary_ingredients": ingredient_tags,  # Use all tags as primary
-            "all_ingredients": ingredient_tags,
-            "evidence_tier": row["evidence_tier"] or "TIER_2",
-            "product_line": product_line,
-            "price_usd": float(row["base_price"] or 0),
-            "product_url": row["product_url"],
-            "lifecycle_phases": [],  # Can be enhanced with metadata table
-            "contraindications": [],  # Can be enhanced with safety data
-            "is_blocked": len(blocked_match) > 0,
-            "blocked_ingredients": list(blocked_match)
-        })
-    
-    return modules
-
 def score_module(
     module: Dict[str, Any],
     deficiencies: List[BiomarkerDeficiency],
@@ -521,19 +562,19 @@ def score_module(
     score = ModuleScore(
         module_id=module["id"],
         module_name=module["name"],
-        module_sku=module.get("sku", ""),
-        category=module["category"]
+        category=module["category"],
+        sku=module.get("sku", "")
     )
     
     # Check if blocked
-    if module["is_blocked"]:
+    if module.get("is_blocked", False):
         score.blocked = True
-        score.block_reason = f"Contains blocked ingredients: {', '.join(module['blocked_ingredients'])}"
+        score.block_reason = f"Contains blocked ingredients: {', '.join(module.get('blocked_ingredients', []))}"
         score.final_score = -1000
         return score
     
     # Check for caution ingredients
-    module_ingredients = set(i.lower() for i in module["all_ingredients"])
+    module_ingredients = set(i.lower() for i in module.get("all_ingredients", []))
     caution_match = module_ingredients.intersection(caution_ingredients)
     if caution_match:
         score.caution = True
@@ -541,10 +582,10 @@ def score_module(
     
     # Base score from evidence tier
     tier_scores = {"TIER_1": 30, "TIER_2": 20, "TIER_3": 0}
-    score.base_score = tier_scores.get(module["evidence_tier"], 10)
+    score.base_score = tier_scores.get(module.get("evidence_tier", "TIER_2"), 10)
     
     # Biomarker match scoring
-    module_ingredients_lower = set(i.lower() for i in module["primary_ingredients"])
+    module_ingredients_lower = set(i.lower() for i in module.get("primary_ingredients", []))
     module_biomarkers = set(b.lower() for b in module.get("target_biomarkers", []))
     
     for deficiency in deficiencies:
@@ -552,7 +593,7 @@ def score_module(
         target_set = set(i.lower() for i in deficiency.target_ingredients)
         ingredient_match = module_ingredients_lower.intersection(target_set)
         
-        # Check biomarker match (derived from ingredients)
+        # Check biomarker match
         biomarker_match = deficiency.marker_code.lower() in module_biomarkers
         
         if ingredient_match or biomarker_match:
@@ -578,27 +619,29 @@ def score_module(
     
     # Goal alignment scoring
     goal_keywords = {
-        "energy": ["b_complex", "b12", "iron", "coq10", "mitochondrial", "energy"],
-        "sleep": ["magnesium", "gaba", "melatonin", "glycine", "sleep"],
-        "stress": ["magnesium", "ashwagandha", "rhodiola", "adaptogen", "stress"],
-        "immunity": ["vitamin_d", "zinc", "vitamin_c", "elderberry", "immune"],
-        "heart_health": ["omega3", "coq10", "magnesium", "vitamin_k2", "cardio", "heart"],
-        "brain_health": ["omega3", "b_complex", "choline", "phosphatidylserine", "brain", "cognitive"],
-        "bone_health": ["vitamin_d", "calcium", "vitamin_k2", "magnesium", "bone"],
-        "skin_health": ["collagen", "vitamin_c", "vitamin_e", "biotin", "skin", "hair"],
-        "gut_health": ["probiotic", "fiber", "digestive_enzyme", "glutamine", "gut", "digestive"],
-        "muscle_recovery": ["magnesium", "protein", "bcaa", "creatine", "muscle", "recovery"]
+        "energy": ["b_complex", "b12", "iron", "coq10", "mitochondrial", "cordyceps"],
+        "sleep": ["magnesium", "gaba", "melatonin", "glycine", "valerian"],
+        "stress": ["magnesium", "rhodiola", "adaptogen", "reishi", "holy_basil"],
+        "immunity": ["vitamin_d", "zinc", "vitamin_c", "elderberry", "echinacea"],
+        "heart_health": ["omega_3", "coq10", "magnesium", "vitamin_k2", "fish_oil"],
+        "brain_health": ["omega_3", "b_complex", "choline", "lions_mane", "alpha_gpc"],
+        "bone_health": ["vitamin_d", "calcium", "vitamin_k2", "magnesium"],
+        "skin_health": ["collagen", "vitamin_c", "vitamin_e", "biotin"],
+        "gut_health": ["probiotic", "fiber", "digestive_enzyme", "glutamine"],
+        "muscle_recovery": ["magnesium", "protein", "bcaa", "creatine", "l_glutamine"],
+        "inflammation": ["curcumin", "turmeric", "omega_3", "fish_oil", "quercetin"],
+        "detox": ["milk_thistle", "chlorella", "spirulina"],
+        "longevity": ["nmn", "resveratrol", "coq10", "quercetin"]
     }
     
     for goal in goals:
         goal_key = goal.lower().replace(" ", "_")
         if goal_key in goal_keywords:
             keywords = goal_keywords[goal_key]
-            category_lower = module["category"].lower()
-            category_match = any(kw in category_lower for kw in keywords)
+            category_match = any(kw in module["category"].lower() for kw in keywords)
             ingredient_match = any(
                 kw in i.lower() 
-                for i in module["primary_ingredients"] 
+                for i in module.get("primary_ingredients", []) 
                 for kw in keywords
             )
             
@@ -612,13 +655,13 @@ def score_module(
         
         # Check required supplements
         required = lifecycle_config.get("required", [])
-        if any(r.lower() in i.lower() for i in module["primary_ingredients"] for r in required):
+        if any(r.lower() in i.lower() for i in module.get("primary_ingredients", []) for r in required):
             score.lifecycle_bonus += 25
             score.reasons.append(f"Required for {lifecycle_phase}")
         
         # Check recommended supplements
         recommended = lifecycle_config.get("recommended", [])
-        if any(r.lower() in i.lower() for i in module["primary_ingredients"] for r in recommended):
+        if any(r.lower() in i.lower() for i in module.get("primary_ingredients", []) for r in recommended):
             score.lifecycle_bonus += 15
             score.reasons.append(f"Recommended for {lifecycle_phase}")
         
@@ -693,7 +736,7 @@ class BrainOrchestrator:
             # Step 1: Detect deficiencies
             deficiencies = detect_deficiencies(markers, gender)
             
-            # Step 2: Load supplement catalog from catalog_products
+            # Step 2: Load supplement catalog from wiring
             modules = await load_supplement_catalog(gender, all_blocked)
             
             # Step 3: Score all modules
@@ -825,8 +868,8 @@ class BrainOrchestrator:
             return {
                 "module_id": m.module_id,
                 "module_name": m.module_name,
-                "module_sku": m.module_sku,
                 "category": m.category,
+                "sku": m.sku,
                 "final_score": m.final_score,
                 "matched_deficiencies": m.matched_deficiencies,
                 "reasons": m.reasons,
@@ -935,15 +978,16 @@ INTEGRATION WITH BLOODWORK ENGINE:
 1. BloodworkCanonical arrives with markers, safety gates, blocked/caution lists
 2. Brain orchestrator receives canonical data
 3. Detects deficiencies from markers
-4. Scores modules against deficiencies + goals + lifecycle
-5. Enforces safety constraints (blocked ingredients)
-6. Returns ranked recommendations with SKUs for routing
+4. Loads catalog from wiring endpoint (cached for 5 minutes)
+5. Scores modules against deficiencies + goals + lifecycle
+6. Enforces safety constraints (blocked ingredients)
+7. Returns ranked recommendations
 
-CATALOG INTEGRATION (v1.1.0):
-- Now queries catalog_products table (actual production schema)
-- Derives target_biomarkers from ingredient_tags using BIOMARKER_DEFICIENCY_THRESHOLDS
-- Supports sex_target filtering (male/female/unisex)
-- Returns module_sku for Route phase integration
+CATALOG LOADING (v1.1.0):
+- Uses /api/v1/catalog/wiring/products endpoint
+- Maps ingredient_tags to target_biomarkers via INGREDIENT_BIOMARKER_MAP
+- Caches catalog in memory for 5 minutes (CATALOG_CACHE_TTL_SECONDS)
+- Falls back to stale cache on errors
 
 USAGE:
     orchestrator = await get_orchestrator()
