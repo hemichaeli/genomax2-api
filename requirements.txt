@@ -1,4 +1,4 @@
-# GenoMAX² API Server v3.28.0 Requirements
+# GenoMAX² API Server v3.34.0 Requirements
 
 # Web Framework
 fastapi==0.109.0
@@ -7,6 +7,7 @@ uvicorn[standard]==0.27.0
 # Database
 sqlalchemy==2.0.25
 psycopg2-binary==2.9.9
+asyncpg==0.29.0
 
 # Data Validation
 pydantic==2.5.3
