@@ -1,6 +1,20 @@
 """
-GenoMAX2 API Server Entry Point v3.33.0
-Catalog Brain Wiring (Issue #15)
+GenoMAX2 API Server Entry Point v3.34.0
+Brain Pipeline Integration (Issue #16)
+
+v3.34.0:
+- NEW: Brain Orchestrator module (bloodwork_engine/brain_orchestrator.py)
+- NEW: Brain Routes (/api/v1/brain/*) for full pipeline execution
+- POST /api/v1/brain/run - Execute complete Brain pipeline
+- GET /api/v1/brain/run/{run_id} - Get run status/results
+- POST /api/v1/brain/evaluate - Quick deficiency evaluation
+- POST /api/v1/brain/canonical-handoff - Complete bloodwork-to-brain integration
+- 13 priority biomarkers with gender-specific thresholds
+- Module scoring: evidence + biomarker match + goal alignment + lifecycle
+- Safety enforcement: "Blood does not negotiate" principle
+- Gender optimization: MAXimo²/MAXima² filtering
+- Lifecycle awareness: pregnancy, breastfeeding, perimenopause, athletic
+- Full audit trail in brain_runs table
 
 v3.33.0:
 - NEW: Catalog Wiring module (app/catalog/wiring.py)
@@ -117,6 +131,21 @@ try:
     print(f"Bloodwork Engine v{bw_version} endpoints registered successfully")
 except Exception as e:
     print(f"ERROR loading Bloodwork Engine: {type(e).__name__}: {e}")
+    import traceback
+    traceback.print_exc()
+
+# ===== BRAIN PIPELINE (v3.34.0 - Issue #16) =====
+try:
+    from bloodwork_engine.brain_routes import router as brain_router
+    app.include_router(brain_router)
+    from bloodwork_engine.brain_orchestrator import BRAIN_ORCHESTRATOR_VERSION
+    print(f"Brain Pipeline {BRAIN_ORCHESTRATOR_VERSION} endpoints registered successfully")
+    print("  - POST /api/v1/brain/run - Execute full pipeline")
+    print("  - GET /api/v1/brain/run/{run_id} - Get run status")
+    print("  - POST /api/v1/brain/evaluate - Quick deficiency evaluation")
+    print("  - POST /api/v1/brain/canonical-handoff - Complete integration")
+except Exception as e:
+    print(f"ERROR loading Brain Pipeline: {type(e).__name__}: {e}")
     import traceback
     traceback.print_exc()
 
@@ -269,6 +298,9 @@ def debug_routes():
     # Filter for bloodwork routes
     bloodwork_routes = [r for r in routes if 'bloodwork' in r['path'].lower()]
     
+    # Filter for brain routes
+    brain_routes = [r for r in routes if 'brain' in r['path'].lower()]
+    
     # Filter for health routes
     health_routes = [r for r in routes if 'health' in r['path'].lower()]
     
@@ -293,6 +325,7 @@ def debug_routes():
     return {
         "total_routes": len(routes),
         "bloodwork_routes": bloodwork_routes,
+        "brain_routes": brain_routes,
         "webhook_routes": webhook_routes,
         "catalog_routes": catalog_routes,
         "wiring_routes": wiring_routes,
