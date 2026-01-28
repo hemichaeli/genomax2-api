@@ -759,8 +759,8 @@ def health():
 def version():
     return {
         "api_version": API_VERSION,
-        "brain_version": "1.5.0",
-        "brain_orchestrator_version": "1.0.0",
+        "brain_version": "1.1.0",
+        "brain_orchestrator_version": "1.1.0",
         "resolver_version": "1.0.0",
         "bloodwork_engine_version": "2.0.0",
         "constraint_translator_version": "1.0.0",
@@ -779,9 +779,10 @@ def version():
     }
 
 
-@app.get("/api/v1/brain/health")
-def brain_health():
-    return {"status": "healthy", "service": "brain", "version": "1.5.0", "resolver_version": "1.0.0", "contract_version": CONTRACT_VERSION}
+# NOTE: /api/v1/brain/health endpoint is provided by brain_routes.py (v1.1.0)
+# The comprehensive health check includes database connectivity verification,
+# os_modules_v3_1 module count query, and proper error handling.
+# Removed duplicate simple endpoint that was shadowing brain_routes.py.
 
 
 # ===== PAINPOINTS AND LIFESTYLE SCHEMA ENDPOINTS (v3.15.1 - Issue #2) =====
@@ -1059,7 +1060,7 @@ def brain_orchestrate_v2(request: OrchestrateInputV2) -> OrchestrateOutputV2:
             
             chain_entry = {
                 "stage": "brain_orchestrate_v2_bloodwork_input",
-                "engine": "brain_1.5.0",
+                "engine": "brain_1.1.0",
                 "bloodwork_engine": "2.0.0",
                 "timestamp": created_at,
                 "input_mode": "bloodwork_input",
@@ -1170,7 +1171,7 @@ def brain_orchestrate_v2(request: OrchestrateInputV2) -> OrchestrateOutputV2:
     run_id = str(uuid.uuid4())
     output_data = {"run_id": run_id, "signal_id": signal.signal_id, "input_mode": "bloodwork_signal", "routing_constraints": routing_constraints, "selected_goals": request.selected_goals, "assessment_context": request.assessment_context}
     output_hash = compute_hash(output_data)
-    chain_entry = {"stage": "brain_orchestrate_v2", "engine": "brain_1.5.0", "timestamp": created_at, "input_mode": "bloodwork_signal", "input_hashes": [signal.audit.output_hash], "output_hash": output_hash}
+    chain_entry = {"stage": "brain_orchestrate_v2", "engine": "brain_1.1.0", "timestamp": created_at, "input_mode": "bloodwork_signal", "input_hashes": [signal.audit.output_hash], "output_hash": output_hash}
     conn = get_db()
     if conn:
         try:
