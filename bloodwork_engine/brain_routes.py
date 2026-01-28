@@ -10,7 +10,7 @@ Endpoints:
 - GET /brain/config - Get Brain configuration (thresholds, goals)
 - GET /brain/health - Health check
 
-Version: 1.0.0
+Version: 1.1.0
 """
 
 import os
@@ -445,7 +445,7 @@ async def get_brain_configuration():
             "heart_health", "brain_health", "bone_health",
             "skin_health", "gut_health", "muscle_recovery"
         ],
-        version="1.0.0"
+        version="1.1.0"
     )
 
 @router.get("/health", response_model=BrainHealthResponse)
@@ -468,9 +468,9 @@ async def brain_health_check():
         if orchestrator.pool:
             try:
                 async with orchestrator.pool.acquire() as conn:
-                    # Test query
+                    # Query os_modules_v3_1 (production schema)
                     result = await conn.fetchval(
-                        "SELECT COUNT(*) FROM supplement_modules WHERE status = 'active'"
+                        "SELECT COUNT(*) FROM os_modules_v3_1 WHERE governance_status = 'active' OR governance_status IS NULL"
                     )
                     modules_count = result or 0
                     db_connected = True
@@ -481,7 +481,7 @@ async def brain_health_check():
             status="healthy" if db_connected else "degraded",
             database_connected=db_connected,
             modules_available=modules_count,
-            version="1.0.0",
+            version="1.1.0",
             timestamp=datetime.utcnow()
         )
         
@@ -490,7 +490,7 @@ async def brain_health_check():
             status="unhealthy",
             database_connected=False,
             modules_available=0,
-            version="1.0.0",
+            version="1.1.0",
             timestamp=datetime.utcnow()
         )
 
