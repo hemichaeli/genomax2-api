@@ -14,7 +14,7 @@ Pipeline Flow:
 
 "Blood does not negotiate" - safety constraints are absolute.
 
-Version: 1.1.0 - Uses catalog wiring instead of supplement_modules table
+Version: 1.1.1 - Fixed protocol.modules output in process_full_pipeline
 """
 
 import os
@@ -32,7 +32,7 @@ from asyncpg import Pool
 # VERSION CONSTANT
 # =============================================================================
 
-BRAIN_ORCHESTRATOR_VERSION = "1.1.0"
+BRAIN_ORCHESTRATOR_VERSION = "1.1.1"
 
 # =============================================================================
 # CONFIGURATION
@@ -1095,10 +1095,13 @@ class BrainOrchestrator:
             if module["id"] in module_ids or module["sku"] in module_ids:
                 selected.append({
                     "module_id": module["id"],
+                    "sku": module["sku"],
                     "name": module["name"],
+                    "category": module["category"],
                     "dosage": "As directed",
                     "frequency": "Daily",
                     "timing": "With food",
+                    "price_usd": module.get("price_usd", 0),
                     "warnings": []
                 })
         
@@ -1144,7 +1147,8 @@ class BrainOrchestrator:
     async def finalize(
         self,
         user_id: str,
-        protocol_id: str
+        protocol_id: str,
+        modules: List[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
         """
         Finalize Phase: Generate final protocol for fulfillment.
@@ -1152,14 +1156,24 @@ class BrainOrchestrator:
         Args:
             user_id: User identifier
             protocol_id: Confirmed protocol ID
+            modules: Modules from compose phase (passed through)
             
         Returns:
-            Dict with final modules, SKU list, and fulfillment status
+            Dict with SKU list, cost, and fulfillment status
         """
+        # Build SKU list from modules
+        sku_list = []
+        total_cost = 0.0
+        
+        for module in (modules or []):
+            sku = module.get("sku") or module.get("module_id", "")
+            if sku:
+                sku_list.append(sku)
+            total_cost += module.get("price_usd", 0)
+        
         return {
-            "modules": [],
-            "sku_list": [],
-            "total_monthly_cost": None,
+            "sku_list": sku_list,
+            "total_monthly_cost": total_cost if total_cost > 0 else None,
             "fulfillment_ready": True
         }
     
@@ -1178,7 +1192,7 @@ class BrainOrchestrator:
             auto_confirm: Whether to auto-confirm (True) or stop for review (False)
             
         Returns:
-            Dict with pipeline results
+            Dict with pipeline results including protocol with modules
         """
         phases_completed = []
         
@@ -1189,11 +1203,14 @@ class BrainOrchestrator:
         candidates = route_result.get("candidates", [])
         if not candidates:
             return {
+                "user_id": brain_input.user_id,
+                "status": "complete",
                 "phases_completed": phases_completed,
                 "protocol": None,
                 "candidates_evaluated": 0,
                 "modules_selected": 0,
-                "constraints_applied": route_result.get("constraints_applied", 0)
+                "constraints_applied": route_result.get("constraints_applied", 0),
+                "timestamp": datetime.utcnow().isoformat()
             }
         
         # Compose phase
@@ -1208,11 +1225,14 @@ class BrainOrchestrator:
         
         if not auto_confirm:
             return {
+                "user_id": brain_input.user_id,
+                "status": "pending_confirmation",
                 "phases_completed": phases_completed,
                 "protocol": compose_result,
                 "candidates_evaluated": len(candidates),
                 "modules_selected": len(top_ids),
-                "constraints_applied": route_result.get("constraints_applied", 0)
+                "constraints_applied": route_result.get("constraints_applied", 0),
+                "timestamp": datetime.utcnow().isoformat()
             }
         
         # Confirm phase
@@ -1225,22 +1245,34 @@ class BrainOrchestrator:
         )
         phases_completed.append("confirm")
         
-        # Finalize phase
+        # Finalize phase - pass modules from compose
         finalize_result = await self.finalize(
             user_id=brain_input.user_id,
-            protocol_id=confirm_result.get("protocol_id", "")
+            protocol_id=confirm_result.get("protocol_id", ""),
+            modules=compose_result.get("modules", [])
         )
         phases_completed.append("finalize")
         
+        # Build final protocol - compose modules + finalize additions
+        final_protocol = {
+            "protocol_id": compose_result.get("protocol_id"),
+            "modules": compose_result.get("modules", []),
+            "total_daily_pills": compose_result.get("total_daily_pills", 0),
+            "interaction_warnings": compose_result.get("interaction_warnings", []),
+            "sku_list": finalize_result.get("sku_list", []),
+            "total_monthly_cost": finalize_result.get("total_monthly_cost"),
+            "fulfillment_ready": finalize_result.get("fulfillment_ready", True)
+        }
+        
         return {
+            "user_id": brain_input.user_id,
+            "status": "complete",
             "phases_completed": phases_completed,
-            "protocol": {
-                **compose_result,
-                **finalize_result
-            },
+            "protocol": final_protocol,
             "candidates_evaluated": len(candidates),
             "modules_selected": len(top_ids),
-            "constraints_applied": route_result.get("constraints_applied", 0)
+            "constraints_applied": route_result.get("constraints_applied", 0),
+            "timestamp": datetime.utcnow().isoformat()
         }
     
     async def get_available_modules(
@@ -1318,7 +1350,7 @@ CATALOG LOADING (v1.1.0):
 - Falls back to stale cache on errors
 
 EXPORTS FOR brain_routes.py:
-- BRAIN_ORCHESTRATOR_VERSION: Version constant "1.1.0"
+- BRAIN_ORCHESTRATOR_VERSION: Version constant "1.1.1"
 - SexType: Enum with MALE, FEMALE
 - ConstraintType: Enum with BLOCK, LIMIT, CAUTION, BOOST
 - BrainInput: Pydantic model for pipeline input
@@ -1352,4 +1384,9 @@ SCORING ALGORITHM:
 - Lifecycle bonus: +15-25 for recommended/required
 - Confidence multiplier: 0.5 + (confidence * 0.5)
 - Caution penalty: 0.8x final score
+
+CHANGELOG v1.1.1:
+- Fixed process_full_pipeline to properly preserve modules from compose phase
+- finalize now receives modules and builds sku_list from them
+- Protocol output includes full module details (name, category, price, etc.)
 """
