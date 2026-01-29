@@ -57,18 +57,19 @@ def register_catalog_endpoints(app: FastAPI):
         if CATALOG_WIRING_AVAILABLE:
             try:
                 catalog = get_catalog_wiring()
-                if catalog and catalog._loaded:
-                    stats = catalog.get_stats()
+                if catalog and catalog.is_loaded:
+                    stats = catalog._get_stats()
                     return {
                         "status": "operational",
                         "version": "3.40.0",
                         "source": "database_catalog_wiring",
                         "catalog": {
                             "total_products": stats.get("total_products", 0),
-                            "tier1_count": stats.get("by_evidence_tier", {}).get("TIER_1", 0),
-                            "tier2_count": stats.get("by_evidence_tier", {}).get("TIER_2", 0),
-                            "tier3_count": stats.get("by_evidence_tier", {}).get("TIER_3", 0),
-                            "product_lines": stats.get("by_product_line", {}),
+                            "maximo_products": stats.get("maximo_products", 0),
+                            "maxima_products": stats.get("maxima_products", 0),
+                            "universal_products": stats.get("universal_products", 0),
+                            "tier1_count": stats.get("tier1_products", 0),
+                            "tier2_count": stats.get("tier2_products", 0),
                             "loaded_at": stats.get("loaded_at")
                         },
                         "supliful_integration": {
@@ -121,8 +122,8 @@ def register_catalog_endpoints(app: FastAPI):
         if CATALOG_WIRING_AVAILABLE:
             try:
                 catalog = get_catalog_wiring()
-                if catalog and catalog._loaded:
-                    products = list(catalog.all_products().values())
+                if catalog and catalog.is_loaded:
+                    products = catalog.get_all_products()
                     
                     # Apply filters
                     if sex:
@@ -153,12 +154,12 @@ def register_catalog_endpoints(app: FastAPI):
                         "products": [
                             {
                                 "sku": p.sku,
-                                "name": p.product_name,
-                                "product_line": "MAXimo²" if p.sku.startswith("GMAX-M-") else ("MAXima²" if p.sku.startswith("GMAX-F-") else "Universal"),
+                                "name": p.name,
+                                "product_line": p.product_line,
                                 "category": p.category,
                                 "evidence_tier": p.evidence_tier,
                                 "sex_target": p.sex_target,
-                                "price_usd": p.base_price,
+                                "price_usd": p.price_usd,
                                 "active": p.governance_status == "ACTIVE"
                             }
                             for p in products
@@ -219,18 +220,18 @@ def register_catalog_endpoints(app: FastAPI):
         if CATALOG_WIRING_AVAILABLE:
             try:
                 catalog = get_catalog_wiring()
-                if catalog and catalog._loaded:
+                if catalog and catalog.is_loaded:
                     product = catalog.get_product(sku.upper())
                     if product:
                         return {
                             "sku": product.sku,
-                            "name": product.product_name,
-                            "product_name": product.product_name,
-                            "product_line": "MAXimo²" if product.sku.startswith("GMAX-M-") else ("MAXima²" if product.sku.startswith("GMAX-F-") else "Universal"),
+                            "name": product.name,
+                            "product_name": product.name,
+                            "product_line": product.product_line,
                             "category": product.category,
                             "evidence_tier": product.evidence_tier,
                             "sex_target": product.sex_target,
-                            "price_usd": product.base_price,
+                            "price_usd": product.price_usd,
                             "governance_status": product.governance_status,
                             "source": "database_catalog_wiring"
                         }
@@ -379,10 +380,10 @@ def register_catalog_endpoints(app: FastAPI):
         if CATALOG_WIRING_AVAILABLE:
             try:
                 catalog = get_catalog_wiring()
-                if catalog and catalog._loaded:
+                if catalog and catalog.is_loaded:
                     # Get sex-appropriate products
                     sex_prefix = "GMAX-M-" if request.sex.lower() == "male" else "GMAX-F-"
-                    products = [p for p in catalog.all_products().values() 
+                    products = [p for p in catalog.get_all_products() 
                                if p.sku.startswith(sex_prefix) or p.sku.startswith("GMAX-U-")]
                     
                     # Sort by evidence tier (TIER_1 first)
@@ -400,11 +401,11 @@ def register_catalog_endpoints(app: FastAPI):
                         "recommendations": [
                             {
                                 "sku": p.sku,
-                                "name": p.product_name,
-                                "product_line": "MAXimo²" if p.sku.startswith("GMAX-M-") else ("MAXima²" if p.sku.startswith("GMAX-F-") else "Universal"),
+                                "name": p.name,
+                                "product_line": p.product_line,
                                 "category": p.category,
                                 "evidence_tier": p.evidence_tier,
-                                "price_usd": p.base_price
+                                "price_usd": p.price_usd
                             }
                             for p in products
                         ],
@@ -461,9 +462,13 @@ def register_catalog_endpoints(app: FastAPI):
         if CATALOG_WIRING_AVAILABLE:
             try:
                 catalog = get_catalog_wiring()
-                if catalog and catalog._loaded:
-                    stats = catalog.get_stats()
-                    counts = stats.get("by_product_line", counts)
+                if catalog and catalog.is_loaded:
+                    stats = catalog._get_stats()
+                    counts = {
+                        "maximo": stats.get("maximo_products", 0),
+                        "maxima": stats.get("maxima_products", 0),
+                        "universal": stats.get("universal_products", 0)
+                    }
             except Exception:
                 pass
         
@@ -500,9 +505,12 @@ def register_catalog_endpoints(app: FastAPI):
         if CATALOG_WIRING_AVAILABLE:
             try:
                 catalog = get_catalog_wiring()
-                if catalog and catalog._loaded:
-                    stats = catalog.get_stats()
-                    categories = stats.get("by_category", {})
+                if catalog and catalog.is_loaded:
+                    # Aggregate categories from products
+                    categories = {}
+                    for p in catalog.get_all_products():
+                        cat = p.category or "supplement"
+                        categories[cat] = categories.get(cat, 0) + 1
                     return {
                         "source": "database_catalog_wiring",
                         "categories": [
@@ -558,8 +566,8 @@ def register_catalog_endpoints(app: FastAPI):
         if CATALOG_WIRING_AVAILABLE:
             try:
                 catalog = get_catalog_wiring()
-                if catalog and catalog._loaded:
-                    products = list(catalog.all_products().values())
+                if catalog and catalog.is_loaded:
+                    products = catalog.get_all_products()
                     return {
                         "export_version": "3.40.0",
                         "exported_at": datetime.utcnow().isoformat(),
@@ -573,11 +581,11 @@ def register_catalog_endpoints(app: FastAPI):
                         "products": [
                             {
                                 "sku": p.sku,
-                                "product_name": p.product_name,
+                                "product_name": p.name,
                                 "category": p.category,
                                 "evidence_tier": p.evidence_tier,
                                 "sex_target": p.sex_target,
-                                "base_price": p.base_price,
+                                "base_price": p.price_usd,
                                 "governance_status": p.governance_status
                             }
                             for p in products
