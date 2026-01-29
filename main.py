@@ -1,6 +1,15 @@
 """
-GenoMAX2 API Server Entry Point v3.38.0
-Gender-Specific Product Cleanup
+GenoMAX2 API Server Entry Point v3.40.0
+Catalog Consolidation - Single Database Source
+
+v3.40.0:
+- BREAKING: /api/v1/catalog/products now returns 151 products (was 22)
+- NEW: Catalog Consolidation Migration (app/migrations/consolidate_catalog.py)
+- POST /api/v1/migrations/run/consolidate-catalog - Add version_note, mark products
+- GET /api/v1/migrations/status/consolidate-catalog - Check consolidation status
+- Deprecates hardcoded SuplifulCatalogManager (22 products)
+- All catalog endpoints now use CatalogWiring (151 products from database)
+- Legacy products archived to /legacy/supliful_catalog_archive.py
 
 v3.38.0:
 - NEW: Gender-Specific Product Cleanup (app/migrations/cleanup_gender_specific.py)
@@ -121,11 +130,12 @@ except Exception as e:
     import traceback
     traceback.print_exc()
 
-# ===== CATALOG ENDPOINTS (v3.30.0) =====
+# ===== CATALOG ENDPOINTS (v3.30.0, updated v3.40.0 to use CatalogWiring) =====
 try:
     from bloodwork_engine.api_catalog_endpoints import register_catalog_endpoints
     catalog_routes = register_catalog_endpoints(app)
     print(f"Catalog endpoints registered successfully ({len(catalog_routes)} routes)")
+    print("  NOTE: v3.40.0 - Now using CatalogWiring (151 products from database)")
 except Exception as e:
     print(f"ERROR loading Catalog endpoints: {type(e).__name__}: {e}")
     import traceback
@@ -200,6 +210,18 @@ try:
     print("  - GET /api/v1/migrations/status/gender-specific-cleanup")
 except Exception as e:
     print(f"ERROR loading Gender-Specific Cleanup Migration: {type(e).__name__}: {e}")
+    import traceback
+    traceback.print_exc()
+
+# ===== CATALOG CONSOLIDATION MIGRATION (v3.40.0) =====
+try:
+    from app.migrations.consolidate_catalog import router as consolidate_catalog_router
+    app.include_router(consolidate_catalog_router)
+    print("Catalog Consolidation Migration endpoints registered successfully")
+    print("  - POST /api/v1/migrations/run/consolidate-catalog")
+    print("  - GET /api/v1/migrations/status/consolidate-catalog")
+except Exception as e:
+    print(f"ERROR loading Catalog Consolidation Migration: {type(e).__name__}: {e}")
     import traceback
     traceback.print_exc()
 
