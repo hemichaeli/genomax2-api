@@ -1,6 +1,12 @@
 """
-GenoMAX2 API Server Entry Point v3.37.0
-Full Catalog Gender Conversion
+GenoMAX2 API Server Entry Point v3.38.0
+Gender-Specific Product Cleanup
+
+v3.38.0:
+- NEW: Gender-Specific Product Cleanup (app/migrations/cleanup_gender_specific.py)
+- POST /api/v1/migrations/run/cleanup-gender-specific - Remove invalid cross-gender products
+- GET /api/v1/migrations/status/gender-specific-cleanup - Check for issues
+- Removes GMAX-F-SAW-PALM (Saw Palmetto is prostate health - male only)
 
 v3.37.0:
 - NEW: Full Gender Conversion Migration (app/migrations/convert_to_gender_specific.py)
@@ -13,50 +19,13 @@ v3.37.0:
 
 v3.36.0:
 - NEW: Gender-Specific Products Migration (app/migrations/add_gender_specific_products.py)
-- POST /api/v1/migrations/run/add-gender-specific-products - Add MAXimo²/MAXima²/Universal products
-- GET /api/v1/migrations/status/gender-specific-products - Check GMAX-* product status
-- GET /api/v1/migrations/preview/gender-specific-products - Preview migration
 - Adds 18 new products (10 MAXimo², 8 MAXima², 2 Universal)
-- Enables deterministic gender-aware routing in Brain Pipeline
 
 v3.35.0:
 - NEW: Methylation Products Migration (app/migrations/add_methylation_products.py)
-- POST /api/v1/migrations/run/add-methylation-products - Add methylation modules
-- GET /api/v1/migrations/status/methylation-products - Check methylation status
-- GMAX-M-METH-B (MAXimo² Methylation Support) for male users
-- GMAX-F-METH-B (MAXima² Methylation Support) for female users
-- Fixes FLAG_METHYLATION_SUPPORT having no fulfillable modules
 
 v3.34.0:
 - NEW: Brain Orchestrator module (bloodwork_engine/brain_orchestrator.py)
-- NEW: Brain Routes (/api/v1/brain/*) for full pipeline execution
-- POST /api/v1/brain/run - Execute complete Brain pipeline
-- GET /api/v1/brain/run/{run_id} - Get run status/results
-- POST /api/v1/brain/evaluate - Quick deficiency evaluation
-- POST /api/v1/brain/canonical-handoff - Complete bloodwork-to-brain integration
-- 13 priority biomarkers with gender-specific thresholds
-- Module scoring: evidence + biomarker match + goal alignment + lifecycle
-- Safety enforcement: "Blood does not negotiate" principle
-- Gender optimization: MAXimo²/MAXima² filtering
-- Lifecycle awareness: pregnancy, breastfeeding, perimenopause, athletic
-- Full audit trail in brain_runs table
-
-v3.33.0:
-- NEW: Catalog Wiring module (app/catalog/wiring.py)
-- CatalogWiring singleton loads canonical SKU universe from DB
-- Hard abort (503) if catalog unavailable - no mocks, no fallbacks
-- Blocked SKUs (governance_status=BLOCKED) never enter pipeline
-- /api/v1/catalog/wiring/* endpoints for health, load, filter
-
-v3.32.0:
-- NEW: Constraint Translator module (app/brain/constraint_translator.py)
-- NEW: /api/v1/constraints/* admin endpoints for testing/inspection
-- Translates bloodwork constraint codes (BLOCK_IRON, CAUTION_RENAL) into
-  canonical enforcement semantics for routing/matching layers
-- Pure + deterministic translation with SHA-256 audit hashes
-- 24 constraint mappings covering iron, potassium, iodine, hepatic, renal,
-  methylation, thyroid, cardiovascular, and more
-- QA matrix endpoint for full scenario validation
 
 Use this file for Railway deployment:
   uvicorn main:app --host 0.0.0.0 --port $PORT
@@ -116,10 +85,6 @@ try:
     app.include_router(brain_router)
     from bloodwork_engine.brain_orchestrator import BRAIN_ORCHESTRATOR_VERSION
     print(f"Brain Pipeline {BRAIN_ORCHESTRATOR_VERSION} endpoints registered successfully")
-    print("  - POST /api/v1/brain/run - Execute full pipeline")
-    print("  - GET /api/v1/brain/run/{run_id} - Get run status")
-    print("  - POST /api/v1/brain/evaluate - Quick deficiency evaluation")
-    print("  - POST /api/v1/brain/canonical-handoff - Complete integration")
 except Exception as e:
     print(f"ERROR loading Brain Pipeline: {type(e).__name__}: {e}")
     import traceback
@@ -201,8 +166,6 @@ try:
     from app.migrations.add_methylation_products import router as methylation_migration_router
     app.include_router(methylation_migration_router)
     print("Methylation Products Migration endpoints registered successfully")
-    print("  - POST /api/v1/migrations/run/add-methylation-products")
-    print("  - GET /api/v1/migrations/status/methylation-products")
 except Exception as e:
     print(f"ERROR loading Methylation Products Migration: {type(e).__name__}: {e}")
     import traceback
@@ -213,9 +176,6 @@ try:
     from app.migrations.add_gender_specific_products import router as gender_products_router
     app.include_router(gender_products_router)
     print("Gender-Specific Products Migration endpoints registered successfully")
-    print("  - POST /api/v1/migrations/run/add-gender-specific-products")
-    print("  - GET /api/v1/migrations/status/gender-specific-products")
-    print("  - GET /api/v1/migrations/preview/gender-specific-products")
 except Exception as e:
     print(f"ERROR loading Gender-Specific Products Migration: {type(e).__name__}: {e}")
     import traceback
@@ -226,11 +186,20 @@ try:
     from app.migrations.convert_to_gender_specific import router as gender_conversion_router
     app.include_router(gender_conversion_router)
     print("Full Gender Conversion Migration endpoints registered successfully")
-    print("  - POST /api/v1/migrations/run/convert-to-gender-specific")
-    print("  - GET /api/v1/migrations/preview/convert-to-gender-specific")
-    print("  - GET /api/v1/migrations/status/gender-catalog")
 except Exception as e:
     print(f"ERROR loading Gender Conversion Migration: {type(e).__name__}: {e}")
+    import traceback
+    traceback.print_exc()
+
+# ===== GENDER-SPECIFIC CLEANUP MIGRATION (v3.38.0) =====
+try:
+    from app.migrations.cleanup_gender_specific import router as gender_cleanup_router
+    app.include_router(gender_cleanup_router)
+    print("Gender-Specific Cleanup Migration endpoints registered successfully")
+    print("  - POST /api/v1/migrations/run/cleanup-gender-specific")
+    print("  - GET /api/v1/migrations/status/gender-specific-cleanup")
+except Exception as e:
+    print(f"ERROR loading Gender-Specific Cleanup Migration: {type(e).__name__}: {e}")
     import traceback
     traceback.print_exc()
 
@@ -309,34 +278,15 @@ def debug_routes():
                 "methods": list(route.methods) if hasattr(route, 'methods') else None
             })
     
-    # Filter for bloodwork routes
     bloodwork_routes = [r for r in routes if 'bloodwork' in r['path'].lower()]
-    
-    # Filter for brain routes
     brain_routes = [r for r in routes if 'brain' in r['path'].lower()]
-    
-    # Filter for health routes
     health_routes = [r for r in routes if 'health' in r['path'].lower()]
-    
-    # Filter for shopify routes
     shopify_routes = [r for r in routes if 'shopify' in r['path'].lower()]
-    
-    # Filter for launch/tier routes
     launch_routes = [r for r in routes if 'launch' in r['path'].lower() or 'tier' in r['path'].lower()]
-    
-    # Filter for webhook routes
     webhook_routes = [r for r in routes if 'webhook' in r['path'].lower()]
-    
-    # Filter for catalog routes
     catalog_routes = [r for r in routes if 'catalog' in r['path'].lower()]
-    
-    # Filter for constraint routes
     constraint_routes = [r for r in routes if 'constraint' in r['path'].lower()]
-    
-    # Filter for wiring routes
     wiring_routes = [r for r in routes if 'wiring' in r['path'].lower()]
-    
-    # Filter for migration routes
     migration_routes = [r for r in routes if 'migration' in r['path'].lower()]
     
     return {
