@@ -1,6 +1,15 @@
 """
-GenoMAX2 API Server Entry Point v3.36.0
-Gender-Specific Products Migration
+GenoMAX2 API Server Entry Point v3.37.0
+Full Catalog Gender Conversion
+
+v3.37.0:
+- NEW: Full Gender Conversion Migration (app/migrations/convert_to_gender_specific.py)
+- POST /api/v1/migrations/run/convert-to-gender-specific - Convert all products
+- GET /api/v1/migrations/preview/convert-to-gender-specific - Preview conversion
+- GET /api/v1/migrations/status/gender-catalog - Check gender catalog status
+- Converts 65 GX-* products to 130 GMAX-M-*/GMAX-F-* pairs
+- Every TIER 1/2 product now available as MAXimo² AND MAXima²
+- Gender-specific descriptions for male/female optimization
 
 v3.36.0:
 - NEW: Gender-Specific Products Migration (app/migrations/add_gender_specific_products.py)
@@ -48,55 +57,6 @@ v3.32.0:
 - 24 constraint mappings covering iron, potassium, iodine, hepatic, renal,
   methylation, thyroid, cardiovascular, and more
 - QA matrix endpoint for full scenario validation
-
-v3.31.2:
-- Fix migrations_router typo in app.include_router()
-- Ensure catalog_products migration endpoint loads properly
-
-v3.31.1:
-- Add catalog_products migration endpoint for TIER 1/2 catalog import
-
-v3.31.0:
-- New app/webhooks module with Junction (Vital) and Lab Testing API integration
-- HMAC-SHA256 signature verification for Junction webhooks
-- API key verification for Lab Testing API webhooks
-- Biomarker code normalization (36 mappings)
-- Unit conversion (nmol/L, pmol/L, umol/L, mmol/L)
-- Automatic orchestrate/v2 triggering on lab results
-
-v3.30.1:
-- Fix safety gate counting in API endpoints (31 gates: 14/6/11 by tier)
-- Bloodwork Engine v2.0.1 with correct get_safety_gate_summary()
-
-v3.30.0:
-- Supliful catalog integration with 185+ products
-- MAXimo² (male) and MAXima² (female) product lines
-- Append-only governance for catalog entries
-- Biomarker-to-product recommendation engine
-- Safety gate validation for product selection
-
-v3.29.0:
-- Add webhook endpoints for lab result notifications
-- POST /api/v1/webhooks/vital - Junction (Vital) webhook receiver
-- POST /api/v1/webhooks/labtestingapi - Lab Testing API webhook receiver
-- GET /api/v1/webhooks/status - Webhook configuration status
-- POST /api/v1/webhooks/test - Test webhook processing
-
-v3.28.0:
-- Bloodwork Engine upgraded to v2.0 (40 markers, 31 safety gates)
-- Auto-migration runner on startup
-- OCR parser service for blood test uploads
-- Lab adapter interface for API integrations
-- Safety routing service for ingredient filtering
-- Health check endpoints for deployment verification
-
-v3.27.0:
-- Add Launch v1 enforcement router
-- GET /api/v1/qa/launch-v1/pairing - Environment pairing validation
-- GET /api/v1/launch-v1/export/design - Excel export with LAUNCH_V1_SUMMARY
-- GET /api/v1/launch-v1/products - List Launch v1 products
-- Shopify endpoints now enforce is_launch_v1 = TRUE
-- All external pipelines use HARD GUARDRAIL filter
 
 Use this file for Railway deployment:
   uvicorn main:app --host 0.0.0.0 --port $PORT
@@ -258,6 +218,19 @@ try:
     print("  - GET /api/v1/migrations/preview/gender-specific-products")
 except Exception as e:
     print(f"ERROR loading Gender-Specific Products Migration: {type(e).__name__}: {e}")
+    import traceback
+    traceback.print_exc()
+
+# ===== FULL GENDER CONVERSION MIGRATION (v3.37.0) =====
+try:
+    from app.migrations.convert_to_gender_specific import router as gender_conversion_router
+    app.include_router(gender_conversion_router)
+    print("Full Gender Conversion Migration endpoints registered successfully")
+    print("  - POST /api/v1/migrations/run/convert-to-gender-specific")
+    print("  - GET /api/v1/migrations/preview/convert-to-gender-specific")
+    print("  - GET /api/v1/migrations/status/gender-catalog")
+except Exception as e:
+    print(f"ERROR loading Gender Conversion Migration: {type(e).__name__}: {e}")
     import traceback
     traceback.print_exc()
 
