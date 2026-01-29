@@ -33,6 +33,202 @@ def get_db():
 
 
 # =============================================================================
+# MIGRATION 015: Remove Legacy GX-* Products (Duplicate Cleanup)
+# =============================================================================
+
+@router.post("/run/015-remove-legacy-gx")
+def run_migration_015() -> Dict[str, Any]:
+    """
+    Run migration 015: Remove legacy GX-* products from catalog_products.
+    
+    REASON: Migration v2.0.2 converted 65 legacy GX-* products to 130 gender-specific
+    GMAX-M-*/GMAX-F-* pairs but failed to DELETE the original GX-* entries.
+    
+    Current state: 216 products (76 GMAX-M + 73 GMAX-F + 2 GMAX-U + 65 GX legacy)
+    Target state: 151 products (76 GMAX-M + 73 GMAX-F + 2 GMAX-U)
+    
+    Products to remove: All where gx_catalog_id LIKE 'GX-%'
+    
+    Safe to run multiple times (idempotent - only deletes if GX-* exists).
+    """
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    results = []
+    
+    try:
+        cur = conn.cursor()
+        
+        # Step 1: Count current state
+        cur.execute("""
+            SELECT 
+                COUNT(*) FILTER (WHERE gx_catalog_id LIKE 'GX-%') AS legacy_count,
+                COUNT(*) FILTER (WHERE gx_catalog_id LIKE 'GMAX-M-%') AS maximo_count,
+                COUNT(*) FILTER (WHERE gx_catalog_id LIKE 'GMAX-F-%') AS maxima_count,
+                COUNT(*) FILTER (WHERE gx_catalog_id LIKE 'GMAX-U-%') AS universal_count,
+                COUNT(*) AS total_count
+            FROM catalog_products
+        """)
+        before_counts = dict(cur.fetchone())
+        results.append(f"Before: {before_counts}")
+        
+        if before_counts['legacy_count'] == 0:
+            conn.close()
+            return {
+                "status": "skipped",
+                "migration": "015-remove-legacy-gx",
+                "reason": "No legacy GX-* products found - already cleaned",
+                "counts": before_counts
+            }
+        
+        # Step 2: Get list of SKUs to delete for audit
+        cur.execute("""
+            SELECT gx_catalog_id, product_name, evidence_tier, sex_target
+            FROM catalog_products
+            WHERE gx_catalog_id LIKE 'GX-%'
+            ORDER BY gx_catalog_id
+        """)
+        legacy_products = [dict(r) for r in cur.fetchall()]
+        results.append(f"Found {len(legacy_products)} legacy products to remove")
+        
+        # Step 3: Create audit table if not exists
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS catalog_cleanup_audit (
+                id SERIAL PRIMARY KEY,
+                migration_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                sku TEXT NOT NULL,
+                product_name TEXT,
+                evidence_tier TEXT,
+                sex_target TEXT,
+                deleted_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """)
+        results.append("Created/verified catalog_cleanup_audit table")
+        
+        # Step 4: Log deletions to audit table
+        for prod in legacy_products:
+            cur.execute("""
+                INSERT INTO catalog_cleanup_audit 
+                (migration_id, action, sku, product_name, evidence_tier, sex_target)
+                VALUES (%s, %s, %s, %s, %s, %s)
+            """, (
+                '015-remove-legacy-gx',
+                'DELETE_DUPLICATE',
+                prod['gx_catalog_id'],
+                prod['product_name'],
+                prod['evidence_tier'],
+                prod['sex_target']
+            ))
+        results.append(f"Logged {len(legacy_products)} deletions to audit table")
+        
+        # Step 5: Delete legacy products
+        cur.execute("""
+            DELETE FROM catalog_products
+            WHERE gx_catalog_id LIKE 'GX-%'
+            RETURNING gx_catalog_id
+        """)
+        deleted_skus = [r['gx_catalog_id'] for r in cur.fetchall()]
+        results.append(f"Deleted {len(deleted_skus)} legacy products")
+        
+        # Step 6: Verify final state
+        cur.execute("""
+            SELECT 
+                COUNT(*) FILTER (WHERE gx_catalog_id LIKE 'GX-%') AS legacy_count,
+                COUNT(*) FILTER (WHERE gx_catalog_id LIKE 'GMAX-M-%') AS maximo_count,
+                COUNT(*) FILTER (WHERE gx_catalog_id LIKE 'GMAX-F-%') AS maxima_count,
+                COUNT(*) FILTER (WHERE gx_catalog_id LIKE 'GMAX-U-%') AS universal_count,
+                COUNT(*) AS total_count
+            FROM catalog_products
+        """)
+        after_counts = dict(cur.fetchone())
+        results.append(f"After: {after_counts}")
+        
+        conn.commit()
+        cur.close()
+        conn.close()
+        
+        return {
+            "status": "success",
+            "migration": "015-remove-legacy-gx",
+            "before": before_counts,
+            "after": after_counts,
+            "deleted_count": len(deleted_skus),
+            "deleted_skus_sample": deleted_skus[:10],
+            "steps": results
+        }
+        
+    except Exception as e:
+        try:
+            conn.rollback()
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Migration error: {str(e)}")
+
+
+@router.get("/status/015-remove-legacy-gx")
+def check_migration_015() -> Dict[str, Any]:
+    """Check if migration 015 has been applied."""
+    conn = get_db()
+    if not conn:
+        raise HTTPException(status_code=500, detail="Database connection failed")
+    
+    try:
+        cur = conn.cursor()
+        
+        # Check current counts
+        cur.execute("""
+            SELECT 
+                COUNT(*) FILTER (WHERE gx_catalog_id LIKE 'GX-%') AS legacy_count,
+                COUNT(*) FILTER (WHERE gx_catalog_id LIKE 'GMAX-M-%') AS maximo_count,
+                COUNT(*) FILTER (WHERE gx_catalog_id LIKE 'GMAX-F-%') AS maxima_count,
+                COUNT(*) FILTER (WHERE gx_catalog_id LIKE 'GMAX-U-%') AS universal_count,
+                COUNT(*) AS total_count
+            FROM catalog_products
+        """)
+        counts = dict(cur.fetchone())
+        
+        # Check audit table
+        cur.execute("""
+            SELECT 1 FROM information_schema.tables
+            WHERE table_name = 'catalog_cleanup_audit'
+        """)
+        audit_exists = cur.fetchone() is not None
+        
+        audit_count = 0
+        if audit_exists:
+            cur.execute("""
+                SELECT COUNT(*) as count FROM catalog_cleanup_audit
+                WHERE migration_id = '015-remove-legacy-gx'
+            """)
+            audit_count = cur.fetchone()['count']
+        
+        cur.close()
+        conn.close()
+        
+        # Migration is applied if no legacy products exist
+        applied = counts['legacy_count'] == 0 and audit_count > 0
+        
+        return {
+            "migration": "015-remove-legacy-gx",
+            "applied": applied,
+            "current_counts": counts,
+            "audit_entries": audit_count,
+            "expected_total": 151,
+            "note": "Applied when legacy_count = 0 and audit entries exist"
+        }
+        
+    except Exception as e:
+        try:
+            conn.close()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Check error: {str(e)}")
+
+
+# =============================================================================
 # MIGRATION 014: Suspend DIG-NATURA modules
 # =============================================================================
 
