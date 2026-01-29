@@ -1,6 +1,14 @@
 """
-GenoMAX2 API Server Entry Point v3.35.0
-Methylation Products Migration (Issue #17)
+GenoMAX2 API Server Entry Point v3.36.0
+Gender-Specific Products Migration
+
+v3.36.0:
+- NEW: Gender-Specific Products Migration (app/migrations/add_gender_specific_products.py)
+- POST /api/v1/migrations/run/add-gender-specific-products - Add MAXimo²/MAXima²/Universal products
+- GET /api/v1/migrations/status/gender-specific-products - Check GMAX-* product status
+- GET /api/v1/migrations/preview/gender-specific-products - Preview migration
+- Adds 18 new products (10 MAXimo², 8 MAXima², 2 Universal)
+- Enables deterministic gender-aware routing in Brain Pipeline
 
 v3.35.0:
 - NEW: Methylation Products Migration (app/migrations/add_methylation_products.py)
@@ -237,6 +245,19 @@ try:
     print("  - GET /api/v1/migrations/status/methylation-products")
 except Exception as e:
     print(f"ERROR loading Methylation Products Migration: {type(e).__name__}: {e}")
+    import traceback
+    traceback.print_exc()
+
+# ===== GENDER-SPECIFIC PRODUCTS MIGRATION (v3.36.0) =====
+try:
+    from app.migrations.add_gender_specific_products import router as gender_products_router
+    app.include_router(gender_products_router)
+    print("Gender-Specific Products Migration endpoints registered successfully")
+    print("  - POST /api/v1/migrations/run/add-gender-specific-products")
+    print("  - GET /api/v1/migrations/status/gender-specific-products")
+    print("  - GET /api/v1/migrations/preview/gender-specific-products")
+except Exception as e:
+    print(f"ERROR loading Gender-Specific Products Migration: {type(e).__name__}: {e}")
     import traceback
     traceback.print_exc()
 
