@@ -2,8 +2,8 @@
 GenoMAX² Full Catalog Gender Conversion Migration
 Converts all GX-* products to GMAX-M-*/GMAX-F-* gender-specific pairs
 
-Version: 2.0.1
-Fixed: JSON ingredient_tags handling for PostgreSQL
+Version: 2.0.2
+Fixed: Properly handle psycopg2 JSONB returns (they come as lists)
 Converts: 65 GX-* products -> 130 GMAX-* products (M+F pairs)
 Result: Every product available as MAXimo² and MAXima²
 """
@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException
 from datetime import datetime
 import os
 import psycopg2
-from psycopg2.extras import RealDictCursor
+from psycopg2.extras import RealDictCursor, Json
 import json
 
 router = APIRouter(prefix="/api/v1/migrations", tags=["Migrations"])
@@ -40,7 +40,7 @@ SKU_MAPPING = {
     'GX-T1-006': ('VIT-C-SER', 'Male-optimized vitamin C serum for skin health', 'Female-optimized vitamin C serum for brightening and anti-aging'),
     'GX-T1-007': ('BERBERINE', 'Male-optimized berberine for blood sugar and metabolic health', 'Female-optimized berberine for blood sugar, PCOS, and metabolic support'),
     'GX-T1-008': ('PROB-20B', 'Male-optimized 20 billion CFU probiotic for gut health', 'Female-optimized 20 billion CFU probiotic for gut and vaginal health'),
-    'GX-T1-009': ('IRON-STR', 'Male-dosed iron strips - lower dose for male needs', 'Female-dosed iron strips - optimized for menstrual support'),
+    'GX-T1-009': ('IRON-STR', 'Male-dosed iron strips for lower male iron needs', 'Female-dosed iron strips optimized for menstrual support'),
     'GX-T1-010': ('MULTI', 'Male-optimized complete multivitamin with prostate support', 'Female-optimized complete multivitamin with iron and folate'),
     'GX-T1-011': ('OMEGA3', 'Male-optimized omega-3 for cardiovascular and brain health', 'Female-optimized omega-3 for heart, brain, and skin'),
     'GX-T1-012': ('VD3K2', 'Male-optimized vitamin D3+K2 for testosterone and bone health', 'Female-optimized vitamin D3+K2 for bone density and mood'),
@@ -69,7 +69,7 @@ SKU_MAPPING = {
     'GX-T2-016': ('RESVERATROL', 'Male-optimized resveratrol for longevity and heart', 'Female-optimized resveratrol for anti-aging and heart'),
     'GX-T2-017': ('QUERCETIN', 'Male-optimized quercetin for inflammation and allergies', 'Female-optimized quercetin for inflammation and histamine'),
     'GX-T2-018': ('GREEN-TEA', 'Male-optimized green tea extract for metabolism', 'Female-optimized green tea extract for metabolism and antioxidants'),
-    'GX-T2-019': ('LUTEIN', 'Male-optimized lutein + zeaxanthin for eye health', 'Female-optimized lutein + zeaxanthin for vision'),
+    'GX-T2-019': ('LUTEIN', 'Male-optimized lutein zeaxanthin for eye health', 'Female-optimized lutein zeaxanthin for vision'),
     'GX-T2-020': ('L-CARNITINE', 'Male-optimized L-carnitine for fat burning and energy', 'Female-optimized L-carnitine for metabolism and energy'),
     'GX-T2-021': ('TAURINE', 'Male-optimized taurine for heart and athletic performance', 'Female-optimized taurine for heart and stress'),
     'GX-T2-022': ('GLYCINE', 'Male-optimized glycine for sleep and collagen', 'Female-optimized glycine for sleep and skin'),
@@ -89,7 +89,7 @@ SKU_MAPPING = {
     'GX-T2-036': ('GREENS', 'Male-optimized greens superfood for nutrition', 'Female-optimized greens superfood for nutrition and beauty'),
     'GX-T2-037': ('MUSH-COFFEE', 'Male-optimized mushroom coffee for focus', 'Female-optimized mushroom coffee for calm focus'),
     'GX-T2-038': ('MATCHA', 'Male-optimized matcha for energy and antioxidants', 'Female-optimized matcha for metabolism and calm energy'),
-    'GX-T2-039': ('HA-SERUM', 'Male-optimized hyaluronic acid for skin hydration', 'Female-optimized hyaluronic acid for plump, hydrated skin'),
+    'GX-T2-039': ('HA-SERUM', 'Male-optimized hyaluronic acid for skin hydration', 'Female-optimized hyaluronic acid for plump hydrated skin'),
     'GX-T2-040': ('BIOTIN', 'Male-optimized biotin for hair and nail health', 'Female-optimized biotin for hair growth and nail strength'),
     'GX-T2-041': ('FENUGREEK', 'Male-optimized fenugreek for testosterone support', 'Female-optimized fenugreek for lactation and hormones'),
     'GX-T2-042': ('GINSENG', 'Male-optimized panax ginseng for energy and vitality', 'Female-optimized panax ginseng for energy and balance'),
@@ -120,30 +120,6 @@ def get_tier_from_sku(old_sku):
     return 'TIER_2'
 
 
-def normalize_ingredient_tags(tags):
-    """Convert ingredient_tags to proper JSON format."""
-    if tags is None:
-        return '[]'
-    if isinstance(tags, list):
-        return json.dumps(tags)
-    if isinstance(tags, str):
-        # Handle Python array syntax like "['collagen']"
-        try:
-            # Try parsing as JSON first
-            json.loads(tags)
-            return tags
-        except json.JSONDecodeError:
-            # Convert Python syntax to JSON
-            try:
-                # Use ast.literal_eval for Python literals
-                import ast
-                parsed = ast.literal_eval(tags)
-                return json.dumps(parsed)
-            except:
-                return '[]'
-    return '[]'
-
-
 @router.post("/run/convert-to-gender-specific")
 def run_gender_conversion():
     """Convert all GX-* products to GMAX-M-*/GMAX-F-* gender-specific pairs."""
@@ -165,11 +141,19 @@ def run_gender_conversion():
             
             tier = get_tier_from_sku(old_sku)
             base_name = original['product_name']
-            base_price = original.get('base_price', 29.99)
-            category = original.get('category', 'Specialty Supplements')
-            ingredient_tags = normalize_ingredient_tags(original.get('ingredient_tags'))
+            base_price = original.get('base_price') or 29.99
+            category = original.get('category') or 'Specialty Supplements'
             
-            # Create MAXimo² (male) version
+            # Handle ingredient_tags - psycopg2 returns JSONB as Python list
+            raw_tags = original.get('ingredient_tags')
+            if raw_tags is None:
+                ingredient_tags = []
+            elif isinstance(raw_tags, list):
+                ingredient_tags = raw_tags
+            else:
+                ingredient_tags = []
+            
+            # Create MAXimo² (male) version using psycopg2.extras.Json for proper JSONB handling
             male_sku = f"GMAX-M-{new_code}"
             male_name = f"MAXimo² {base_name}"
             
@@ -179,7 +163,7 @@ def run_gender_conversion():
                     short_description, base_price, evidence_tier,
                     governance_status, ingredient_tags, sex_target
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, 'ACTIVE', %s::jsonb, 'male')
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 'ACTIVE', %s, 'male')
                 ON CONFLICT (gx_catalog_id) DO UPDATE SET
                     product_name = EXCLUDED.product_name,
                     short_description = EXCLUDED.short_description,
@@ -193,7 +177,7 @@ def run_gender_conversion():
                 male_desc,
                 base_price,
                 tier,
-                ingredient_tags
+                Json(ingredient_tags)  # Use psycopg2.extras.Json for proper JSONB
             ))
             result = cur.fetchone()
             if result and result['inserted']:
@@ -211,7 +195,7 @@ def run_gender_conversion():
                     short_description, base_price, evidence_tier,
                     governance_status, ingredient_tags, sex_target
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, 'ACTIVE', %s::jsonb, 'female')
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 'ACTIVE', %s, 'female')
                 ON CONFLICT (gx_catalog_id) DO UPDATE SET
                     product_name = EXCLUDED.product_name,
                     short_description = EXCLUDED.short_description,
@@ -225,7 +209,7 @@ def run_gender_conversion():
                 female_desc,
                 base_price,
                 tier,
-                ingredient_tags
+                Json(ingredient_tags)  # Use psycopg2.extras.Json for proper JSONB
             ))
             result = cur.fetchone()
             if result and result['inserted']:
@@ -254,7 +238,7 @@ def run_gender_conversion():
         return {
             "status": "success",
             "message": "Gender-specific catalog conversion completed",
-            "migration_version": "2.0.1",
+            "migration_version": "2.0.2",
             "changes": {
                 "maximo_inserted": inserted_male,
                 "maxima_inserted": inserted_female,
@@ -302,7 +286,7 @@ def preview_gender_conversion():
     
     return {
         "migration": "convert-to-gender-specific",
-        "version": "2.0.1",
+        "version": "2.0.2",
         "summary": {
             "source_products": len(SKU_MAPPING),
             "new_maximo_products": len(SKU_MAPPING),
