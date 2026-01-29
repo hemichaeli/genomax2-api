@@ -2,7 +2,8 @@
 GenoMAX² Full Catalog Gender Conversion Migration
 Converts all GX-* products to GMAX-M-*/GMAX-F-* gender-specific pairs
 
-Version: 2.0.0
+Version: 2.0.1
+Fixed: JSON ingredient_tags handling for PostgreSQL
 Converts: 65 GX-* products -> 130 GMAX-* products (M+F pairs)
 Result: Every product available as MAXimo² and MAXima²
 """
@@ -12,6 +13,7 @@ from datetime import datetime
 import os
 import psycopg2
 from psycopg2.extras import RealDictCursor
+import json
 
 router = APIRouter(prefix="/api/v1/migrations", tags=["Migrations"])
 
@@ -51,7 +53,7 @@ SKU_MAPPING = {
     # TIER 2 Products (48)
     'GX-T2-001': ('DIGEST-ENZ', 'Male-optimized digestive enzyme blend', 'Female-optimized digestive enzyme blend'),
     'GX-T2-002': ('MUSHROOM', 'Male-optimized mushroom extract complex for immunity', 'Female-optimized mushroom extract complex for immunity'),
-    'GX-T2-003': ('LIONS-MANE', 'Male-optimized lion\'s mane for cognitive focus', 'Female-optimized lion\'s mane for cognitive clarity'),
+    'GX-T2-003': ('LIONS-MANE', 'Male-optimized lions mane for cognitive focus', 'Female-optimized lions mane for cognitive clarity'),
     'GX-T2-004': ('REISHI', 'Male-optimized reishi for calm and immune support', 'Female-optimized reishi for stress and immune balance'),
     'GX-T2-005': ('CORDYCEPS', 'Male-optimized cordyceps for energy and athletic performance', 'Female-optimized cordyceps for energy and stamina'),
     'GX-T2-006': ('COLLAGEN-PEP', 'Male-optimized collagen peptides for joints and recovery', 'Female-optimized collagen peptides for skin and hair'),
@@ -118,6 +120,30 @@ def get_tier_from_sku(old_sku):
     return 'TIER_2'
 
 
+def normalize_ingredient_tags(tags):
+    """Convert ingredient_tags to proper JSON format."""
+    if tags is None:
+        return '[]'
+    if isinstance(tags, list):
+        return json.dumps(tags)
+    if isinstance(tags, str):
+        # Handle Python array syntax like "['collagen']"
+        try:
+            # Try parsing as JSON first
+            json.loads(tags)
+            return tags
+        except json.JSONDecodeError:
+            # Convert Python syntax to JSON
+            try:
+                # Use ast.literal_eval for Python literals
+                import ast
+                parsed = ast.literal_eval(tags)
+                return json.dumps(parsed)
+            except:
+                return '[]'
+    return '[]'
+
+
 @router.post("/run/convert-to-gender-specific")
 def run_gender_conversion():
     """Convert all GX-* products to GMAX-M-*/GMAX-F-* gender-specific pairs."""
@@ -141,7 +167,7 @@ def run_gender_conversion():
             base_name = original['product_name']
             base_price = original.get('base_price', 29.99)
             category = original.get('category', 'Specialty Supplements')
-            ingredient_tags = original.get('ingredient_tags', '[]')
+            ingredient_tags = normalize_ingredient_tags(original.get('ingredient_tags'))
             
             # Create MAXimo² (male) version
             male_sku = f"GMAX-M-{new_code}"
@@ -153,7 +179,7 @@ def run_gender_conversion():
                     short_description, base_price, evidence_tier,
                     governance_status, ingredient_tags, sex_target
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, 'ACTIVE', %s, 'male')
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 'ACTIVE', %s::jsonb, 'male')
                 ON CONFLICT (gx_catalog_id) DO UPDATE SET
                     product_name = EXCLUDED.product_name,
                     short_description = EXCLUDED.short_description,
@@ -167,7 +193,7 @@ def run_gender_conversion():
                 male_desc,
                 base_price,
                 tier,
-                ingredient_tags if isinstance(ingredient_tags, str) else str(ingredient_tags)
+                ingredient_tags
             ))
             result = cur.fetchone()
             if result and result['inserted']:
@@ -185,7 +211,7 @@ def run_gender_conversion():
                     short_description, base_price, evidence_tier,
                     governance_status, ingredient_tags, sex_target
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, 'ACTIVE', %s, 'female')
+                VALUES (%s, %s, %s, %s, %s, %s, %s, 'ACTIVE', %s::jsonb, 'female')
                 ON CONFLICT (gx_catalog_id) DO UPDATE SET
                     product_name = EXCLUDED.product_name,
                     short_description = EXCLUDED.short_description,
@@ -199,7 +225,7 @@ def run_gender_conversion():
                 female_desc,
                 base_price,
                 tier,
-                ingredient_tags if isinstance(ingredient_tags, str) else str(ingredient_tags)
+                ingredient_tags
             ))
             result = cur.fetchone()
             if result and result['inserted']:
@@ -228,7 +254,7 @@ def run_gender_conversion():
         return {
             "status": "success",
             "message": "Gender-specific catalog conversion completed",
-            "migration_version": "2.0.0",
+            "migration_version": "2.0.1",
             "changes": {
                 "maximo_inserted": inserted_male,
                 "maxima_inserted": inserted_female,
@@ -276,7 +302,7 @@ def preview_gender_conversion():
     
     return {
         "migration": "convert-to-gender-specific",
-        "version": "2.0.0",
+        "version": "2.0.1",
         "summary": {
             "source_products": len(SKU_MAPPING),
             "new_maximo_products": len(SKU_MAPPING),
