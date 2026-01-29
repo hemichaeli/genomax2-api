@@ -1,6 +1,14 @@
 """
-GenoMAX2 API Server Entry Point v3.34.0
-Brain Pipeline Integration (Issue #16)
+GenoMAX2 API Server Entry Point v3.35.0
+Methylation Products Migration (Issue #17)
+
+v3.35.0:
+- NEW: Methylation Products Migration (app/migrations/add_methylation_products.py)
+- POST /api/v1/migrations/run/add-methylation-products - Add methylation modules
+- GET /api/v1/migrations/status/methylation-products - Check methylation status
+- GMAX-M-METH-B (MAXimo² Methylation Support) for male users
+- GMAX-F-METH-B (MAXima² Methylation Support) for female users
+- Fixes FLAG_METHYLATION_SUPPORT having no fulfillable modules
 
 v3.34.0:
 - NEW: Brain Orchestrator module (bloodwork_engine/brain_orchestrator.py)
@@ -220,6 +228,18 @@ except Exception as e:
     import traceback
     traceback.print_exc()
 
+# ===== METHYLATION PRODUCTS MIGRATION (v3.35.0 - Issue #17) =====
+try:
+    from app.migrations.add_methylation_products import router as methylation_migration_router
+    app.include_router(methylation_migration_router)
+    print("Methylation Products Migration endpoints registered successfully")
+    print("  - POST /api/v1/migrations/run/add-methylation-products")
+    print("  - GET /api/v1/migrations/status/methylation-products")
+except Exception as e:
+    print(f"ERROR loading Methylation Products Migration: {type(e).__name__}: {e}")
+    import traceback
+    traceback.print_exc()
+
 # ===== CATALOG WIRING (v3.33.0 - Issue #15) =====
 try:
     from app.catalog.wiring_endpoints import router as catalog_wiring_router
@@ -322,6 +342,9 @@ def debug_routes():
     # Filter for wiring routes
     wiring_routes = [r for r in routes if 'wiring' in r['path'].lower()]
     
+    # Filter for migration routes
+    migration_routes = [r for r in routes if 'migration' in r['path'].lower()]
+    
     return {
         "total_routes": len(routes),
         "bloodwork_routes": bloodwork_routes,
@@ -330,6 +353,7 @@ def debug_routes():
         "catalog_routes": catalog_routes,
         "wiring_routes": wiring_routes,
         "constraint_routes": constraint_routes,
+        "migration_routes": migration_routes,
         "health_routes": health_routes,
         "shopify_routes": shopify_routes,
         "launch_routes": launch_routes,
