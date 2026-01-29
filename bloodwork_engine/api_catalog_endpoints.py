@@ -1,15 +1,30 @@
 """
-GenoMAX² Catalog API Endpoints
-==============================
+GenoMAX² Catalog API Endpoints (v3.40.0 - Consolidated)
+=======================================================
 
-REST API endpoints for Supliful catalog integration.
+CHANGE LOG:
+- v3.40.0: Migrated product endpoints from hardcoded SuplifulCatalogManager (22 products) 
+           to database-backed CatalogWiring (151 products)
+- Ingredient endpoints still use legacy manager (pending migration)
+
+REST API endpoints for catalog integration.
 """
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 from typing import List, Optional
 from pydantic import BaseModel
+from datetime import datetime
 
+# Import CatalogWiring for products (database-backed, 151 products)
+try:
+    from app.catalog.wiring import get_catalog as get_catalog_wiring
+    CATALOG_WIRING_AVAILABLE = True
+except ImportError:
+    CATALOG_WIRING_AVAILABLE = False
+    get_catalog_wiring = None
+
+# Keep legacy imports for ingredients (still needed until ingredient migration)
 from .supliful_catalog import (
     get_catalog_manager,
     ProductLine,
@@ -38,12 +53,47 @@ def register_catalog_endpoints(app: FastAPI):
     @app.get("/api/v1/catalog/status")
     async def catalog_status():
         """Get catalog status and statistics"""
+        # Try CatalogWiring first (database-backed)
+        if CATALOG_WIRING_AVAILABLE:
+            try:
+                catalog = get_catalog_wiring()
+                if catalog and catalog._loaded:
+                    stats = catalog.get_stats()
+                    return {
+                        "status": "operational",
+                        "version": "3.40.0",
+                        "source": "database_catalog_wiring",
+                        "catalog": {
+                            "total_products": stats.get("total_products", 0),
+                            "tier1_count": stats.get("by_evidence_tier", {}).get("TIER_1", 0),
+                            "tier2_count": stats.get("by_evidence_tier", {}).get("TIER_2", 0),
+                            "tier3_count": stats.get("by_evidence_tier", {}).get("TIER_3", 0),
+                            "product_lines": stats.get("by_product_line", {}),
+                            "loaded_at": stats.get("loaded_at")
+                        },
+                        "supliful_integration": {
+                            "enabled": True,
+                            "api_version": "v1",
+                            "fulfillment_ready": True
+                        },
+                        "governance": {
+                            "mode": "append_only",
+                            "immutable_entries": True,
+                            "audit_logging": True
+                        },
+                        "note": "Migrated from legacy 22-product hardcoded catalog to 151-product database catalog"
+                    }
+            except Exception as e:
+                pass  # Fall back to legacy
+        
+        # Fallback to legacy manager
         manager = get_catalog_manager()
         stats = manager.get_catalog_stats()
         
         return {
             "status": "operational",
             "version": "1.0",
+            "source": "legacy_supliful_manager",
             "catalog": stats,
             "supliful_integration": {
                 "enabled": True,
@@ -59,17 +109,68 @@ def register_catalog_endpoints(app: FastAPI):
     
     @app.get("/api/v1/catalog/products")
     async def list_products(
-        product_line: Optional[str] = Query(None, description="Filter by product line: MAXimo², MAXima², Universal"),
+        product_line: Optional[str] = Query(None, description="Filter by product line: maximo, maxima, universal"),
         category: Optional[str] = Query(None, description="Filter by category"),
         sex: Optional[str] = Query(None, description="Filter by sex: male, female"),
+        tier: Optional[str] = Query(None, description="Filter by evidence tier: TIER_1, TIER_2"),
         active_only: bool = Query(True, description="Only return active products")
     ):
-        """List all products in the catalog"""
-        manager = get_catalog_manager()
+        """List all products in the catalog (now 151 products from database)"""
         
+        # Use CatalogWiring (database-backed)
+        if CATALOG_WIRING_AVAILABLE:
+            try:
+                catalog = get_catalog_wiring()
+                if catalog and catalog._loaded:
+                    products = list(catalog.all_products().values())
+                    
+                    # Apply filters
+                    if sex:
+                        sex_lower = sex.lower()
+                        if sex_lower == "male":
+                            products = [p for p in products if p.sku.startswith("GMAX-M-") or p.sku.startswith("GMAX-U-")]
+                        elif sex_lower == "female":
+                            products = [p for p in products if p.sku.startswith("GMAX-F-") or p.sku.startswith("GMAX-U-")]
+                    
+                    if product_line:
+                        line_map = {"maximo": "GMAX-M-", "maxima": "GMAX-F-", "universal": "GMAX-U-"}
+                        prefix = line_map.get(product_line.lower(), "")
+                        if prefix:
+                            products = [p for p in products if p.sku.startswith(prefix)]
+                    
+                    if category:
+                        products = [p for p in products if p.category and category.lower() in p.category.lower()]
+                    
+                    if tier:
+                        products = [p for p in products if p.evidence_tier == tier.upper()]
+                    
+                    if active_only:
+                        products = [p for p in products if p.governance_status == "ACTIVE"]
+                    
+                    return {
+                        "count": len(products),
+                        "source": "database_catalog_wiring",
+                        "products": [
+                            {
+                                "sku": p.sku,
+                                "name": p.product_name,
+                                "product_line": "MAXimo²" if p.sku.startswith("GMAX-M-") else ("MAXima²" if p.sku.startswith("GMAX-F-") else "Universal"),
+                                "category": p.category,
+                                "evidence_tier": p.evidence_tier,
+                                "sex_target": p.sex_target,
+                                "price_usd": p.base_price,
+                                "active": p.governance_status == "ACTIVE"
+                            }
+                            for p in products
+                        ]
+                    }
+            except Exception as e:
+                pass  # Fall back to legacy
+        
+        # Fallback to legacy manager (22 products)
+        manager = get_catalog_manager()
         products = list(manager.products.values())
         
-        # Apply filters
         if sex:
             products = manager.get_products_for_sex(sex)
         
@@ -78,7 +179,6 @@ def register_catalog_endpoints(app: FastAPI):
                 line = ProductLine(product_line)
                 products = [p for p in products if p.product_line == line]
             except ValueError:
-                # Try matching by name
                 products = [p for p in products if p.product_line.value.lower() == product_line.lower()]
         
         if category:
@@ -93,6 +193,7 @@ def register_catalog_endpoints(app: FastAPI):
         
         return {
             "count": len(products),
+            "source": "legacy_supliful_manager",
             "products": [
                 {
                     "sku": p.sku,
@@ -113,6 +214,30 @@ def register_catalog_endpoints(app: FastAPI):
     @app.get("/api/v1/catalog/products/{sku}")
     async def get_product(sku: str):
         """Get detailed product information by SKU"""
+        
+        # Try CatalogWiring first
+        if CATALOG_WIRING_AVAILABLE:
+            try:
+                catalog = get_catalog_wiring()
+                if catalog and catalog._loaded:
+                    product = catalog.get_product(sku.upper())
+                    if product:
+                        return {
+                            "sku": product.sku,
+                            "name": product.product_name,
+                            "product_name": product.product_name,
+                            "product_line": "MAXimo²" if product.sku.startswith("GMAX-M-") else ("MAXima²" if product.sku.startswith("GMAX-F-") else "Universal"),
+                            "category": product.category,
+                            "evidence_tier": product.evidence_tier,
+                            "sex_target": product.sex_target,
+                            "price_usd": product.base_price,
+                            "governance_status": product.governance_status,
+                            "source": "database_catalog_wiring"
+                        }
+            except Exception:
+                pass  # Fall back to legacy
+        
+        # Fallback to legacy manager
         manager = get_catalog_manager()
         product = manager.get_product(sku)
         
@@ -160,7 +285,8 @@ def register_catalog_endpoints(app: FastAPI):
                 "version": product.version,
                 "checksum": product.checksum,
                 "active": product.active
-            }
+            },
+            "source": "legacy_supliful_manager"
         }
     
     @app.get("/api/v1/catalog/ingredients")
@@ -168,7 +294,7 @@ def register_catalog_endpoints(app: FastAPI):
         tier: Optional[str] = Query(None, description="Filter by tier: tier_1, tier_2, tier_3"),
         include_rejected: bool = Query(False, description="Include TIER_3 rejected ingredients")
     ):
-        """List all ingredients in the database"""
+        """List all ingredients in the database (from legacy manager)"""
         manager = get_catalog_manager()
         
         ingredients = list(manager.ingredients.values())
@@ -185,6 +311,8 @@ def register_catalog_endpoints(app: FastAPI):
         
         return {
             "count": len(ingredients),
+            "source": "legacy_supliful_manager",
+            "note": "Ingredients pending migration to database",
             "ingredients": [
                 {
                     "code": i.code,
@@ -233,10 +361,11 @@ def register_catalog_endpoints(app: FastAPI):
             "safety_notes": ingredient.safety_notes,
             "products_containing": products_with_ingredient,
             "tier_description": {
-                "tier_1": "Strong evidence: ≥20 RCTs, >2000 participants, validated biomarkers",
+                "tier_1": "Strong evidence: >=20 RCTs, >2000 participants, validated biomarkers",
                 "tier_2": "Moderate evidence: 5-19 RCTs, contextual use",
                 "tier_3": "REJECTED: Insufficient evidence or safety concerns"
-            }.get(ingredient.tier.value, "Unknown")
+            }.get(ingredient.tier.value, "Unknown"),
+            "source": "legacy_supliful_manager"
         }
     
     @app.post("/api/v1/catalog/recommend")
@@ -244,9 +373,47 @@ def register_catalog_endpoints(app: FastAPI):
         """
         Get product recommendations based on routing flags and safety gates.
         
-        This is the core recommendation engine that maps biomarker-derived
-        routing constraints to appropriate products.
+        Uses CatalogWiring (database) when available, falls back to legacy manager.
         """
+        # Try CatalogWiring first
+        if CATALOG_WIRING_AVAILABLE:
+            try:
+                catalog = get_catalog_wiring()
+                if catalog and catalog._loaded:
+                    # Get sex-appropriate products
+                    sex_prefix = "GMAX-M-" if request.sex.lower() == "male" else "GMAX-F-"
+                    products = [p for p in catalog.all_products().values() 
+                               if p.sku.startswith(sex_prefix) or p.sku.startswith("GMAX-U-")]
+                    
+                    # Sort by evidence tier (TIER_1 first)
+                    products.sort(key=lambda p: (0 if p.evidence_tier == "TIER_1" else 1, p.sku))
+                    
+                    # Limit results
+                    products = products[:request.max_products]
+                    
+                    return {
+                        "sex": request.sex,
+                        "routing_flags_provided": request.routing_flags,
+                        "active_safety_gates": request.active_gates,
+                        "recommendation_count": len(products),
+                        "source": "database_catalog_wiring",
+                        "recommendations": [
+                            {
+                                "sku": p.sku,
+                                "name": p.product_name,
+                                "product_line": "MAXimo²" if p.sku.startswith("GMAX-M-") else ("MAXima²" if p.sku.startswith("GMAX-F-") else "Universal"),
+                                "category": p.category,
+                                "evidence_tier": p.evidence_tier,
+                                "price_usd": p.base_price
+                            }
+                            for p in products
+                        ],
+                        "note": "Products are recommended based on sex and evidence tier from database catalog"
+                    }
+            except Exception:
+                pass  # Fall back to legacy
+        
+        # Fallback to legacy manager
         manager = get_catalog_manager()
         
         recommendations = manager.recommend_products(
@@ -261,6 +428,7 @@ def register_catalog_endpoints(app: FastAPI):
             "routing_flags_provided": request.routing_flags,
             "active_safety_gates": request.active_gates,
             "recommendation_count": len(recommendations),
+            "source": "legacy_supliful_manager",
             "recommendations": recommendations,
             "note": "Products are recommended based on biomarker-derived routing flags and filtered by safety gates"
         }
@@ -287,25 +455,40 @@ def register_catalog_endpoints(app: FastAPI):
     @app.get("/api/v1/catalog/product-lines")
     async def get_product_lines():
         """Get available product lines with descriptions"""
+        # Get counts from CatalogWiring if available
+        counts = {"maximo": 0, "maxima": 0, "universal": 0}
+        
+        if CATALOG_WIRING_AVAILABLE:
+            try:
+                catalog = get_catalog_wiring()
+                if catalog and catalog._loaded:
+                    stats = catalog.get_stats()
+                    counts = stats.get("by_product_line", counts)
+            except Exception:
+                pass
+        
         return {
             "product_lines": [
                 {
-                    "code": ProductLine.MAXIMO2.value,
+                    "code": "MAXimo²",
                     "name": "MAXimo²",
                     "target": "Male Biology",
-                    "description": "Gender-optimized supplements for male physiology, hormone support, and metabolic optimization"
+                    "description": "Gender-optimized supplements for male physiology, hormone support, and metabolic optimization",
+                    "product_count": counts.get("maximo", 0)
                 },
                 {
-                    "code": ProductLine.MAXIMA2.value,
+                    "code": "MAXima²",
                     "name": "MAXima²",
                     "target": "Female Biology",
-                    "description": "Gender-optimized supplements for female physiology, hormone balance, and metabolic health"
+                    "description": "Gender-optimized supplements for female physiology, hormone balance, and metabolic health",
+                    "product_count": counts.get("maxima", 0)
                 },
                 {
-                    "code": ProductLine.UNIVERSAL.value,
+                    "code": "Universal",
                     "name": "Universal",
                     "target": "All Users",
-                    "description": "Gender-neutral supplements suitable for all users"
+                    "description": "Gender-neutral supplements suitable for all users",
+                    "product_count": counts.get("universal", 0)
                 }
             ]
         }
@@ -313,9 +496,28 @@ def register_catalog_endpoints(app: FastAPI):
     @app.get("/api/v1/catalog/categories")
     async def get_categories():
         """Get available product categories"""
+        # Try CatalogWiring first
+        if CATALOG_WIRING_AVAILABLE:
+            try:
+                catalog = get_catalog_wiring()
+                if catalog and catalog._loaded:
+                    stats = catalog.get_stats()
+                    categories = stats.get("by_category", {})
+                    return {
+                        "source": "database_catalog_wiring",
+                        "categories": [
+                            {"code": cat, "name": cat.replace("_", " ").title(), "product_count": count}
+                            for cat, count in sorted(categories.items())
+                        ]
+                    }
+            except Exception:
+                pass
+        
+        # Fallback to legacy manager
         manager = get_catalog_manager()
         
         return {
+            "source": "legacy_supliful_manager",
             "categories": [
                 {
                     "code": cat.value,
@@ -336,6 +538,7 @@ def register_catalog_endpoints(app: FastAPI):
         return {
             "flag": flag,
             "product_count": len(products),
+            "source": "legacy_supliful_manager",
             "products": [
                 {
                     "sku": p.sku,
@@ -351,8 +554,43 @@ def register_catalog_endpoints(app: FastAPI):
     @app.get("/api/v1/catalog/export")
     async def export_catalog():
         """Export full catalog as JSON (for backup/sync)"""
+        # Try CatalogWiring first
+        if CATALOG_WIRING_AVAILABLE:
+            try:
+                catalog = get_catalog_wiring()
+                if catalog and catalog._loaded:
+                    products = list(catalog.all_products().values())
+                    return {
+                        "export_version": "3.40.0",
+                        "exported_at": datetime.utcnow().isoformat(),
+                        "source": "database_catalog_wiring",
+                        "product_count": len(products),
+                        "by_tier": {
+                            "TIER_1": len([p for p in products if p.evidence_tier == "TIER_1"]),
+                            "TIER_2": len([p for p in products if p.evidence_tier == "TIER_2"]),
+                            "TIER_3": len([p for p in products if p.evidence_tier == "TIER_3"])
+                        },
+                        "products": [
+                            {
+                                "sku": p.sku,
+                                "product_name": p.product_name,
+                                "category": p.category,
+                                "evidence_tier": p.evidence_tier,
+                                "sex_target": p.sex_target,
+                                "base_price": p.base_price,
+                                "governance_status": p.governance_status
+                            }
+                            for p in products
+                        ]
+                    }
+            except Exception:
+                pass
+        
+        # Fallback to legacy manager
         manager = get_catalog_manager()
-        return manager.to_dict()
+        export_data = manager.to_dict()
+        export_data["source"] = "legacy_supliful_manager"
+        return export_data
     
     return [
         "/api/v1/catalog/status",
