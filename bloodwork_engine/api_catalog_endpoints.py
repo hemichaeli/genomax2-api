@@ -47,44 +47,58 @@ class ProductSafetyCheckRequest(BaseModel):
     active_gates: List[str]
 
 
+def _get_loaded_catalog():
+    """Helper to get CatalogWiring with auto-load."""
+    if not CATALOG_WIRING_AVAILABLE:
+        return None
+    try:
+        catalog = get_catalog_wiring()
+        if catalog:
+            if not catalog.is_loaded:
+                catalog.load()
+            return catalog if catalog.is_loaded else None
+    except Exception:
+        pass
+    return None
+
+
 def register_catalog_endpoints(app: FastAPI):
     """Register catalog endpoints with the FastAPI app"""
     
     @app.get("/api/v1/catalog/status")
     async def catalog_status():
         """Get catalog status and statistics"""
-        # Try CatalogWiring first (database-backed)
-        if CATALOG_WIRING_AVAILABLE:
+        # Try CatalogWiring first (database-backed) with auto-load
+        catalog = _get_loaded_catalog()
+        if catalog:
             try:
-                catalog = get_catalog_wiring()
-                if catalog and catalog.is_loaded:
-                    stats = catalog._get_stats()
-                    return {
-                        "status": "operational",
-                        "version": "3.40.0",
-                        "source": "database_catalog_wiring",
-                        "catalog": {
-                            "total_products": stats.get("total_products", 0),
-                            "maximo_products": stats.get("maximo_products", 0),
-                            "maxima_products": stats.get("maxima_products", 0),
-                            "universal_products": stats.get("universal_products", 0),
-                            "tier1_count": stats.get("tier1_products", 0),
-                            "tier2_count": stats.get("tier2_products", 0),
-                            "loaded_at": stats.get("loaded_at")
-                        },
-                        "supliful_integration": {
-                            "enabled": True,
-                            "api_version": "v1",
-                            "fulfillment_ready": True
-                        },
-                        "governance": {
-                            "mode": "append_only",
-                            "immutable_entries": True,
-                            "audit_logging": True
-                        },
-                        "note": "Migrated from legacy 22-product hardcoded catalog to 151-product database catalog"
-                    }
-            except Exception as e:
+                stats = catalog._get_stats()
+                return {
+                    "status": "operational",
+                    "version": "3.40.0",
+                    "source": "database_catalog_wiring",
+                    "catalog": {
+                        "total_products": stats.get("total_products", 0),
+                        "maximo_products": stats.get("maximo_products", 0),
+                        "maxima_products": stats.get("maxima_products", 0),
+                        "universal_products": stats.get("universal_products", 0),
+                        "tier1_count": stats.get("tier1_products", 0),
+                        "tier2_count": stats.get("tier2_products", 0),
+                        "loaded_at": stats.get("loaded_at")
+                    },
+                    "supliful_integration": {
+                        "enabled": True,
+                        "api_version": "v1",
+                        "fulfillment_ready": True
+                    },
+                    "governance": {
+                        "mode": "append_only",
+                        "immutable_entries": True,
+                        "audit_logging": True
+                    },
+                    "note": "Migrated from legacy 22-product hardcoded catalog to 151-product database catalog"
+                }
+            except Exception:
                 pass  # Fall back to legacy
         
         # Fallback to legacy manager
@@ -118,54 +132,53 @@ def register_catalog_endpoints(app: FastAPI):
     ):
         """List all products in the catalog (now 151 products from database)"""
         
-        # Use CatalogWiring (database-backed)
-        if CATALOG_WIRING_AVAILABLE:
+        # Use CatalogWiring (database-backed) with auto-load
+        catalog = _get_loaded_catalog()
+        if catalog:
             try:
-                catalog = get_catalog_wiring()
-                if catalog and catalog.is_loaded:
-                    products = catalog.get_all_products()
-                    
-                    # Apply filters
-                    if sex:
-                        sex_lower = sex.lower()
-                        if sex_lower == "male":
-                            products = [p for p in products if p.sku.startswith("GMAX-M-") or p.sku.startswith("GMAX-U-")]
-                        elif sex_lower == "female":
-                            products = [p for p in products if p.sku.startswith("GMAX-F-") or p.sku.startswith("GMAX-U-")]
-                    
-                    if product_line:
-                        line_map = {"maximo": "GMAX-M-", "maxima": "GMAX-F-", "universal": "GMAX-U-"}
-                        prefix = line_map.get(product_line.lower(), "")
-                        if prefix:
-                            products = [p for p in products if p.sku.startswith(prefix)]
-                    
-                    if category:
-                        products = [p for p in products if p.category and category.lower() in p.category.lower()]
-                    
-                    if tier:
-                        products = [p for p in products if p.evidence_tier == tier.upper()]
-                    
-                    if active_only:
-                        products = [p for p in products if p.governance_status == "ACTIVE"]
-                    
-                    return {
-                        "count": len(products),
-                        "source": "database_catalog_wiring",
-                        "products": [
-                            {
-                                "sku": p.sku,
-                                "name": p.name,
-                                "product_line": p.product_line,
-                                "category": p.category,
-                                "evidence_tier": p.evidence_tier,
-                                "sex_target": p.sex_target,
-                                "price_usd": p.price_usd,
-                                "active": p.governance_status == "ACTIVE"
-                            }
-                            for p in products
-                        ]
-                    }
-            except Exception as e:
+                products = catalog.get_all_products()
+                
+                # Apply filters
+                if sex:
+                    sex_lower = sex.lower()
+                    if sex_lower == "male":
+                        products = [p for p in products if p.sku.startswith("GMAX-M-") or p.sku.startswith("GMAX-U-")]
+                    elif sex_lower == "female":
+                        products = [p for p in products if p.sku.startswith("GMAX-F-") or p.sku.startswith("GMAX-U-")]
+                
+                if product_line:
+                    line_map = {"maximo": "GMAX-M-", "maxima": "GMAX-F-", "universal": "GMAX-U-"}
+                    prefix = line_map.get(product_line.lower(), "")
+                    if prefix:
+                        products = [p for p in products if p.sku.startswith(prefix)]
+                
+                if category:
+                    products = [p for p in products if p.category and category.lower() in p.category.lower()]
+                
+                if tier:
+                    products = [p for p in products if p.evidence_tier == tier.upper()]
+                
+                if active_only:
+                    products = [p for p in products if p.governance_status == "ACTIVE"]
+                
+                return {
+                    "count": len(products),
+                    "source": "database_catalog_wiring",
+                    "products": [
+                        {
+                            "sku": p.sku,
+                            "name": p.name,
+                            "product_line": p.product_line,
+                            "category": p.category,
+                            "evidence_tier": p.evidence_tier,
+                            "sex_target": p.sex_target,
+                            "price_usd": p.price_usd,
+                            "active": p.governance_status == "ACTIVE"
+                        }
+                        for p in products
+                    ]
+                }
+            except Exception:
                 pass  # Fall back to legacy
         
         # Fallback to legacy manager (22 products)
@@ -216,25 +229,24 @@ def register_catalog_endpoints(app: FastAPI):
     async def get_product(sku: str):
         """Get detailed product information by SKU"""
         
-        # Try CatalogWiring first
-        if CATALOG_WIRING_AVAILABLE:
+        # Try CatalogWiring first with auto-load
+        catalog = _get_loaded_catalog()
+        if catalog:
             try:
-                catalog = get_catalog_wiring()
-                if catalog and catalog.is_loaded:
-                    product = catalog.get_product(sku.upper())
-                    if product:
-                        return {
-                            "sku": product.sku,
-                            "name": product.name,
-                            "product_name": product.name,
-                            "product_line": product.product_line,
-                            "category": product.category,
-                            "evidence_tier": product.evidence_tier,
-                            "sex_target": product.sex_target,
-                            "price_usd": product.price_usd,
-                            "governance_status": product.governance_status,
-                            "source": "database_catalog_wiring"
-                        }
+                product = catalog.get_product(sku.upper())
+                if product:
+                    return {
+                        "sku": product.sku,
+                        "name": product.name,
+                        "product_name": product.name,
+                        "product_line": product.product_line,
+                        "category": product.category,
+                        "evidence_tier": product.evidence_tier,
+                        "sex_target": product.sex_target,
+                        "price_usd": product.price_usd,
+                        "governance_status": product.governance_status,
+                        "source": "database_catalog_wiring"
+                    }
             except Exception:
                 pass  # Fall back to legacy
         
@@ -376,41 +388,40 @@ def register_catalog_endpoints(app: FastAPI):
         
         Uses CatalogWiring (database) when available, falls back to legacy manager.
         """
-        # Try CatalogWiring first
-        if CATALOG_WIRING_AVAILABLE:
+        # Try CatalogWiring first with auto-load
+        catalog = _get_loaded_catalog()
+        if catalog:
             try:
-                catalog = get_catalog_wiring()
-                if catalog and catalog.is_loaded:
-                    # Get sex-appropriate products
-                    sex_prefix = "GMAX-M-" if request.sex.lower() == "male" else "GMAX-F-"
-                    products = [p for p in catalog.get_all_products() 
-                               if p.sku.startswith(sex_prefix) or p.sku.startswith("GMAX-U-")]
-                    
-                    # Sort by evidence tier (TIER_1 first)
-                    products.sort(key=lambda p: (0 if p.evidence_tier == "TIER_1" else 1, p.sku))
-                    
-                    # Limit results
-                    products = products[:request.max_products]
-                    
-                    return {
-                        "sex": request.sex,
-                        "routing_flags_provided": request.routing_flags,
-                        "active_safety_gates": request.active_gates,
-                        "recommendation_count": len(products),
-                        "source": "database_catalog_wiring",
-                        "recommendations": [
-                            {
-                                "sku": p.sku,
-                                "name": p.name,
-                                "product_line": p.product_line,
-                                "category": p.category,
-                                "evidence_tier": p.evidence_tier,
-                                "price_usd": p.price_usd
-                            }
-                            for p in products
-                        ],
-                        "note": "Products are recommended based on sex and evidence tier from database catalog"
-                    }
+                # Get sex-appropriate products
+                sex_prefix = "GMAX-M-" if request.sex.lower() == "male" else "GMAX-F-"
+                products = [p for p in catalog.get_all_products() 
+                           if p.sku.startswith(sex_prefix) or p.sku.startswith("GMAX-U-")]
+                
+                # Sort by evidence tier (TIER_1 first)
+                products.sort(key=lambda p: (0 if p.evidence_tier == "TIER_1" else 1, p.sku))
+                
+                # Limit results
+                products = products[:request.max_products]
+                
+                return {
+                    "sex": request.sex,
+                    "routing_flags_provided": request.routing_flags,
+                    "active_safety_gates": request.active_gates,
+                    "recommendation_count": len(products),
+                    "source": "database_catalog_wiring",
+                    "recommendations": [
+                        {
+                            "sku": p.sku,
+                            "name": p.name,
+                            "product_line": p.product_line,
+                            "category": p.category,
+                            "evidence_tier": p.evidence_tier,
+                            "price_usd": p.price_usd
+                        }
+                        for p in products
+                    ],
+                    "note": "Products are recommended based on sex and evidence tier from database catalog"
+                }
             except Exception:
                 pass  # Fall back to legacy
         
@@ -456,19 +467,18 @@ def register_catalog_endpoints(app: FastAPI):
     @app.get("/api/v1/catalog/product-lines")
     async def get_product_lines():
         """Get available product lines with descriptions"""
-        # Get counts from CatalogWiring if available
+        # Get counts from CatalogWiring if available with auto-load
         counts = {"maximo": 0, "maxima": 0, "universal": 0}
         
-        if CATALOG_WIRING_AVAILABLE:
+        catalog = _get_loaded_catalog()
+        if catalog:
             try:
-                catalog = get_catalog_wiring()
-                if catalog and catalog.is_loaded:
-                    stats = catalog._get_stats()
-                    counts = {
-                        "maximo": stats.get("maximo_products", 0),
-                        "maxima": stats.get("maxima_products", 0),
-                        "universal": stats.get("universal_products", 0)
-                    }
+                stats = catalog._get_stats()
+                counts = {
+                    "maximo": stats.get("maximo_products", 0),
+                    "maxima": stats.get("maxima_products", 0),
+                    "universal": stats.get("universal_products", 0)
+                }
             except Exception:
                 pass
         
@@ -501,23 +511,22 @@ def register_catalog_endpoints(app: FastAPI):
     @app.get("/api/v1/catalog/categories")
     async def get_categories():
         """Get available product categories"""
-        # Try CatalogWiring first
-        if CATALOG_WIRING_AVAILABLE:
+        # Try CatalogWiring first with auto-load
+        catalog = _get_loaded_catalog()
+        if catalog:
             try:
-                catalog = get_catalog_wiring()
-                if catalog and catalog.is_loaded:
-                    # Aggregate categories from products
-                    categories = {}
-                    for p in catalog.get_all_products():
-                        cat = p.category or "supplement"
-                        categories[cat] = categories.get(cat, 0) + 1
-                    return {
-                        "source": "database_catalog_wiring",
-                        "categories": [
-                            {"code": cat, "name": cat.replace("_", " ").title(), "product_count": count}
-                            for cat, count in sorted(categories.items())
-                        ]
-                    }
+                # Aggregate categories from products
+                categories = {}
+                for p in catalog.get_all_products():
+                    cat = p.category or "supplement"
+                    categories[cat] = categories.get(cat, 0) + 1
+                return {
+                    "source": "database_catalog_wiring",
+                    "categories": [
+                        {"code": cat, "name": cat.replace("_", " ").title(), "product_count": count}
+                        for cat, count in sorted(categories.items())
+                    ]
+                }
             except Exception:
                 pass
         
@@ -562,35 +571,34 @@ def register_catalog_endpoints(app: FastAPI):
     @app.get("/api/v1/catalog/export")
     async def export_catalog():
         """Export full catalog as JSON (for backup/sync)"""
-        # Try CatalogWiring first
-        if CATALOG_WIRING_AVAILABLE:
+        # Try CatalogWiring first with auto-load
+        catalog = _get_loaded_catalog()
+        if catalog:
             try:
-                catalog = get_catalog_wiring()
-                if catalog and catalog.is_loaded:
-                    products = catalog.get_all_products()
-                    return {
-                        "export_version": "3.40.0",
-                        "exported_at": datetime.utcnow().isoformat(),
-                        "source": "database_catalog_wiring",
-                        "product_count": len(products),
-                        "by_tier": {
-                            "TIER_1": len([p for p in products if p.evidence_tier == "TIER_1"]),
-                            "TIER_2": len([p for p in products if p.evidence_tier == "TIER_2"]),
-                            "TIER_3": len([p for p in products if p.evidence_tier == "TIER_3"])
-                        },
-                        "products": [
-                            {
-                                "sku": p.sku,
-                                "product_name": p.name,
-                                "category": p.category,
-                                "evidence_tier": p.evidence_tier,
-                                "sex_target": p.sex_target,
-                                "base_price": p.price_usd,
-                                "governance_status": p.governance_status
-                            }
-                            for p in products
-                        ]
-                    }
+                products = catalog.get_all_products()
+                return {
+                    "export_version": "3.40.0",
+                    "exported_at": datetime.utcnow().isoformat(),
+                    "source": "database_catalog_wiring",
+                    "product_count": len(products),
+                    "by_tier": {
+                        "TIER_1": len([p for p in products if p.evidence_tier == "TIER_1"]),
+                        "TIER_2": len([p for p in products if p.evidence_tier == "TIER_2"]),
+                        "TIER_3": len([p for p in products if p.evidence_tier == "TIER_3"])
+                    },
+                    "products": [
+                        {
+                            "sku": p.sku,
+                            "product_name": p.name,
+                            "category": p.category,
+                            "evidence_tier": p.evidence_tier,
+                            "sex_target": p.sex_target,
+                            "base_price": p.price_usd,
+                            "governance_status": p.governance_status
+                        }
+                        for p in products
+                    ]
+                }
             except Exception:
                 pass
         
