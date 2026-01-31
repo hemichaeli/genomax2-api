@@ -14,7 +14,7 @@ Pipeline Flow:
 
 "Blood does not negotiate" - safety constraints are absolute.
 
-Version: 1.1.1 - Fixed protocol.modules output in process_full_pipeline
+Version: 1.1.2 - Expose os_environment in module responses
 """
 
 import os
@@ -32,7 +32,7 @@ from asyncpg import Pool
 # VERSION CONSTANT
 # =============================================================================
 
-BRAIN_ORCHESTRATOR_VERSION = "1.1.1"
+BRAIN_ORCHESTRATOR_VERSION = "1.1.2"
 
 # =============================================================================
 # CONFIGURATION
@@ -393,6 +393,7 @@ async def load_catalog_from_wiring() -> List[Dict[str, Any]]:
             "id": product.get("sku", f"module_{idx}"),
             "sku": product.get("sku", ""),
             "name": product.get("name", "Unknown"),
+            "os_environment": product.get("os_environment", ""),  # Source of truth
             "category": product.get("category", "General"),
             "subcategory": "",  # Not available in wiring
             "description": "",  # Not available in wiring
@@ -400,8 +401,8 @@ async def load_catalog_from_wiring() -> List[Dict[str, Any]]:
             "primary_ingredients": ingredient_tags,
             "all_ingredients": ingredient_tags,
             "evidence_tier": product.get("evidence_tier", "TIER_2"),
-            "product_line": product_line,
-            "sex_target": sex_target,
+            "product_line": product_line,  # Derived from os_environment
+            "sex_target": sex_target,  # Derived convenience field
             "lifecycle_phases": [],  # Derive from category if needed
             "contraindications": [],  # Not available in wiring
             "price_usd": product.get("price_usd", 0)
@@ -1097,6 +1098,7 @@ class BrainOrchestrator:
                     "module_id": module["id"],
                     "sku": module["sku"],
                     "name": module["name"],
+                    "os_environment": module.get("os_environment", ""),  # Include os_environment
                     "category": module["category"],
                     "dosage": "As directed",
                     "frequency": "Daily",
@@ -1343,14 +1345,15 @@ INTEGRATION WITH BLOODWORK ENGINE:
 6. Enforces safety constraints (blocked ingredients)
 7. Returns ranked recommendations
 
-CATALOG LOADING (v1.1.0):
+CATALOG LOADING (v1.1.2):
 - Uses /api/v1/catalog/wiring/products endpoint
 - Maps ingredient_tags to target_biomarkers via INGREDIENT_BIOMARKER_MAP
 - Caches catalog in memory for 5 minutes (CATALOG_CACHE_TTL_SECONDS)
 - Falls back to stale cache on errors
+- NOW INCLUDES os_environment in module responses
 
 EXPORTS FOR brain_routes.py:
-- BRAIN_ORCHESTRATOR_VERSION: Version constant "1.1.1"
+- BRAIN_ORCHESTRATOR_VERSION: Version constant "1.1.2"
 - SexType: Enum with MALE, FEMALE
 - ConstraintType: Enum with BLOCK, LIMIT, CAUTION, BOOST
 - BrainInput: Pydantic model for pipeline input
@@ -1384,6 +1387,12 @@ SCORING ALGORITHM:
 - Lifecycle bonus: +15-25 for recommended/required
 - Confidence multiplier: 0.5 + (confidence * 0.5)
 - Caution penalty: 0.8x final score
+
+CHANGELOG v1.1.2:
+- Added os_environment to module responses in load_catalog_from_wiring()
+- Added os_environment to compose() selected module output
+- os_environment is now propagated through entire Brain pipeline
+- Maintains consistency with /catalog/products endpoint (commit a4b4ebb)
 
 CHANGELOG v1.1.1:
 - Fixed process_full_pipeline to properly preserve modules from compose phase
