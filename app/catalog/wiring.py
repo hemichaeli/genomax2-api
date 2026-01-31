@@ -12,7 +12,7 @@ This module:
 
 CRITICAL: No fallback, no mocks. If catalog fails, entire pipeline fails.
 
-Version: catalog_wiring_v1
+Version: catalog_wiring_v1.1 (os_environment support)
 """
 
 import os
@@ -27,7 +27,7 @@ from psycopg2.extras import RealDictCursor
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-CATALOG_WIRING_VERSION = "catalog_wiring_v1"
+CATALOG_WIRING_VERSION = "catalog_wiring_v1.1"
 
 
 class CatalogStatus(str, Enum):
@@ -46,7 +46,8 @@ class CatalogProduct:
     category: str
     evidence_tier: str  # TIER_1 or TIER_2
     price_usd: float  # base_price
-    sex_target: str  # male, female, unisex
+    sex_target: str  # male, female, unisex (legacy)
+    os_environment: str  # MAXimo² or MAXima² (canonical)
     ingredient_tags: List[str] = field(default_factory=list)
     governance_status: str = "ACTIVE"  # ACTIVE, BLOCKED, PENDING, SUSPENDED
     product_url: Optional[str] = None
@@ -57,7 +58,17 @@ class CatalogProduct:
     
     @property
     def product_line(self) -> str:
-        """Derive product line from sex_target."""
+        """
+        Return product line from os_environment (canonical source).
+        
+        v1.1: Uses os_environment directly instead of computing from sex_target.
+        This ensures split unisex products show correct product line.
+        """
+        # Use os_environment as canonical source (no more Universal)
+        if self.os_environment:
+            return self.os_environment
+        
+        # Fallback for legacy data (should not happen after migration 016)
         if self.sex_target == "male":
             return "MAXimo²"
         elif self.sex_target == "female":
@@ -97,7 +108,7 @@ class CatalogWiring:
         self._sku_set: Set[str] = set()
         self._maximo_skus: Set[str] = set()
         self._maxima_skus: Set[str] = set()
-        self._universal_skus: Set[str] = set()
+        self._universal_skus: Set[str] = set()  # Should be empty after migration 016
         self._tier1_skus: Set[str] = set()
         self._tier2_skus: Set[str] = set()
         self._status = CatalogStatus.NOT_LOADED
@@ -148,7 +159,7 @@ class CatalogWiring:
             conn = psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
             cur = conn.cursor()
             
-            # Query catalog_products table (matches actual schema)
+            # Query catalog_products table (v1.1: includes os_environment)
             cur.execute("""
                 SELECT 
                     gx_catalog_id,
@@ -160,10 +171,11 @@ class CatalogWiring:
                     evidence_tier,
                     governance_status,
                     ingredient_tags,
-                    sex_target
+                    sex_target,
+                    os_environment
                 FROM catalog_products
                 WHERE governance_status = 'ACTIVE'
-                ORDER BY evidence_tier, product_name
+                ORDER BY os_environment, evidence_tier, product_name
             """)
             
             rows = cur.fetchall()
@@ -188,6 +200,9 @@ class CatalogWiring:
             self._tier2_skus.clear()
             
             for row in rows:
+                # v1.1: Use os_environment as canonical product line
+                os_env = row.get('os_environment') or ''
+                
                 product = CatalogProduct(
                     sku=row['gx_catalog_id'],
                     name=row['product_name'],
@@ -195,6 +210,7 @@ class CatalogWiring:
                     evidence_tier=row['evidence_tier'] or 'TIER_2',
                     price_usd=float(row['base_price'] or 0),
                     sex_target=row['sex_target'] or 'unisex',
+                    os_environment=os_env,
                     ingredient_tags=row['ingredient_tags'] or [],
                     governance_status=row['governance_status'] or 'ACTIVE',
                     product_url=row['product_url'],
@@ -204,13 +220,20 @@ class CatalogWiring:
                     self._products[product.sku] = product
                     self._sku_set.add(product.sku)
                     
-                    # Index by sex target / product line
-                    if product.sex_target == 'male':
+                    # v1.1: Index by os_environment (canonical)
+                    if os_env == 'MAXimo²':
                         self._maximo_skus.add(product.sku)
-                    elif product.sex_target == 'female':
+                    elif os_env == 'MAXima²':
                         self._maxima_skus.add(product.sku)
                     else:
-                        self._universal_skus.add(product.sku)
+                        # Fallback for any products without os_environment
+                        # (should not happen after migration 016)
+                        if product.sex_target == 'male':
+                            self._maximo_skus.add(product.sku)
+                        elif product.sex_target == 'female':
+                            self._maxima_skus.add(product.sku)
+                        else:
+                            self._universal_skus.add(product.sku)
                     
                     # Index by evidence tier
                     if product.evidence_tier == 'TIER_1':
@@ -250,7 +273,7 @@ class CatalogWiring:
             "total_products": len(self._products),
             "maximo_products": len(self._maximo_skus),
             "maxima_products": len(self._maxima_skus),
-            "universal_products": len(self._universal_skus),
+            "universal_products": len(self._universal_skus),  # Should be 0 after migration 016
             "tier1_products": len(self._tier1_skus),
             "tier2_products": len(self._tier2_skus),
             "loaded_at": self._loaded_at.isoformat() if self._loaded_at else None,
