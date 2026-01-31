@@ -3,7 +3,12 @@ Catalog Governance Models (Issue #5)
 
 Pydantic models for SKU metadata validation and coverage reporting.
 
-Version: catalog_governance_v1
+Version: catalog_governance_v1.1
+
+CHANGELOG v1.1:
+- GenderLine enum values normalized to canonical os_environment format
+- UNISEX removed (eliminated by migration 016 - all products split to MAXimo²/MAXima²)
+- gender_line field now required (no default)
 """
 
 from datetime import datetime
@@ -21,10 +26,15 @@ class SkuValidationStatus(str, Enum):
 
 
 class GenderLine(str, Enum):
-    """Product line gender targeting."""
-    MAXIMO2 = "MAXimo2"
-    MAXIMA2 = "MAXima2"
-    UNISEX = "UNISEX"
+    """
+    Product line gender targeting (canonical os_environment values).
+    
+    Post-migration 016: All products must be explicitly MAXimo² or MAXima².
+    UNISEX/UNIVERSAL no longer exists - former unisex products were split
+    into separate MAXimo² and MAXima² SKUs with -M/-F suffixes.
+    """
+    MAXIMO2 = "MAXimo²"
+    MAXIMA2 = "MAXima²"
 
 
 class CatalogSkuMetaV1(BaseModel):
@@ -54,15 +64,15 @@ class CatalogSkuMetaV1(BaseModel):
         description="Risk classification tags (e.g., ['hepatotoxic', 'renal_load', 'stimulant'])"
     )
     
-    # Gender targeting for Issue #7
+    # Gender targeting for Issue #7 - REQUIRED (no default post-migration 016)
     gender_line: GenderLine = Field(
-        default=GenderLine.UNISEX,
-        description="Target product line: MAXimo2 (male), MAXima2 (female), or UNISEX"
+        ...,
+        description="Target product line: MAXimo² (male) or MAXima² (female). Required - no UNISEX."
     )
     
     # Metadata versioning
     metadata_version: str = Field(
-        default="catalog_meta_v1",
+        default="catalog_meta_v1.1",
         description="Schema version for metadata"
     )
     
@@ -192,7 +202,7 @@ class CatalogCoverageReportV1(BaseModel):
     )
     
     ruleset_version: str = Field(
-        default="catalog_governance_v1",
+        default="catalog_governance_v1.1",
         description="Governance ruleset version"
     )
     
@@ -249,7 +259,7 @@ class CatalogValidationRunV1(BaseModel):
         description="Catalog source version"
     )
     ruleset_version: str = Field(
-        default="catalog_governance_v1",
+        default="catalog_governance_v1.1",
         description="Governance ruleset version"
     )
     
@@ -307,3 +317,4 @@ class ReasonCode:
     EMPTY_CATEGORY_TAGS = "EMPTY_CATEGORY_TAGS"
     BLOCKED_BY_EVIDENCE = "BLOCKED_BY_EVIDENCE"
     HEPATOTOXICITY_RISK = "HEPATOTOXICITY_RISK"
+    MISSING_GENDER_LINE = "MISSING_GENDER_LINE"
