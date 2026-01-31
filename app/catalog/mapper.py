@@ -3,7 +3,12 @@ Catalog Mapper (Issue #5)
 
 Maps raw catalog data to CatalogSkuMetaV1 with canonical ingredient tags.
 
-Version: catalog_governance_v1
+Version: catalog_governance_v1.1
+
+CHANGELOG v1.1:
+- Updated infer_gender_line() to handle removal of UNISEX
+- Products without explicit gender indicators default to MAXIMO2 (requires manual review)
+- Added os_environment parameter support for database-driven gender line
 """
 
 import json
@@ -125,15 +130,60 @@ class CatalogMapper:
         slug = re.sub(r'-+', '-', slug)
         return slug.strip('-')
     
-    def infer_gender_line(self, product_name: str, category: str) -> GenderLine:
+    def os_environment_to_gender_line(self, os_environment: Optional[str]) -> Optional[GenderLine]:
         """
-        Infer gender targeting from product name and category.
+        Convert os_environment value to GenderLine enum.
         
-        Rules:
-        - "Men's" or "Male" in name -> MAXimo2
-        - "Women's" or "Female" in name -> MAXima2
-        - Otherwise -> UNISEX
+        Args:
+            os_environment: Canonical os_environment value ("MAXimo²" or "MAXima²")
+            
+        Returns:
+            GenderLine enum value or None if invalid/missing
         """
+        if not os_environment:
+            return None
+        
+        env_normalized = os_environment.lower().strip()
+        if env_normalized in ("maximo²", "maximo2"):
+            return GenderLine.MAXIMO2
+        elif env_normalized in ("maxima²", "maxima2"):
+            return GenderLine.MAXIMA2
+        
+        return None
+    
+    def infer_gender_line(
+        self, 
+        product_name: str, 
+        category: str,
+        os_environment: Optional[str] = None
+    ) -> GenderLine:
+        """
+        Infer gender targeting from product name, category, or os_environment.
+        
+        Priority:
+        1. os_environment (canonical source of truth from database)
+        2. Product name indicators ("Men's", "Women's", etc.)
+        3. Default to MAXIMO2 (requires manual review for ambiguous products)
+        
+        Note: Post-migration 016, UNISEX no longer exists. All products must be 
+        explicitly MAXimo² or MAXima². Products without clear indicators default
+        to MAXIMO2 and should be manually reviewed.
+        
+        Args:
+            product_name: Product display name
+            category: Product category
+            os_environment: Optional canonical os_environment value from database
+            
+        Returns:
+            GenderLine.MAXIMO2 or GenderLine.MAXIMA2
+        """
+        # Priority 1: Use os_environment if provided
+        if os_environment:
+            gender_line = self.os_environment_to_gender_line(os_environment)
+            if gender_line:
+                return gender_line
+        
+        # Priority 2: Infer from product name
         name_lower = product_name.lower()
         
         if any(term in name_lower for term in ["men's", "mens", "male", "prostate"]):
@@ -142,11 +192,21 @@ class CatalogMapper:
         if any(term in name_lower for term in ["women's", "womens", "female", "prenatal"]):
             return GenderLine.MAXIMA2
         
-        return GenderLine.UNISEX
+        # Priority 3: Default to MAXIMO2 (no UNISEX post-migration 016)
+        # NOTE: Products hitting this default should be manually reviewed
+        return GenderLine.MAXIMO2
     
-    def map_from_merged_csv_row(self, row: Dict[str, Any]) -> Tuple[CatalogSkuMetaV1, List[str]]:
+    def map_from_merged_csv_row(
+        self, 
+        row: Dict[str, Any],
+        os_environment: Optional[str] = None
+    ) -> Tuple[CatalogSkuMetaV1, List[str]]:
         """
         Map a row from GENOMAX2_SUPLIFUL_CATALOG.csv (merged format).
+        
+        Args:
+            row: CSV row dictionary
+            os_environment: Optional canonical os_environment override
         
         Returns:
             Tuple of (CatalogSkuMetaV1, unknown_ingredients)
@@ -191,6 +251,9 @@ class CatalogMapper:
         if row.get('drug_interactions'):
             drug_interactions = [d.strip() for d in row['drug_interactions'].split(';') if d.strip()]
         
+        # Use os_environment from row if available, or passed parameter
+        row_os_env = row.get('os_environment') or os_environment
+        
         meta = CatalogSkuMetaV1(
             sku_id=self.slugify(product_name),
             product_name=product_name,
@@ -198,7 +261,7 @@ class CatalogMapper:
             ingredient_tags=ingredient_tags,
             category_tags=category_tags,
             risk_tags=list(set(risk_tags)),
-            gender_line=self.infer_gender_line(product_name, category),
+            gender_line=self.infer_gender_line(product_name, category, row_os_env),
             evidence_tier=evidence_tier if evidence_tier else None,
             sell_recommendation=sell_recommendation if sell_recommendation else None,
             contraindications=contraindications,
@@ -208,9 +271,17 @@ class CatalogMapper:
         
         return meta, unknown_ingredients
     
-    def map_from_full_catalog_row(self, row: Dict[str, Any]) -> Tuple[CatalogSkuMetaV1, List[str]]:
+    def map_from_full_catalog_row(
+        self, 
+        row: Dict[str, Any],
+        os_environment: Optional[str] = None
+    ) -> Tuple[CatalogSkuMetaV1, List[str]]:
         """
         Map a row from Supliful_GenoMAX_catalog.csv (full format without ingredient mapping).
+        
+        Args:
+            row: CSV row dictionary
+            os_environment: Optional canonical os_environment override
         
         Returns:
             Tuple of (CatalogSkuMetaV1, unknown_ingredients)
@@ -236,6 +307,9 @@ class CatalogMapper:
         category = row.get('Category', '').strip()
         category_tags = self.dictionary.get_category_tags(category)
         
+        # Use os_environment from row if available, or passed parameter
+        row_os_env = row.get('os_environment') or os_environment
+        
         meta = CatalogSkuMetaV1(
             sku_id=self.slugify(product_name),
             product_name=product_name,
@@ -243,7 +317,7 @@ class CatalogMapper:
             ingredient_tags=ingredient_tags,
             category_tags=category_tags,
             risk_tags=list(set(risk_tags)),
-            gender_line=self.infer_gender_line(product_name, category),
+            gender_line=self.infer_gender_line(product_name, category, row_os_env),
             updated_at=datetime.utcnow(),
         )
         
