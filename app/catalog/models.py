@@ -4,11 +4,6 @@ Catalog Governance Models (Issue #5)
 Pydantic models for SKU metadata validation and coverage reporting.
 
 Version: catalog_governance_v1.1
-
-CHANGELOG v1.1:
-- GenderLine enum values normalized to canonical os_environment format
-- UNISEX removed (eliminated by migration 016 - all products split to MAXimo²/MAXima²)
-- gender_line field now required (no default)
 """
 
 from datetime import datetime
@@ -29,12 +24,24 @@ class GenderLine(str, Enum):
     """
     Product line gender targeting (canonical os_environment values).
     
-    Post-migration 016: All products must be explicitly MAXimo² or MAXima².
-    UNISEX/UNIVERSAL no longer exists - former unisex products were split
-    into separate MAXimo² and MAXima² SKUs with -M/-F suffixes.
+    IMPORTANT: These values MUST match the database CHECK constraint
+    on catalog_products.os_environment exactly.
+    
+    Migration 016 eliminated UNISEX/UNIVERSAL - all products must be
+    explicitly assigned to MAXimo² or MAXima².
     """
     MAXIMO2 = "MAXimo²"
     MAXIMA2 = "MAXima²"
+    
+    @classmethod
+    def from_sex(cls, sex: str) -> "GenderLine":
+        """Convert sex input to GenderLine."""
+        if sex.lower() == "male":
+            return cls.MAXIMO2
+        elif sex.lower() == "female":
+            return cls.MAXIMA2
+        else:
+            raise ValueError(f"Invalid sex value: {sex}. Must be 'male' or 'female'.")
 
 
 class CatalogSkuMetaV1(BaseModel):
@@ -64,10 +71,11 @@ class CatalogSkuMetaV1(BaseModel):
         description="Risk classification tags (e.g., ['hepatotoxic', 'renal_load', 'stimulant'])"
     )
     
-    # Gender targeting for Issue #7 - REQUIRED (no default post-migration 016)
+    # Gender targeting for Issue #7
+    # NOTE: No default - must be explicitly set to MAXimo² or MAXima²
     gender_line: GenderLine = Field(
         ...,
-        description="Target product line: MAXimo² (male) or MAXima² (female). Required - no UNISEX."
+        description="Target product line: MAXimo² (male) or MAXima² (female). UNISEX eliminated per migration 016."
     )
     
     # Metadata versioning
@@ -317,4 +325,3 @@ class ReasonCode:
     EMPTY_CATEGORY_TAGS = "EMPTY_CATEGORY_TAGS"
     BLOCKED_BY_EVIDENCE = "BLOCKED_BY_EVIDENCE"
     HEPATOTOXICITY_RISK = "HEPATOTOXICITY_RISK"
-    MISSING_GENDER_LINE = "MISSING_GENDER_LINE"
