@@ -1,13 +1,22 @@
 """
-GenoMAX² Catalog API Endpoints (v3.41.0 - os_environment fix)
-=============================================================
+GenoMAX² Catalog API Endpoints (v3.42.0 - migration 016 compliance)
+===================================================================
 
 CHANGE LOG:
+- v3.42.0: Remove UNIVERSAL/UNISEX from API contract (migration 016 compliance)
+           - GMAX-U- prefix no longer valid; all products require MAXimo² or MAXima²
+           - sex_target field deprecated; use os_environment as canonical source
+           - product_line filter now only accepts: maximo, maxima
 - v3.41.0: Added os_environment to /catalog/products and /catalog/export responses
            os_environment is the canonical source of truth for product line
 - v3.40.0: Migrated product endpoints from hardcoded SuplifulCatalogManager (22 products) 
            to database-backed CatalogWiring (151 products)
 - Ingredient endpoints still use legacy manager (pending migration)
+
+DEPRECATION NOTICES:
+- sex_target field: Use os_environment instead. Will be removed in v4.0.0
+- GMAX-U- SKU prefix: No longer supported. Use GMAX-M- or GMAX-F- exclusively.
+- "universal" product_line: Eliminated per migration 016. All products require gender assignment.
 
 REST API endpoints for catalog integration.
 """
@@ -77,13 +86,13 @@ def register_catalog_endpoints(app: FastAPI):
                 stats = catalog._get_stats()
                 return {
                     "status": "operational",
-                    "version": "3.41.0",
+                    "version": "3.42.0",
                     "source": "database_catalog_wiring",
                     "catalog": {
                         "total_products": stats.get("total_products", 0),
                         "maximo_products": stats.get("maximo_products", 0),
                         "maxima_products": stats.get("maxima_products", 0),
-                        "universal_products": stats.get("universal_products", 0),
+                        # REMOVED: universal_products (migration 016)
                         "tier1_count": stats.get("tier1_products", 0),
                         "tier2_count": stats.get("tier2_products", 0),
                         "loaded_at": stats.get("loaded_at")
@@ -96,7 +105,12 @@ def register_catalog_endpoints(app: FastAPI):
                     "governance": {
                         "mode": "append_only",
                         "immutable_entries": True,
-                        "audit_logging": True
+                        "audit_logging": True,
+                        "migration_016_compliant": True
+                    },
+                    "deprecations": {
+                        "sex_target": "Use os_environment instead. Removal in v4.0.0",
+                        "GMAX-U-": "Universal SKU prefix eliminated. Use GMAX-M- or GMAX-F-"
                     },
                     "note": "Migrated from legacy 22-product hardcoded catalog to 151-product database catalog"
                 }
@@ -126,13 +140,17 @@ def register_catalog_endpoints(app: FastAPI):
     
     @app.get("/api/v1/catalog/products")
     async def list_products(
-        product_line: Optional[str] = Query(None, description="Filter by product line: maximo, maxima, universal"),
+        product_line: Optional[str] = Query(None, description="Filter by product line: maximo, maxima (DEPRECATED: universal)"),
         category: Optional[str] = Query(None, description="Filter by category"),
         sex: Optional[str] = Query(None, description="Filter by sex: male, female"),
         tier: Optional[str] = Query(None, description="Filter by evidence tier: TIER_1, TIER_2"),
         active_only: bool = Query(True, description="Only return active products")
     ):
-        """List all products in the catalog (now 151 products from database)"""
+        """List all products in the catalog (now 151 products from database)
+        
+        NOTE: As of v3.42.0 (migration 016), all products require explicit gender assignment.
+        The 'universal' product_line filter is deprecated and will return empty results.
+        """
         
         # Use CatalogWiring (database-backed) with auto-load
         catalog = _get_loaded_catalog()
@@ -140,19 +158,24 @@ def register_catalog_endpoints(app: FastAPI):
             try:
                 products = catalog.get_all_products()
                 
-                # Apply filters
+                # Apply filters - NO UNIVERSAL FALLBACK per migration 016
                 if sex:
                     sex_lower = sex.lower()
                     if sex_lower == "male":
-                        products = [p for p in products if p.sku.startswith("GMAX-M-") or p.sku.startswith("GMAX-U-")]
+                        products = [p for p in products if p.sku.startswith("GMAX-M-")]
                     elif sex_lower == "female":
-                        products = [p for p in products if p.sku.startswith("GMAX-F-") or p.sku.startswith("GMAX-U-")]
+                        products = [p for p in products if p.sku.startswith("GMAX-F-")]
                 
                 if product_line:
-                    line_map = {"maximo": "GMAX-M-", "maxima": "GMAX-F-", "universal": "GMAX-U-"}
-                    prefix = line_map.get(product_line.lower(), "")
-                    if prefix:
-                        products = [p for p in products if p.sku.startswith(prefix)]
+                    line_lower = product_line.lower()
+                    # Migration 016: Universal eliminated
+                    if line_lower == "universal":
+                        products = []  # No universal products exist
+                    else:
+                        line_map = {"maximo": "GMAX-M-", "maxima": "GMAX-F-"}
+                        prefix = line_map.get(line_lower, "")
+                        if prefix:
+                            products = [p for p in products if p.sku.startswith(prefix)]
                 
                 if category:
                     products = [p for p in products if p.category and category.lower() in p.category.lower()]
@@ -166,6 +189,7 @@ def register_catalog_endpoints(app: FastAPI):
                 return {
                     "count": len(products),
                     "source": "database_catalog_wiring",
+                    "api_version": "3.42.0",
                     "products": [
                         {
                             "sku": p.sku,
@@ -174,7 +198,7 @@ def register_catalog_endpoints(app: FastAPI):
                             "product_line": p.product_line,
                             "category": p.category,
                             "evidence_tier": p.evidence_tier,
-                            "sex_target": p.sex_target,  # Derived convenience field
+                            "sex_target": p.sex_target,  # DEPRECATED: use os_environment
                             "price_usd": p.price_usd,
                             "active": p.governance_status == "ACTIVE"
                         }
@@ -230,13 +254,25 @@ def register_catalog_endpoints(app: FastAPI):
     
     @app.get("/api/v1/catalog/products/{sku}")
     async def get_product(sku: str):
-        """Get detailed product information by SKU"""
+        """Get detailed product information by SKU
+        
+        NOTE: GMAX-U- SKU prefix is deprecated as of v3.42.0 (migration 016).
+        All products now use GMAX-M- (MAXimo²) or GMAX-F- (MAXima²) prefixes.
+        """
+        
+        # Validate SKU prefix per migration 016
+        sku_upper = sku.upper()
+        if sku_upper.startswith("GMAX-U-"):
+            raise HTTPException(
+                status_code=400, 
+                detail="GMAX-U- SKU prefix deprecated (migration 016). Use GMAX-M- or GMAX-F- equivalent."
+            )
         
         # Try CatalogWiring first with auto-load
         catalog = _get_loaded_catalog()
         if catalog:
             try:
-                product = catalog.get_product(sku.upper())
+                product = catalog.get_product(sku_upper)
                 if product:
                     return {
                         "sku": product.sku,
@@ -246,10 +282,14 @@ def register_catalog_endpoints(app: FastAPI):
                         "product_line": product.product_line,
                         "category": product.category,
                         "evidence_tier": product.evidence_tier,
-                        "sex_target": product.sex_target,  # Derived convenience field
+                        "sex_target": product.sex_target,  # DEPRECATED: use os_environment
                         "price_usd": product.price_usd,
                         "governance_status": product.governance_status,
-                        "source": "database_catalog_wiring"
+                        "source": "database_catalog_wiring",
+                        "api_version": "3.42.0",
+                        "_deprecation_notice": {
+                            "sex_target": "Use os_environment instead. Removal in v4.0.0"
+                        }
                     }
             except Exception:
                 pass  # Fall back to legacy
@@ -391,15 +431,18 @@ def register_catalog_endpoints(app: FastAPI):
         Get product recommendations based on routing flags and safety gates.
         
         Uses CatalogWiring (database) when available, falls back to legacy manager.
+        
+        NOTE: As of v3.42.0, recommendations are strictly gender-specific.
+        No universal products are included per migration 016.
         """
         # Try CatalogWiring first with auto-load
         catalog = _get_loaded_catalog()
         if catalog:
             try:
-                # Get sex-appropriate products
+                # Get sex-appropriate products - NO UNIVERSAL per migration 016
                 sex_prefix = "GMAX-M-" if request.sex.lower() == "male" else "GMAX-F-"
                 products = [p for p in catalog.get_all_products() 
-                           if p.sku.startswith(sex_prefix) or p.sku.startswith("GMAX-U-")]
+                           if p.sku.startswith(sex_prefix)]
                 
                 # Sort by evidence tier (TIER_1 first)
                 products.sort(key=lambda p: (0 if p.evidence_tier == "TIER_1" else 1, p.sku))
@@ -413,6 +456,7 @@ def register_catalog_endpoints(app: FastAPI):
                     "active_safety_gates": request.active_gates,
                     "recommendation_count": len(products),
                     "source": "database_catalog_wiring",
+                    "api_version": "3.42.0",
                     "recommendations": [
                         {
                             "sku": p.sku,
@@ -425,7 +469,7 @@ def register_catalog_endpoints(app: FastAPI):
                         }
                         for p in products
                     ],
-                    "note": "Products are recommended based on sex and evidence tier from database catalog"
+                    "note": "Products recommended based on strict gender matching (migration 016 compliant)"
                 }
             except Exception:
                 pass  # Fall back to legacy
@@ -457,6 +501,13 @@ def register_catalog_endpoints(app: FastAPI):
         
         Returns blocked status and any caution flags.
         """
+        # Validate SKU prefix per migration 016
+        if request.sku.upper().startswith("GMAX-U-"):
+            raise HTTPException(
+                status_code=400,
+                detail="GMAX-U- SKU prefix deprecated (migration 016). Use GMAX-M- or GMAX-F- equivalent."
+            )
+        
         manager = get_catalog_manager()
         
         result = manager.check_product_safety(
@@ -471,9 +522,13 @@ def register_catalog_endpoints(app: FastAPI):
     
     @app.get("/api/v1/catalog/product-lines")
     async def get_product_lines():
-        """Get available product lines with descriptions"""
+        """Get available product lines with descriptions
+        
+        NOTE: As of v3.42.0 (migration 016), only MAXimo² and MAXima² product lines exist.
+        Universal product line has been eliminated - all products require gender assignment.
+        """
         # Get counts from CatalogWiring if available with auto-load
-        counts = {"maximo": 0, "maxima": 0, "universal": 0}
+        counts = {"maximo": 0, "maxima": 0}
         
         catalog = _get_loaded_catalog()
         if catalog:
@@ -481,36 +536,37 @@ def register_catalog_endpoints(app: FastAPI):
                 stats = catalog._get_stats()
                 counts = {
                     "maximo": stats.get("maximo_products", 0),
-                    "maxima": stats.get("maxima_products", 0),
-                    "universal": stats.get("universal_products", 0)
+                    "maxima": stats.get("maxima_products", 0)
+                    # REMOVED: universal (migration 016)
                 }
             except Exception:
                 pass
         
         return {
+            "api_version": "3.42.0",
+            "migration_016_compliant": True,
             "product_lines": [
                 {
                     "code": "MAXimo²",
                     "name": "MAXimo²",
+                    "os_environment": "MAXimo²",  # CANONICAL
                     "target": "Male Biology",
                     "description": "Gender-optimized supplements for male physiology, hormone support, and metabolic optimization",
+                    "sku_prefix": "GMAX-M-",
                     "product_count": counts.get("maximo", 0)
                 },
                 {
                     "code": "MAXima²",
                     "name": "MAXima²",
+                    "os_environment": "MAXima²",  # CANONICAL
                     "target": "Female Biology",
                     "description": "Gender-optimized supplements for female physiology, hormone balance, and metabolic health",
+                    "sku_prefix": "GMAX-F-",
                     "product_count": counts.get("maxima", 0)
-                },
-                {
-                    "code": "Universal",
-                    "name": "Universal",
-                    "target": "All Users",
-                    "description": "Gender-neutral supplements suitable for all users",
-                    "product_count": counts.get("universal", 0)
                 }
-            ]
+                # REMOVED: Universal product line (migration 016)
+            ],
+            "note": "Universal product line eliminated per migration 016. All products require explicit MAXimo² or MAXima² assignment."
         }
     
     @app.get("/api/v1/catalog/categories")
@@ -582,10 +638,16 @@ def register_catalog_endpoints(app: FastAPI):
             try:
                 products = catalog.get_all_products()
                 return {
-                    "export_version": "3.41.0",
+                    "export_version": "3.42.0",
                     "exported_at": datetime.utcnow().isoformat(),
                     "source": "database_catalog_wiring",
+                    "migration_016_compliant": True,
                     "product_count": len(products),
+                    "by_line": {
+                        "MAXimo²": len([p for p in products if p.os_environment == "MAXimo²"]),
+                        "MAXima²": len([p for p in products if p.os_environment == "MAXima²"])
+                        # REMOVED: Universal (migration 016)
+                    },
                     "by_tier": {
                         "TIER_1": len([p for p in products if p.evidence_tier == "TIER_1"]),
                         "TIER_2": len([p for p in products if p.evidence_tier == "TIER_2"]),
@@ -599,12 +661,15 @@ def register_catalog_endpoints(app: FastAPI):
                             "product_line": p.product_line,
                             "category": p.category,
                             "evidence_tier": p.evidence_tier,
-                            "sex_target": p.sex_target,  # Derived convenience field
+                            "sex_target": p.sex_target,  # DEPRECATED: use os_environment
                             "base_price": p.price_usd,
                             "governance_status": p.governance_status
                         }
                         for p in products
-                    ]
+                    ],
+                    "_deprecation_notice": {
+                        "sex_target": "Use os_environment instead. Removal in v4.0.0"
+                    }
                 }
             except Exception:
                 pass
