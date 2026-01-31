@@ -296,10 +296,13 @@ def run_migration_016() -> Dict[str, Any]:
         results.append("Created indexes on os_environment")
         
         # ===========================================
-        # STEP 10: UPDATE VIEW
+        # STEP 10: UPDATE VIEW (DROP + CREATE to handle column changes)
         # ===========================================
         cur.execute("""
-            CREATE OR REPLACE VIEW v_active_catalog AS
+            DROP VIEW IF EXISTS v_active_catalog
+        """)
+        cur.execute("""
+            CREATE VIEW v_active_catalog AS
             SELECT 
                 gx_catalog_id,
                 product_name,
@@ -321,7 +324,7 @@ def run_migration_016() -> Dict[str, Any]:
                 END,
                 product_name
         """)
-        results.append("Updated v_active_catalog view")
+        results.append("Recreated v_active_catalog view with os_environment")
         
         # ===========================================
         # STEP 11: POST-MIGRATION AUDIT
