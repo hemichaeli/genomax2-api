@@ -14,7 +14,7 @@ Pipeline Flow:
 
 "Blood does not negotiate" - safety constraints are absolute.
 
-Version: 1.1.2 - Expose os_environment in module responses
+Version: 1.1.3 - Remove UNIVERSAL filtering (migration 016 compliance)
 """
 
 import os
@@ -32,7 +32,7 @@ from asyncpg import Pool
 # VERSION CONSTANT
 # =============================================================================
 
-BRAIN_ORCHESTRATOR_VERSION = "1.1.2"
+BRAIN_ORCHESTRATOR_VERSION = "1.1.3"
 
 # =============================================================================
 # CONFIGURATION
@@ -386,14 +386,16 @@ async def load_catalog_from_wiring() -> List[Dict[str, Any]]:
                 target_biomarkers.update(INGREDIENT_BIOMARKER_MAP[ingredient_lower])
         
         # Map product_line to gender eligibility
-        product_line = product.get("product_line", "Universal")
-        sex_target = product.get("sex_target", "unisex")
+        # NOTE: Migration 016 eliminated UNIVERSAL - all products are MAXimo² or MAXima²
+        product_line = product.get("product_line", "")
+        os_environment = product.get("os_environment", "")
+        sex_target = product.get("sex_target", "")
         
         modules.append({
             "id": product.get("sku", f"module_{idx}"),
             "sku": product.get("sku", ""),
             "name": product.get("name", "Unknown"),
-            "os_environment": product.get("os_environment", ""),  # Source of truth
+            "os_environment": os_environment,  # Source of truth
             "category": product.get("category", "General"),
             "subcategory": "",  # Not available in wiring
             "description": "",  # Not available in wiring
@@ -426,6 +428,9 @@ async def load_supplement_catalog(
     - Category/subcategory
     - Target biomarkers (derived from ingredients)
     - Eligibility criteria
+    
+    NOTE (v1.1.3): Migration 016 eliminated UNIVERSAL/UNISEX products.
+    All products are now explicitly MAXimo² (male) or MAXima² (female).
     """
     # Load from catalog wiring
     all_modules = await load_catalog_from_wiring()
@@ -435,18 +440,25 @@ async def load_supplement_catalog(
     eligible_modules = []
     
     for module in all_modules:
-        # Check product line eligibility
-        product_line = module.get("product_line", "Universal").lower()
-        sex_target = module.get("sex_target", "unisex").lower()
+        # Check os_environment (canonical) and fallback to product_line/sex_target
+        os_env = module.get("os_environment", "").lower()
+        product_line = module.get("product_line", "").lower()
+        sex_target = module.get("sex_target", "").lower()
         
-        # Universal products are always eligible
-        if product_line == "universal" or sex_target == "unisex":
-            is_eligible = True
-        # Gender-specific products
-        elif gender_lower == "male" and (product_line == "maximo²" or sex_target == "male"):
-            is_eligible = True
-        elif gender_lower == "female" and (product_line == "maxima²" or sex_target == "female"):
-            is_eligible = True
+        # Determine eligibility based on canonical os_environment
+        # Migration 016: No more UNIVERSAL - strict gender matching only
+        if gender_lower == "male":
+            is_eligible = (
+                os_env == "maximo²" or 
+                product_line == "maximo²" or 
+                sex_target == "male"
+            )
+        elif gender_lower == "female":
+            is_eligible = (
+                os_env == "maxima²" or 
+                product_line == "maxima²" or 
+                sex_target == "female"
+            )
         else:
             is_eligible = False
         
@@ -1293,6 +1305,9 @@ class BrainOrchestrator:
             
         Returns:
             List of available modules
+        
+        NOTE (v1.1.3): Migration 016 eliminated UNIVERSAL/UNISEX products.
+        All products are now explicitly MAXimo² (male) or MAXima² (female).
         """
         modules = await load_catalog_from_wiring()
         
@@ -1301,15 +1316,17 @@ class BrainOrchestrator:
             gender = sex.value if isinstance(sex, SexType) else sex
             filtered = []
             for m in modules:
-                product_line = m.get("product_line", "Universal").lower()
-                sex_target = m.get("sex_target", "unisex").lower()
+                os_env = m.get("os_environment", "").lower()
+                product_line = m.get("product_line", "").lower()
+                sex_target = m.get("sex_target", "").lower()
                 
-                if product_line == "universal" or sex_target == "unisex":
-                    filtered.append(m)
-                elif gender == "male" and (product_line == "maximo²" or sex_target == "male"):
-                    filtered.append(m)
-                elif gender == "female" and (product_line == "maxima²" or sex_target == "female"):
-                    filtered.append(m)
+                # Strict gender matching - no UNIVERSAL fallback
+                if gender == "male":
+                    if os_env == "maximo²" or product_line == "maximo²" or sex_target == "male":
+                        filtered.append(m)
+                elif gender == "female":
+                    if os_env == "maxima²" or product_line == "maxima²" or sex_target == "female":
+                        filtered.append(m)
             modules = filtered
         
         # Filter by category
@@ -1345,15 +1362,16 @@ INTEGRATION WITH BLOODWORK ENGINE:
 6. Enforces safety constraints (blocked ingredients)
 7. Returns ranked recommendations
 
-CATALOG LOADING (v1.1.2):
+CATALOG LOADING (v1.1.3):
 - Uses /api/v1/catalog/wiring/products endpoint
 - Maps ingredient_tags to target_biomarkers via INGREDIENT_BIOMARKER_MAP
 - Caches catalog in memory for 5 minutes (CATALOG_CACHE_TTL_SECONDS)
 - Falls back to stale cache on errors
 - NOW INCLUDES os_environment in module responses
+- UNIVERSAL/UNISEX filtering REMOVED per migration 016
 
 EXPORTS FOR brain_routes.py:
-- BRAIN_ORCHESTRATOR_VERSION: Version constant "1.1.2"
+- BRAIN_ORCHESTRATOR_VERSION: Version constant "1.1.3"
 - SexType: Enum with MALE, FEMALE
 - ConstraintType: Enum with BLOCK, LIMIT, CAUTION, BOOST
 - BrainInput: Pydantic model for pipeline input
@@ -1387,6 +1405,13 @@ SCORING ALGORITHM:
 - Lifecycle bonus: +15-25 for recommended/required
 - Confidence multiplier: 0.5 + (confidence * 0.5)
 - Caution penalty: 0.8x final score
+
+CHANGELOG v1.1.3:
+- REMOVED "universal" and "unisex" eligibility checks from load_supplement_catalog()
+- REMOVED "universal" and "unisex" eligibility checks from get_available_modules()
+- All products now require explicit MAXimo² or MAXima² assignment
+- Aligns with migration 016_os_environment_normalization
+- Part of field normalization audit Phase 2
 
 CHANGELOG v1.1.2:
 - Added os_environment to module responses in load_catalog_from_wiring()
