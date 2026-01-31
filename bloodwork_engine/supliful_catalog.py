@@ -6,6 +6,14 @@ Integrates with Supliful's 185-product inventory for supplement fulfillment.
 Implements append-only governance for catalog entries (immutable once created).
 
 Core Principle: "Blood does not negotiate" - routing constraints override product selection.
+
+Version: 1.1.0
+
+CHANGELOG v1.1.0:
+- Removed ProductLine.UNIVERSAL (eliminated by migration 016)
+- Split former universal products into MAXimo²/MAXima² versions
+- Updated get_products_for_sex() to only return gender-specific products
+- All products must now be explicitly MAXimo² or MAXima²
 """
 
 from dataclasses import dataclass, field
@@ -17,10 +25,15 @@ import hashlib
 
 
 class ProductLine(Enum):
-    """Gender-optimized product lines"""
+    """
+    Gender-optimized product lines (canonical os_environment values).
+    
+    Post-migration 016: UNIVERSAL no longer exists. All products must be
+    explicitly assigned to MAXimo² (male) or MAXima² (female). Former universal
+    products were split into separate SKUs with -M/-F suffixes.
+    """
     MAXIMO2 = "MAXimo²"  # Male biology
     MAXIMA2 = "MAXima²"  # Female biology
-    UNIVERSAL = "Universal"  # Gender-neutral
 
 
 class ProductCategory(Enum):
@@ -482,6 +495,37 @@ class SuplifulCatalogManager:
                 requires_biomarkers=["cortisol_am", "dhea_s"],
                 recommended_for_flags=["FLAG_CORTISOL_HIGH", "FLAG_ADRENAL_SUPPORT"]
             ),
+            # MAXimo² split from former Universal products
+            SuplifulProduct(
+                sku="GMAX-M-PROBIOTIC",
+                supliful_id="SUP-PROBIOTIC-M",
+                name="MAXimo² Probiotic 50B",
+                product_line=ProductLine.MAXIMO2,
+                category=ProductCategory.PROBIOTIC,
+                ingredients=[],  # Probiotic strains not in ingredient DB
+                serving_size="1 capsule",
+                servings_per_container=30,
+                price_usd=34.99,
+                wholesale_price_usd=17.50,
+                description="50 billion CFU multi-strain probiotic for male gut health",
+                requires_biomarkers=[],
+                recommended_for_flags=[]
+            ),
+            SuplifulProduct(
+                sku="GMAX-M-COQ10",
+                supliful_id="SUP-COQ10-200-M",
+                name="MAXimo² CoQ10 Ubiquinol 200mg",
+                product_line=ProductLine.MAXIMO2,
+                category=ProductCategory.CARDIOVASCULAR,
+                ingredients=[ProductIngredient("coq10_ubiquinol", 200, "mg")],
+                serving_size="1 softgel",
+                servings_per_container=60,
+                price_usd=44.99,
+                wholesale_price_usd=22.50,
+                description="Active ubiquinol form of CoQ10 for energy and heart health",
+                requires_biomarkers=["ldl_cholesterol"],
+                recommended_for_flags=["FLAG_CARDIOVASCULAR_SUPPORT"]
+            ),
             
             # === MAXIMA² LINE (Female Biology) ===
             SuplifulProduct(
@@ -645,28 +689,27 @@ class SuplifulCatalogManager:
                 requires_biomarkers=["cortisol_am", "dhea_s"],
                 recommended_for_flags=["FLAG_CORTISOL_HIGH", "FLAG_ADRENAL_SUPPORT"]
             ),
-            
-            # === UNIVERSAL LINE ===
+            # MAXima² split from former Universal products
             SuplifulProduct(
-                sku="GMAX-U-PROBIOTIC",
-                supliful_id="SUP-PROBIOTIC",
-                name="GenoMAX² Probiotic 50B",
-                product_line=ProductLine.UNIVERSAL,
+                sku="GMAX-F-PROBIOTIC",
+                supliful_id="SUP-PROBIOTIC-F",
+                name="MAXima² Probiotic 50B",
+                product_line=ProductLine.MAXIMA2,
                 category=ProductCategory.PROBIOTIC,
                 ingredients=[],  # Probiotic strains not in ingredient DB
                 serving_size="1 capsule",
                 servings_per_container=30,
                 price_usd=34.99,
                 wholesale_price_usd=17.50,
-                description="50 billion CFU multi-strain probiotic",
+                description="50 billion CFU multi-strain probiotic for female gut health",
                 requires_biomarkers=[],
                 recommended_for_flags=[]
             ),
             SuplifulProduct(
-                sku="GMAX-U-COQ10",
-                supliful_id="SUP-COQ10-200",
-                name="GenoMAX² CoQ10 Ubiquinol 200mg",
-                product_line=ProductLine.UNIVERSAL,
+                sku="GMAX-F-COQ10",
+                supliful_id="SUP-COQ10-200-F",
+                name="MAXima² CoQ10 Ubiquinol 200mg",
+                product_line=ProductLine.MAXIMA2,
                 category=ProductCategory.CARDIOVASCULAR,
                 ingredients=[ProductIngredient("coq10_ubiquinol", 200, "mg")],
                 serving_size="1 softgel",
@@ -722,17 +765,25 @@ class SuplifulCatalogManager:
         return self.products.get(sku)
     
     def get_products_for_sex(self, sex: str) -> List[SuplifulProduct]:
-        """Get products appropriate for given sex"""
-        if sex.lower() == "male":
-            lines = [ProductLine.MAXIMO2, ProductLine.UNIVERSAL]
-        else:
-            lines = [ProductLine.MAXIMA2, ProductLine.UNIVERSAL]
+        """
+        Get products appropriate for given sex.
         
-        products = []
-        for line in lines:
-            skus = self._by_product_line.get(line, [])
-            products.extend([self.products[sku] for sku in skus])
-        return products
+        Post-migration 016: Returns only the appropriate gender-specific product line.
+        No UNIVERSAL products exist.
+        
+        Args:
+            sex: "male" or "female"
+            
+        Returns:
+            List of products for the specified sex
+        """
+        if sex.lower() == "male":
+            line = ProductLine.MAXIMO2
+        else:
+            line = ProductLine.MAXIMA2
+        
+        skus = self._by_product_line.get(line, [])
+        return [self.products[sku] for sku in skus]
     
     def get_products_for_flag(self, flag: str) -> List[SuplifulProduct]:
         """Get products recommended for a specific routing flag"""
@@ -857,7 +908,7 @@ class SuplifulCatalogManager:
     def to_dict(self) -> Dict[str, Any]:
         """Export catalog as dictionary"""
         return {
-            "version": "1.0",
+            "version": "1.1.0",
             "generated_at": datetime.utcnow().isoformat(),
             "stats": self.get_catalog_stats(),
             "products": [
