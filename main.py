@@ -1,6 +1,14 @@
 """
-GenoMAX2 API Server Entry Point v3.40.0
-Catalog Consolidation - Single Database Source
+GenoMAX2 API Server Entry Point v3.41.0
+Catalog Cleanup Admin - Universal Products & Brand Prefix Removal
+
+v3.41.0:
+- NEW: Catalog Cleanup Admin (app/routers/catalog_cleanup_admin.py)
+- GET /api/v1/admin/catalog-cleanup/preview - Preview cleanup changes
+- POST /api/v1/admin/catalog-cleanup/execute?confirm=true - Execute cleanup
+- GET /api/v1/admin/catalog-cleanup/health - Health check
+- Deletes Universal products (not a valid product line)
+- Strips MAXima²/MAXimo²/GenoMAX² prefixes from product names
 
 v3.40.0:
 - BREAKING: /api/v1/catalog/products now returns 151 products (was 22)
@@ -243,6 +251,19 @@ try:
     print("Supplier Catalog Admin endpoints registered successfully")
 except Exception as e:
     print(f"ERROR loading Supplier Catalog Admin: {type(e).__name__}: {e}")
+    import traceback
+    traceback.print_exc()
+
+# ===== CATALOG CLEANUP ADMIN (v3.41.0) =====
+try:
+    from app.routers.catalog_cleanup_admin import router as catalog_cleanup_router
+    app.include_router(catalog_cleanup_router)
+    print("Catalog Cleanup Admin endpoints registered successfully")
+    print("  - GET /api/v1/admin/catalog-cleanup/preview")
+    print("  - POST /api/v1/admin/catalog-cleanup/execute?confirm=true")
+    print("  - GET /api/v1/admin/catalog-cleanup/health")
+except Exception as e:
+    print(f"ERROR loading Catalog Cleanup Admin: {type(e).__name__}: {e}")
     import traceback
     traceback.print_exc()
 
