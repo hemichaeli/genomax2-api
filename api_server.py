@@ -1,7 +1,16 @@
 """
 GenoMAX² API Server
 Gender-Optimized Biological Operating System
-Version 3.40.0 - Catalog Consolidation
+Version 3.41.0 - os_environment Catalog Support
+
+v3.41.0:
+- Catalog endpoints now include os_environment field in responses
+- GET /api/v1/catalog/wiring/products returns os_environment per product
+- GET /api/v1/catalog/wiring/check/{sku} includes os_environment in details
+- product_line derived from os_environment (canonical source after migration 016)
+- Split unisex products correctly show MAXimo²/MAXima² instead of Universal
+- 154 products total (78 MAXimo², 76 MAXima², 0 Universal)
+- Migration 016 applied: os_environment column NOT NULL with CHECK constraint
 
 v3.40.0:
 - BREAKING: All catalog endpoints now use database CatalogWiring (151 products)
@@ -162,7 +171,7 @@ from app.brain.bloodwork_handoff import (
     BloodworkHandoffError
 )
 
-API_VERSION = "3.40.0"
+API_VERSION = "3.41.0"
 
 # Stable UUID for anonymous users - used when user_id is not provided
 # This allows protocol_runs to comply with NOT NULL constraint while tracking anonymous sessions
@@ -771,7 +780,7 @@ def version():
         "resolver_version": "1.0.0",
         "bloodwork_engine_version": "2.0.0",
         "constraint_translator_version": "1.0.0",
-        "catalog_version": "catalog_wiring_v3.40.0",
+        "catalog_version": "catalog_wiring_v3.41.0",
         "routing_version": "routing_layer_v1",
         "matching_version": "matching_layer_v1",
         "explainability_version": "explainability_v1",
@@ -782,7 +791,7 @@ def version():
         "override_version": "excel_override_v1",
         "launch_v1_version": "launch_enforcement_v1",
         "contract_version": CONTRACT_VERSION,
-        "features": ["orchestrate", "orchestrate_v2", "orchestrate_v2_bloodwork_input", "compose", "route", "resolve", "supplier-gating", "catalog-governance", "catalog-wiring-151-products", "routing-layer", "matching-layer", "explainability", "painpoints", "lifestyle-schema", "telemetry", "telemetry-instrumented", "intake-system", "safety-gate", "qa-audit", "excel-override", "launch-v1-enforcement", "bloodwork-engine-v2", "constraint-translator", "brain-pipeline"]
+        "features": ["orchestrate", "orchestrate_v2", "orchestrate_v2_bloodwork_input", "compose", "route", "resolve", "supplier-gating", "catalog-governance", "catalog-wiring-154-products", "os_environment-normalization", "routing-layer", "matching-layer", "explainability", "painpoints", "lifestyle-schema", "telemetry", "telemetry-instrumented", "intake-system", "safety-gate", "qa-audit", "excel-override", "launch-v1-enforcement", "bloodwork-engine-v2", "constraint-translator", "brain-pipeline"]
     }
 
 
