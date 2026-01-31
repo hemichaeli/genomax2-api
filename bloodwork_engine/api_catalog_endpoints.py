@@ -1,8 +1,10 @@
 """
-GenoMAX² Catalog API Endpoints (v3.40.0 - Consolidated)
-=======================================================
+GenoMAX² Catalog API Endpoints (v3.41.0 - os_environment fix)
+=============================================================
 
 CHANGE LOG:
+- v3.41.0: Added os_environment to /catalog/products and /catalog/export responses
+           os_environment is the canonical source of truth for product line
 - v3.40.0: Migrated product endpoints from hardcoded SuplifulCatalogManager (22 products) 
            to database-backed CatalogWiring (151 products)
 - Ingredient endpoints still use legacy manager (pending migration)
@@ -75,7 +77,7 @@ def register_catalog_endpoints(app: FastAPI):
                 stats = catalog._get_stats()
                 return {
                     "status": "operational",
-                    "version": "3.40.0",
+                    "version": "3.41.0",
                     "source": "database_catalog_wiring",
                     "catalog": {
                         "total_products": stats.get("total_products", 0),
@@ -168,10 +170,11 @@ def register_catalog_endpoints(app: FastAPI):
                         {
                             "sku": p.sku,
                             "name": p.name,
+                            "os_environment": p.os_environment,  # CANONICAL source of truth
                             "product_line": p.product_line,
                             "category": p.category,
                             "evidence_tier": p.evidence_tier,
-                            "sex_target": p.sex_target,
+                            "sex_target": p.sex_target,  # Derived convenience field
                             "price_usd": p.price_usd,
                             "active": p.governance_status == "ACTIVE"
                         }
@@ -239,10 +242,11 @@ def register_catalog_endpoints(app: FastAPI):
                         "sku": product.sku,
                         "name": product.name,
                         "product_name": product.name,
+                        "os_environment": product.os_environment,  # CANONICAL source of truth
                         "product_line": product.product_line,
                         "category": product.category,
                         "evidence_tier": product.evidence_tier,
-                        "sex_target": product.sex_target,
+                        "sex_target": product.sex_target,  # Derived convenience field
                         "price_usd": product.price_usd,
                         "governance_status": product.governance_status,
                         "source": "database_catalog_wiring"
@@ -413,6 +417,7 @@ def register_catalog_endpoints(app: FastAPI):
                         {
                             "sku": p.sku,
                             "name": p.name,
+                            "os_environment": p.os_environment,  # CANONICAL
                             "product_line": p.product_line,
                             "category": p.category,
                             "evidence_tier": p.evidence_tier,
@@ -577,7 +582,7 @@ def register_catalog_endpoints(app: FastAPI):
             try:
                 products = catalog.get_all_products()
                 return {
-                    "export_version": "3.40.0",
+                    "export_version": "3.41.0",
                     "exported_at": datetime.utcnow().isoformat(),
                     "source": "database_catalog_wiring",
                     "product_count": len(products),
@@ -590,9 +595,11 @@ def register_catalog_endpoints(app: FastAPI):
                         {
                             "sku": p.sku,
                             "product_name": p.name,
+                            "os_environment": p.os_environment,  # CANONICAL source of truth
+                            "product_line": p.product_line,
                             "category": p.category,
                             "evidence_tier": p.evidence_tier,
-                            "sex_target": p.sex_target,
+                            "sex_target": p.sex_target,  # Derived convenience field
                             "base_price": p.price_usd,
                             "governance_status": p.governance_status
                         }
