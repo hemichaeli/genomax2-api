@@ -32,7 +32,7 @@ def get_db():
 def preview_cleanup() -> Dict[str, Any]:
     """
     Preview cleanup operations (NO changes made):
-    1. Universal products to delete
+    1. Universal products to delete (sex_target = 'universal' if any exist)
     2. Product names with brand prefixes to strip
     """
     conn = get_db()
@@ -42,35 +42,54 @@ def preview_cleanup() -> Dict[str, Any]:
     try:
         cur = conn.cursor()
         
-        # 1. Find Universal products
+        # 1. Find Universal products (sex_target column in catalog_products)
+        # Note: Valid values are 'male', 'female', 'unisex' - 'universal' would be invalid
         cur.execute("""
-            SELECT sku, product_name, product_line, os_environment
-            FROM os_modules_v3_1
-            WHERE product_line = 'Universal'
-            ORDER BY sku
+            SELECT gx_catalog_id, product_name, sex_target, evidence_tier, governance_status
+            FROM catalog_products
+            WHERE LOWER(sex_target) = 'universal'
+            ORDER BY gx_catalog_id
         """)
         universal_products = [dict(r) for r in cur.fetchall()]
         
         # 2. Find products with brand prefixes
         cur.execute("""
-            SELECT sku, product_name, product_line,
+            SELECT gx_catalog_id, product_name, sex_target, evidence_tier,
                    CASE 
                        WHEN product_name LIKE 'MAXima² %' THEN SUBSTRING(product_name FROM 9)
                        WHEN product_name LIKE 'MAXimo² %' THEN SUBSTRING(product_name FROM 9)
                        WHEN product_name LIKE 'GenoMAX² %' THEN SUBSTRING(product_name FROM 10)
                        ELSE product_name
                    END as cleaned_name
-            FROM os_modules_v3_1
+            FROM catalog_products
             WHERE product_name LIKE 'MAXima² %'
                OR product_name LIKE 'MAXimo² %'
                OR product_name LIKE 'GenoMAX² %'
-            ORDER BY sku
+            ORDER BY gx_catalog_id
         """)
         prefixed_products = [dict(r) for r in cur.fetchall()]
         
         # Get total counts
-        cur.execute("SELECT COUNT(*) as count FROM os_modules_v3_1")
+        cur.execute("SELECT COUNT(*) as count FROM catalog_products")
         total_products = cur.fetchone()['count']
+        
+        # Get breakdown by sex_target
+        cur.execute("""
+            SELECT sex_target, COUNT(*) as count 
+            FROM catalog_products 
+            GROUP BY sex_target 
+            ORDER BY sex_target
+        """)
+        sex_target_breakdown = {r['sex_target']: r['count'] for r in cur.fetchall()}
+        
+        # Get breakdown by evidence_tier
+        cur.execute("""
+            SELECT evidence_tier, COUNT(*) as count 
+            FROM catalog_products 
+            GROUP BY evidence_tier 
+            ORDER BY evidence_tier
+        """)
+        tier_breakdown = {r['evidence_tier']: r['count'] for r in cur.fetchall()}
         
         cur.close()
         conn.close()
@@ -78,10 +97,16 @@ def preview_cleanup() -> Dict[str, Any]:
         return {
             "status": "preview",
             "timestamp": datetime.utcnow().isoformat() + "Z",
+            "table": "catalog_products",
             "total_products": total_products,
+            "breakdowns": {
+                "by_sex_target": sex_target_breakdown,
+                "by_evidence_tier": tier_breakdown
+            },
             "universal_products_to_delete": {
                 "count": len(universal_products),
-                "products": universal_products
+                "products": universal_products,
+                "note": "Valid sex_target values are 'male', 'female', 'unisex'"
             },
             "prefixed_products_to_clean": {
                 "count": len(prefixed_products),
@@ -89,7 +114,7 @@ def preview_cleanup() -> Dict[str, Any]:
                 "sample_transformations": [
                     {"before": p["product_name"], "after": p["cleaned_name"]}
                     for p in prefixed_products[:5]
-                ]
+                ] if prefixed_products else []
             }
         }
         
@@ -108,7 +133,7 @@ def execute_cleanup(
 ) -> Dict[str, Any]:
     """
     Execute cleanup operations:
-    1. Delete all Universal products (not a valid product_line)
+    1. Delete all Universal products (if any exist with invalid sex_target)
     2. Strip brand prefixes from all product names
     
     Requires confirm=true query parameter.
@@ -127,14 +152,14 @@ def execute_cleanup(
         cur = conn.cursor()
         
         # Get before counts
-        cur.execute("SELECT COUNT(*) as count FROM os_modules_v3_1")
+        cur.execute("SELECT COUNT(*) as count FROM catalog_products")
         total_before = cur.fetchone()['count']
         
-        cur.execute("SELECT COUNT(*) as count FROM os_modules_v3_1 WHERE product_line = 'Universal'")
+        cur.execute("SELECT COUNT(*) as count FROM catalog_products WHERE LOWER(sex_target) = 'universal'")
         universal_count = cur.fetchone()['count']
         
         cur.execute("""
-            SELECT COUNT(*) as count FROM os_modules_v3_1
+            SELECT COUNT(*) as count FROM catalog_products
             WHERE product_name LIKE 'MAXima² %'
                OR product_name LIKE 'MAXimo² %'
                OR product_name LIKE 'GenoMAX² %'
@@ -143,19 +168,19 @@ def execute_cleanup(
         
         # Store deleted products for audit
         cur.execute("""
-            SELECT sku, product_name, product_line
-            FROM os_modules_v3_1
-            WHERE product_line = 'Universal'
+            SELECT gx_catalog_id, product_name, sex_target, evidence_tier
+            FROM catalog_products
+            WHERE LOWER(sex_target) = 'universal'
         """)
         deleted_products = [dict(r) for r in cur.fetchall()]
         
-        # 1. DELETE Universal products
-        cur.execute("DELETE FROM os_modules_v3_1 WHERE product_line = 'Universal'")
+        # 1. DELETE Universal products (if any)
+        cur.execute("DELETE FROM catalog_products WHERE LOWER(sex_target) = 'universal'")
         deleted_count = cur.rowcount
         
         # 2. STRIP brand prefixes
         cur.execute("""
-            UPDATE os_modules_v3_1
+            UPDATE catalog_products
             SET product_name = CASE 
                     WHEN product_name LIKE 'MAXima² %' THEN SUBSTRING(product_name FROM 9)
                     WHEN product_name LIKE 'MAXimo² %' THEN SUBSTRING(product_name FROM 9)
@@ -170,12 +195,12 @@ def execute_cleanup(
         updated_count = cur.rowcount
         
         # Get after counts
-        cur.execute("SELECT COUNT(*) as count FROM os_modules_v3_1")
+        cur.execute("SELECT COUNT(*) as count FROM catalog_products")
         total_after = cur.fetchone()['count']
         
         # Verify no prefixes remain
         cur.execute("""
-            SELECT COUNT(*) as count FROM os_modules_v3_1
+            SELECT COUNT(*) as count FROM catalog_products
             WHERE product_name LIKE 'MAXima² %'
                OR product_name LIKE 'MAXimo² %'
                OR product_name LIKE 'GenoMAX² %'
@@ -189,10 +214,11 @@ def execute_cleanup(
         return {
             "status": "success",
             "timestamp": datetime.utcnow().isoformat() + "Z",
+            "table": "catalog_products",
             "operations": {
                 "universal_deletion": {
                     "products_deleted": deleted_count,
-                    "deleted_skus": [p["sku"] for p in deleted_products]
+                    "deleted_ids": [p["gx_catalog_id"] for p in deleted_products]
                 },
                 "prefix_stripping": {
                     "products_updated": updated_count,
@@ -226,6 +252,7 @@ def cleanup_health():
     return {
         "status": "ok",
         "module": "catalog_cleanup_admin",
-        "version": "v1",
+        "version": "v1.1",
+        "table": "catalog_products",
         "timestamp": datetime.utcnow().isoformat() + "Z"
     }
