@@ -1,6 +1,14 @@
 """
-GenoMAX2 API Server Entry Point v3.41.0
-Catalog Cleanup Admin - Universal Products & Brand Prefix Removal
+GenoMAX2 API Server Entry Point v3.42.0
+os_environment Normalization - Eliminates Universal
+
+v3.42.0:
+- NEW: os_environment Migration (app/migrations/os_environment_normalization.py)
+- POST /api/v1/migrations/run/016-os-environment - Execute normalization
+- GET /api/v1/migrations/status/016-os-environment - Check migration state
+- GET /api/v1/migrations/preview/016-os-environment - Preview changes
+- Eliminates Universal environment - only MAXimo² and MAXima²
+- Splits unisex products into two rows with -M/-F suffixes
 
 v3.41.0:
 - NEW: Catalog Cleanup Admin (app/routers/catalog_cleanup_admin.py)
@@ -230,6 +238,19 @@ try:
     print("  - GET /api/v1/migrations/status/consolidate-catalog")
 except Exception as e:
     print(f"ERROR loading Catalog Consolidation Migration: {type(e).__name__}: {e}")
+    import traceback
+    traceback.print_exc()
+
+# ===== OS_ENVIRONMENT NORMALIZATION MIGRATION (v3.42.0) =====
+try:
+    from app.migrations.os_environment_normalization import router as os_env_migration_router
+    app.include_router(os_env_migration_router)
+    print("os_environment Normalization Migration endpoints registered successfully")
+    print("  - POST /api/v1/migrations/run/016-os-environment")
+    print("  - GET /api/v1/migrations/status/016-os-environment")
+    print("  - GET /api/v1/migrations/preview/016-os-environment")
+except Exception as e:
+    print(f"ERROR loading os_environment Migration: {type(e).__name__}: {e}")
     import traceback
     traceback.print_exc()
 
