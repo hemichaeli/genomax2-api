@@ -341,31 +341,41 @@ def run_migration_016() -> Dict[str, Any]:
         results.append(f"POST-MIGRATION: {after_counts}")
         
         # ===========================================
-        # STEP 12: LOG TO GOVERNANCE STATS
+        # STEP 12: LOG TO GOVERNANCE STATS (if table exists)
         # ===========================================
-        cur.execute("""
-            INSERT INTO catalog_governance_stats (
-                total_products, 
-                tier1_count, 
-                tier2_count, 
-                tier3_count, 
-                active_count, 
-                blocked_count, 
-                pending_count, 
-                version
-            )
-            SELECT 
-                COUNT(*) as total_products,
-                COUNT(*) FILTER (WHERE evidence_tier = 'TIER_1') as tier1_count,
-                COUNT(*) FILTER (WHERE evidence_tier = 'TIER_2') as tier2_count,
-                COUNT(*) FILTER (WHERE evidence_tier = 'TIER_3') as tier3_count,
-                COUNT(*) FILTER (WHERE governance_status = 'ACTIVE') as active_count,
-                COUNT(*) FILTER (WHERE governance_status = 'BLOCKED') as blocked_count,
-                COUNT(*) FILTER (WHERE governance_status = 'PENDING') as pending_count,
-                'os_environment_v3.42.0' as version
-            FROM catalog_products
-        """)
-        results.append("Logged governance stats snapshot")
+        try:
+            cur.execute("""
+                SELECT 1 FROM information_schema.tables 
+                WHERE table_name = 'catalog_governance_stats'
+            """)
+            if cur.fetchone():
+                cur.execute("""
+                    INSERT INTO catalog_governance_stats (
+                        total_products, 
+                        tier1_count, 
+                        tier2_count, 
+                        tier3_count, 
+                        active_count, 
+                        blocked_count, 
+                        pending_count, 
+                        version
+                    )
+                    SELECT 
+                        COUNT(*) as total_products,
+                        COUNT(*) FILTER (WHERE evidence_tier = 'TIER_1') as tier1_count,
+                        COUNT(*) FILTER (WHERE evidence_tier = 'TIER_2') as tier2_count,
+                        COUNT(*) FILTER (WHERE evidence_tier = 'TIER_3') as tier3_count,
+                        COUNT(*) FILTER (WHERE governance_status = 'ACTIVE') as active_count,
+                        COUNT(*) FILTER (WHERE governance_status = 'BLOCKED') as blocked_count,
+                        COUNT(*) FILTER (WHERE governance_status = 'PENDING') as pending_count,
+                        'os_environment_v3.42.0' as version
+                    FROM catalog_products
+                """)
+                results.append("Logged governance stats snapshot")
+            else:
+                results.append("Skipped governance stats (table does not exist)")
+        except Exception as stats_error:
+            results.append(f"Skipped governance stats: {str(stats_error)}")
         
         conn.commit()
         cur.close()
