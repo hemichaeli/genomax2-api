@@ -10,8 +10,9 @@ Routes:
 - GET /api/v1/catalog/wiring/check/{sku} - Check if SKU is purchasable
 - POST /api/v1/catalog/wiring/filter - Filter SKU list
 - GET /api/v1/catalog/wiring/all-skus - List all purchasable SKUs
+- GET /api/v1/catalog/wiring/products - List all products with full details
 
-Version: catalog_wiring_v1
+Version: catalog_wiring_v1.1 (os_environment support)
 """
 
 from typing import Dict, Any, List
@@ -175,6 +176,7 @@ def check_sku(sku: str) -> Dict[str, Any]:
         result["product"] = {
             "name": product.name,
             "product_line": product.product_line,
+            "os_environment": product.os_environment,
             "category": product.category,
             "evidence_tier": product.evidence_tier,
             "price_usd": product.price_usd,
@@ -246,7 +248,7 @@ def list_all_skus() -> Dict[str, Any]:
             }
         )
     
-    # Group by product line
+    # Group by product line (uses os_environment internally)
     maximo_skus = sorted(catalog.filter_by_product_line("MAXimo²"))
     maxima_skus = sorted(catalog.filter_by_product_line("MAXima²"))
     universal_skus = sorted(catalog.filter_by_product_line("universal"))
@@ -291,7 +293,7 @@ def list_all_products() -> Dict[str, Any]:
     List all purchasable products with full details.
     
     Returns:
-        List of all available products with details
+        List of all available products with details including os_environment
         
     Raises:
         503: If catalog not loaded
@@ -312,8 +314,10 @@ def list_all_products() -> Dict[str, Any]:
     for product in catalog.get_all_products():
         products.append({
             "sku": product.sku,
+            "gx_catalog_id": product.sku,
             "name": product.name,
             "product_line": product.product_line,
+            "os_environment": product.os_environment,
             "category": product.category,
             "evidence_tier": product.evidence_tier,
             "price_usd": product.price_usd,
@@ -321,8 +325,8 @@ def list_all_products() -> Dict[str, Any]:
             "ingredient_tags": product.ingredient_tags,
         })
     
-    # Sort by tier then name
-    products.sort(key=lambda p: (p["evidence_tier"], p["name"]))
+    # Sort by os_environment then tier then name
+    products.sort(key=lambda p: (p["os_environment"], p["evidence_tier"], p["name"]))
     
     return {
         "total": len(products),
